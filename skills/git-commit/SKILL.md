@@ -22,19 +22,19 @@ Rules:
 ## Phase 2: Generate commit message
 
 1. Remember commit messages best practices
-1. Write a short subject line:
+2. Write a short subject line:
    - Up to 50 chars
    - Start subject with a capital letter, don’t end with a period
    - Use imperative mood (e.g. "Fix memory leak while scrolling widget")
-1. Leave a blank line between subject and body
-1. Only when needed (don’t force it for trivial changes), write a body:
+3. Leave a blank line between subject and body
+4. Only when needed (don’t force it for trivial changes), write a body:
    - Wrap lines at 72 chars
    - Focus on "what" and "why", not the "how"
      - Explain the motivation
      - Mention side effects, trade-offs, or alternatives considered
      - Reference relevant issue IDs / tickets at the bottom if known
-1. Check recent commit style for the repo: `git log -10 --oneline`
-1. Generate a message that adheres to the style in the repo while following best practices
+5. Check style of recent commits in the repo (tone, structure, capitalization, length, etc): `git log -10 --oneline`
+6. Generate a message that adheres to the style in the repo while following best practices
 
 Rules:
 
