@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 type DaemonToClientMessage =
   | { type: "registered"; windowNo: number }
   | { type: "pin"; code: string; expiresAt: number }
+  | { type: "paired"; chatId: number }
   | { type: "error"; error: string }
   | { type: "inject"; mode: "followUp" | "steer"; text: string }
   | { type: "abort" };
@@ -495,6 +496,13 @@ export default function (pi: ExtensionAPI) {
       stopAutoConnectLoop();
       if (state.lastCtx?.hasUI) {
         state.lastCtx.ui.setStatus("telegram", connectedStatusText(state.lastCtx, msg.windowNo));
+      }
+      return;
+    }
+
+    if (msg.type === "paired") {
+      if (state.lastCtx?.hasUI) {
+        state.lastCtx.ui.setWidget("telegram", undefined);
       }
       return;
     }

@@ -295,12 +295,24 @@ async function switchWindow(chatId, windowNo) {
   }
 }
 
-function sendToActiveWindow(msg) {
-  const w = getActiveWindow();
+function sendToWindow(windowId, msg) {
+  if (!windowId) return false;
+  const w = windows.get(windowId);
   if (!w) return false;
   const send = makeJsonlWriter(w.socket);
   send(msg);
   return true;
+}
+
+function broadcastToWindows(msg) {
+  for (const w of windows.values()) {
+    const send = makeJsonlWriter(w.socket);
+    send(msg);
+  }
+}
+
+function sendToActiveWindow(msg) {
+  return sendToWindow(chatState.activeWindowId, msg);
 }
 
 async function handleTelegramMessage(msg) {
@@ -339,6 +351,7 @@ async function handleTelegramMessage(msg) {
     }
 
     updateTypingIndicator();
+    broadcastToWindows({ type: "paired", chatId });
 
     await botSend(chatId, "Paired successfully. Use /windows to list windows.");
     return;
