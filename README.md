@@ -45,6 +45,7 @@ Skills and `AGENTS.md` are **symlinked** from this repo into each agent's config
 |-----------|---------|-------------|
 | `answer` | `/answer` | Extract and interactively answer agent questions |
 | `branch-term` | `/branch-term` | Open a new terminal on the current session's git branch |
+| `ghostty` | _automatic_ | Ghostty tab title and progress while the agent is working |
 | `loop` | `/loop` | Repeat a prompt until the agent signals success |
 | `review` | `/review` | Review PRs, branches, commits, or uncommitted changes |
 | `session-breakdown` | `/session-breakdown` | Usage stats and contribution-style calendar |
