@@ -27,7 +27,7 @@ const TODOIST_CONFIG_PATH = path.join(TODOIST_CONFIG_DIR, "config.json");
 const TODOIST_OUTBOX_DIR = ".pi/todoist";
 const TODOIST_OUTBOX_FILE = "outbox.jsonl";
 
-const PI_PROJECT_NAME = "Pi";
+const PI_PROJECT_NAME = "Pi 🤖";
 const PI_ACTIVE_LABEL = "pi:active";
 const WORKSPACE_CACHE_TTL_MS = 5 * 60 * 1000;
 const SYNC_INTERVAL_MS = 20 * 1000;
