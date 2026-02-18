@@ -7,24 +7,29 @@ set -euo pipefail
 #   - ~/.agents/skills                    (Agent Skills standard)
 #   - ~/.agents/AGENTS.md                 (shared instructions)
 #   - ~/.agents/pi/extensions             (Pi-specific extensions)
+#   - ~/.agents/pi/agent/sandbox.json     (Pi sandbox config)
 #
 # Targets:
 #   - Codex:  ~/.codex/skills + ~/.codex/AGENTS.md
 #   - Claude: ~/.claude/skills + ~/.claude/CLAUDE.md
-#   - Pi:     ~/.pi/agent/skills + ~/.pi/agent/AGENTS.md + ~/.pi/agent/extensions
+#   - Pi:     ~/.pi/agent/skills + ~/.pi/agent/AGENTS.md + ~/.pi/agent/extensions + ~/.pi/agent/sandbox.json
 
 AGENTS_SKILLS_DIR="${HOME}/.agents/skills"
 AGENTS_INSTRUCTIONS_FILE="${HOME}/.agents/AGENTS.md"
 AGENTS_PI_EXTENSIONS_DIR="${HOME}/.agents/pi/extensions"
+AGENTS_PI_AGENT_DIR="${HOME}/.agents/pi/agent"
+AGENTS_PI_SANDBOX_FILE="${AGENTS_PI_AGENT_DIR}/sandbox.json"
 
 CODEX_SKILLS_DIR="${HOME}/.codex/skills"
 CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
-PI_SKILLS_DIR="${HOME}/.pi/agent/skills"
-PI_EXTENSIONS_DIR="${HOME}/.pi/agent/extensions"
+PI_AGENT_DIR="${HOME}/.pi/agent"
+PI_SKILLS_DIR="${PI_AGENT_DIR}/skills"
+PI_EXTENSIONS_DIR="${PI_AGENT_DIR}/extensions"
+PI_SANDBOX_FILE="${PI_AGENT_DIR}/sandbox.json"
 
 CODEX_INSTRUCTIONS_FILE="${HOME}/.codex/AGENTS.md"
 CLAUDE_INSTRUCTIONS_FILE="${HOME}/.claude/CLAUDE.md"
-PI_INSTRUCTIONS_FILE="${HOME}/.pi/agent/AGENTS.md"
+PI_INSTRUCTIONS_FILE="${PI_AGENT_DIR}/AGENTS.md"
 
 DRY_RUN=0
 YES=0
@@ -49,6 +54,7 @@ Notes:
       - ~/.claude/CLAUDE.md
       - ~/.pi/agent/AGENTS.md
   - Pi extensions are synced from ~/.agents/pi/extensions to ~/.pi/agent/extensions.
+  - Pi sandbox config is symlinked from ~/.agents/pi/agent/sandbox.json to ~/.pi/agent/sandbox.json.
 EOF
 }
 
@@ -81,8 +87,10 @@ done
 mkdir -p \
   "${AGENTS_SKILLS_DIR}" \
   "${AGENTS_PI_EXTENSIONS_DIR}" \
+  "${AGENTS_PI_AGENT_DIR}" \
   "${CODEX_SKILLS_DIR}" \
   "${CLAUDE_SKILLS_DIR}" \
+  "${PI_AGENT_DIR}" \
   "${PI_SKILLS_DIR}" \
   "${PI_EXTENSIONS_DIR}"
 
@@ -131,7 +139,8 @@ plan_remove() {
     "${PI_EXTENSIONS_DIR}"/* | \
     "${CODEX_INSTRUCTIONS_FILE}" | \
     "${CLAUDE_INSTRUCTIONS_FILE}" | \
-    "${PI_INSTRUCTIONS_FILE}")
+    "${PI_INSTRUCTIONS_FILE}" | \
+    "${PI_SANDBOX_FILE}")
       plan+=("rmrf:${path}")
       ;;
     *)
@@ -200,6 +209,24 @@ if [[ -f "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
   done
 else
   echo "warn: ${AGENTS_INSTRUCTIONS_FILE} not found; skipping instruction sync" >&2
+fi
+
+# --- Pi sandbox config ---
+if [[ -f "${AGENTS_PI_SANDBOX_FILE}" ]]; then
+  if [[ -L "${PI_SANDBOX_FILE}" ]]; then
+    existing_target="$(readlink "${PI_SANDBOX_FILE}")"
+    if [[ "${existing_target}" != "${AGENTS_PI_SANDBOX_FILE}" ]]; then
+      plan_remove "${PI_SANDBOX_FILE}"
+      plan_symlink "${AGENTS_PI_SANDBOX_FILE}" "${PI_SANDBOX_FILE}"
+    fi
+  elif [[ -e "${PI_SANDBOX_FILE}" ]]; then
+    plan_remove "${PI_SANDBOX_FILE}"
+    plan_symlink "${AGENTS_PI_SANDBOX_FILE}" "${PI_SANDBOX_FILE}"
+  else
+    plan_symlink "${AGENTS_PI_SANDBOX_FILE}" "${PI_SANDBOX_FILE}"
+  fi
+else
+  echo "warn: ${AGENTS_PI_SANDBOX_FILE} not found; skipping Pi sandbox config sync" >&2
 fi
 
 # --- Pi extensions ---

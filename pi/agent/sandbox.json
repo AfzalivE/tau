@@ -1,0 +1,54 @@
+{
+  "network": {
+    "allowedDomains": [
+      "localhost",
+      "127.0.0.1",
+      "github.com",
+      "*.github.com",
+      "*.githubusercontent.com",
+      "npmjs.org",
+      "*.npmjs.org",
+      "registry.yarnpkg.com",
+      "pypi.org",
+      "*.pypi.org",
+      "*.pythonhosted.org",
+      "kagi.com",
+      "api.search.brave.com",
+      "sentry.io",
+      "*.sentry.io",
+      "datadoghq.com",
+      "*.datadoghq.com",
+      "datadoghq.eu",
+      "*.datadoghq.eu",
+      "anthropic.com",
+      "*.anthropic.com",
+      "openai.com",
+      "*.openai.com",
+      "chatgpt.com",
+      "*.chatgpt.com"
+    ],
+    "deniedDomains": [],
+    "allowLocalBinding": true,
+    "allowUnixSockets": [
+      "~/.gnupg",
+      "/private/tmp"
+    ]
+  },
+  "filesystem": {
+    "denyRead": [
+      "~/.aws"
+    ],
+    "allowWrite": [
+      ".",
+      "/tmp",
+      "~/.ssh",
+      "~/.gnupg"
+    ],
+    "denyWrite": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key"
+    ]
+  }
+}

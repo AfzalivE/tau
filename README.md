@@ -5,10 +5,11 @@ Reusable agent harness shared across Codex, Claude, and Pi. Everything lives her
 ## Layout
 
 ```
-AGENTS.md          Shared base instructions (symlinked into each agent folder)
-skills/            Skill source of truth (SKILL.md + optional scripts/assets)
-pi/extensions/     Pi-specific extensions
-bin/sync           Symlink everything into Codex, Claude, and Pi config dirs
+AGENTS.md              Shared base instructions (symlinked into each agent folder)
+skills/                Skill source of truth (SKILL.md + optional scripts/assets)
+pi/extensions/         Pi-specific extensions
+pi/agent/sandbox.json  Repo-managed Pi sandbox defaults
+bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
 ```
 
 ## Syncing
@@ -20,6 +21,7 @@ Skills and `AGENTS.md` are **symlinked** from this repo into each agent's config
 | Instructions | `~/.codex/AGENTS.md` | `~/.claude/CLAUDE.md` | `~/.pi/agent/AGENTS.md` |
 | Skills | `~/.codex/skills/` | `~/.claude/skills/` | `~/.pi/agent/skills/` |
 | Extensions | — | — | `~/.pi/agent/extensions/` |
+| Sandbox config | — | — | `~/.pi/agent/sandbox.json` |
 
 ```bash
 ~/.agents/bin/sync --prune
