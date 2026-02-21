@@ -23,125 +23,125 @@ let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 let completionTimer: ReturnType<typeof setTimeout> | undefined;
 
 function ghosttyWrite(seq: string): void {
-	try {
-		writeFileSync("/dev/tty", seq);
-	} catch {
-		// /dev/tty may be unavailable (e.g. subagent context)
-	}
+  try {
+    writeFileSync("/dev/tty", seq);
+  } catch {
+    // /dev/tty may be unavailable (e.g. subagent context)
+  }
 }
 
 function setProgress(state: number, value?: number): void {
-	const args = value !== undefined ? `${state};${value}` : `${state}`;
-	ghosttyWrite(`\x1b]9;4;${args}\x07`);
+  const args = value !== undefined ? `${state};${value}` : `${state}`;
+  ghosttyWrite(`\x1b]9;4;${args}\x07`);
 }
 
 function buildTitle(extra?: string, marker = "π"): string {
-	const segments: string[] = [marker, path.basename(process.cwd())];
-	if (sessionName) segments.push(sessionName);
-	if (extra) segments.push(extra);
-	return segments.join(" · ");
+  const segments: string[] = [marker, path.basename(process.cwd())];
+  if (sessionName) segments.push(sessionName);
+  if (extra) segments.push(extra);
+  return segments.join(" · ");
 }
 
 function clearSpinnerTimer(): void {
-	if (!spinnerTimer) return;
-	clearInterval(spinnerTimer);
-	spinnerTimer = undefined;
+  if (!spinnerTimer) return;
+  clearInterval(spinnerTimer);
+  spinnerTimer = undefined;
 }
 
 function clearCompletionTimer(): void {
-	if (!completionTimer) return;
-	clearTimeout(completionTimer);
-	completionTimer = undefined;
+  if (!completionTimer) return;
+  clearTimeout(completionTimer);
+  completionTimer = undefined;
 }
 
 function currentFrame(): string {
-	return STATUS_SPINNER_FRAMES[frameIndex % STATUS_SPINNER_FRAMES.length];
+  return STATUS_SPINNER_FRAMES[frameIndex % STATUS_SPINNER_FRAMES.length];
 }
 
 function renderWorkingTitle(ctx: ExtensionContext): void {
-	ctx.ui.setTitle(buildTitle(currentTool, currentFrame()));
+  ctx.ui.setTitle(buildTitle(currentTool, currentFrame()));
 }
 
 function startSpinner(ctx: ExtensionContext): void {
-	clearSpinnerTimer();
-	clearCompletionTimer();
+  clearSpinnerTimer();
+  clearCompletionTimer();
 
-	isWorking = true;
-	currentTool = undefined;
-	frameIndex = 0;
+  isWorking = true;
+  currentTool = undefined;
+  frameIndex = 0;
 
-	setProgress(3);
-	renderWorkingTitle(ctx);
+  setProgress(3);
+  renderWorkingTitle(ctx);
 
-	spinnerTimer = setInterval(() => {
-		frameIndex = (frameIndex + 1) % STATUS_SPINNER_FRAMES.length;
-		renderWorkingTitle(ctx);
-	}, STATUS_SPINNER_INTERVAL_MS);
+  spinnerTimer = setInterval(() => {
+    frameIndex = (frameIndex + 1) % STATUS_SPINNER_FRAMES.length;
+    renderWorkingTitle(ctx);
+  }, STATUS_SPINNER_INTERVAL_MS);
 }
 
 function stopSpinner(ctx: ExtensionContext): void {
-	isWorking = false;
-	currentTool = undefined;
-	clearSpinnerTimer();
+  isWorking = false;
+  currentTool = undefined;
+  clearSpinnerTimer();
 
-	setProgress(1, 100);
-	ctx.ui.setTitle(buildTitle());
+  setProgress(1, 100);
+  ctx.ui.setTitle(buildTitle());
 
-	clearCompletionTimer();
-	completionTimer = setTimeout(() => {
-		setProgress(0);
-		completionTimer = undefined;
-	}, COMPLETION_FLASH_MS);
+  clearCompletionTimer();
+  completionTimer = setTimeout(() => {
+    setProgress(0);
+    completionTimer = undefined;
+  }, COMPLETION_FLASH_MS);
 }
 
 function syncSessionTitle(ctx: ExtensionContext): void {
-	if (isWorking) {
-		renderWorkingTitle(ctx);
-		return;
-	}
-	ctx.ui.setTitle(buildTitle());
+  if (isWorking) {
+    renderWorkingTitle(ctx);
+    return;
+  }
+  ctx.ui.setTitle(buildTitle());
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("session_start", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		sessionName = pi.getSessionName();
-		syncSessionTitle(ctx);
-	});
+  pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    sessionName = pi.getSessionName();
+    syncSessionTitle(ctx);
+  });
 
-	pi.on("session_switch", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		sessionName = pi.getSessionName();
-		syncSessionTitle(ctx);
-	});
+  pi.on("session_switch", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    sessionName = pi.getSessionName();
+    syncSessionTitle(ctx);
+  });
 
-	pi.on("agent_start", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		startSpinner(ctx);
-	});
+  pi.on("agent_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    startSpinner(ctx);
+  });
 
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		stopSpinner(ctx);
-	});
+  pi.on("agent_end", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    stopSpinner(ctx);
+  });
 
-	pi.on("tool_execution_start", async (event, ctx) => {
-		currentTool = event.toolName;
-		if (!ctx.hasUI || !isWorking) return;
-		renderWorkingTitle(ctx);
-	});
+  pi.on("tool_execution_start", async (event, ctx) => {
+    currentTool = event.toolName;
+    if (!ctx.hasUI || !isWorking) return;
+    renderWorkingTitle(ctx);
+  });
 
-	pi.on("tool_execution_end", async (_event, ctx) => {
-		currentTool = undefined;
-		if (!ctx.hasUI || !isWorking) return;
-		renderWorkingTitle(ctx);
-	});
+  pi.on("tool_execution_end", async (_event, ctx) => {
+    currentTool = undefined;
+    if (!ctx.hasUI || !isWorking) return;
+    renderWorkingTitle(ctx);
+  });
 
-	pi.on("session_shutdown", async (_event, _ctx) => {
-		clearSpinnerTimer();
-		clearCompletionTimer();
-		isWorking = false;
-		currentTool = undefined;
-		setProgress(0);
-	});
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    clearSpinnerTimer();
+    clearCompletionTimer();
+    isWorking = false;
+    currentTool = undefined;
+    setProgress(0);
+  });
 }
