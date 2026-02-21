@@ -236,7 +236,10 @@ class QnAComponent implements Component {
       const a = this.answers[i]?.trim() || "(no answer)";
       parts.push(`Q: ${q.question}`);
       if (q.context) {
-        parts.push(`> ${q.context}`);
+        for (const line of q.context.split("\n")) {
+          parts.push(`> ${line}`);
+        }
+        parts.push("");
       }
       parts.push(`A: ${a}`);
       parts.push("");
