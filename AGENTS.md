@@ -15,7 +15,7 @@
 - Organizing code: Follow the step-down rule. Keep high-level behavior at the top and details below. In classes: constructor, then public API methods, then private helpers. Prefer top-down call flow when practical.
 - Editing code: No breadcrumbs. If you delete, move, or rename code, do not leave a comment in the old place.
 - Fixing code: Reason from first principles, find the root cause of an issue, and fix it. Don't apply band-aids on top.
-- Cleaning up: Clean up unused code ruthlessly. If a function no longer needs a parameter or a helper becomes unused, delete and update callers instead of letting junk linger.
+- Cleaning up: Clean up unused code ruthlessly. If a function no longer needs a parameter or a helper becomes unused, delete and update callers instead of letting junk linger. Never implement backward compatibility unless explicitly asked.
 
 ## Collaboration
 
