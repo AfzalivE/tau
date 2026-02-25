@@ -31,7 +31,9 @@
       "*.openai.com",
       "chatgpt.com",
       "*.chatgpt.com",
-      "*.googleapis.com"
+      "*.googleapis.com",
+      "*.todoist.com",
+      "*.twist.com"
     ],
     "deniedDomains": [],
     "allowLocalBinding": true,
