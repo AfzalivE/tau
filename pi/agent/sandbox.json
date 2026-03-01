@@ -38,12 +38,10 @@
     "deniedDomains": [],
     "allowLocalBinding": true,
     "allowUnixSockets": [
-      "/tmp",
-      "/private/tmp",
       "~/.gnupg",
-      "~/.orbstack/run/docker.sock",
-      "/var/run/docker.sock"
-    ]
+      "~/.orbstack/run/docker.sock"
+    ],
+    "allowAllUnixSockets": false
   },
   "filesystem": {
     "denyRead": [
@@ -53,7 +51,6 @@
       ".",
       "/tmp",
       "/private/tmp",
-      "~/.ssh",
       "~/.gnupg",
       "~/.cache",
       "~/.docker",
@@ -63,7 +60,8 @@
       ".env",
       ".env.*",
       "*.pem",
-      "*.key"
+      "*.key",
+      "~/.ssh"
     ]
   }
 }
