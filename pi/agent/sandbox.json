@@ -37,15 +37,24 @@
     ],
     "deniedDomains": [],
     "allowLocalBinding": true,
+    "allowAllUnixSockets": false,
     "allowUnixSockets": [
+      "/tmp",
+      "/private/tmp",
       "~/.gnupg",
       "~/.orbstack/run/docker.sock"
-    ],
-    "allowAllUnixSockets": false
+    ]
   },
   "filesystem": {
     "denyRead": [
       "~/.aws"
+    ],
+    "denyWrite": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "~/.ssh"
     ],
     "allowWrite": [
       ".",
@@ -55,13 +64,6 @@
       "~/.cache",
       "~/.docker",
       "~/.npm"
-    ],
-    "denyWrite": [
-      ".env",
-      ".env.*",
-      "*.pem",
-      "*.key",
-      "~/.ssh"
     ]
   }
 }
