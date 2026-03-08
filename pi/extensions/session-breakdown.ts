@@ -22,7 +22,6 @@ import { BorderedLoader } from "@mariozechner/pi-coding-agent";
 import {
   Key,
   matchesKey,
-  sliceByColumn,
   type Component,
   type TUI,
   truncateToWidth,
@@ -707,17 +706,6 @@ function renderLegendItems(modelColors: Map<ModelKey, RGB>, orderedModels: Model
   }
   items.push(`${ansiFg(otherColor, "█")} other`);
   return items;
-}
-
-function fitRight(text: string, width: number): string {
-  if (width <= 0) return "";
-  let w = visibleWidth(text);
-  let t = text;
-  if (w > width) {
-    t = sliceByColumn(t, w - width, width, true);
-    w = visibleWidth(t);
-  }
-  return " ".repeat(Math.max(0, width - w)) + t;
 }
 
 function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): string[] {
