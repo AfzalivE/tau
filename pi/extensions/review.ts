@@ -95,7 +95,7 @@ type FocusTask = {
 	prompt: string;
 };
 
-type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "model_not_found" | "other";
+type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "other";
 
 type FocusTaskResult = {
 	focus: FocusName;
@@ -1147,8 +1147,9 @@ function classifyFocusError(errorText: string): { errorKind: FocusTaskErrorKind;
 		return { errorKind: "missing_api_key", missingApiProvider: apiKeyMatch[1] };
 	}
 
-	if (/No models match pattern/i.test(errorText)) {
-		return { errorKind: "model_not_found" };
+	const authFailedMatch = errorText.match(/Authentication failed for\s+"([\w.-]+)"/i);
+	if (authFailedMatch?.[1]) {
+		return { errorKind: "missing_api_key", missingApiProvider: authFailedMatch[1] };
 	}
 
 	return { errorKind: "other" };
