@@ -1,20 +1,24 @@
 /**
- * Unified /review + /fix extension.
+ * Unified /review + /triage + /fix extension.
  *
  * What this extension does:
  * - /review runs multiple parallel focuses (general, reuse, quality, efficiency),
  *   then emits a single findings report.
+ * - /triage fetches PR feedback from GitHub, inspects the checked-out PR diff,
+ *   and classifies each item as address, push_back, research, or ignore.
  * - /fix applies findings from the review report. If the latest message is not a
  *   valid/stale review payload, /fix runs a fresh review first and then fixes.
  *
  * Key behavior:
  * - /review is findings-only (no direct edits).
+ * - /triage is feedback triage only (no direct edits).
  * - Focus outputs are strict JSON; final review output is human-readable markdown plus
  *   a typed custom message payload (customType: "review").
  * - /fix staleness checks use a repo fingerprint: HEAD SHA + branch + tracked diff hash + untracked content hash.
  *
  * Commands:
  * - /review [mode] [models=...] [context=...]
+ * - /triage <number|url>
  * - /fix [mode] [models=...] [context=...]
  *
  * Modes supported by both commands:
@@ -39,7 +43,7 @@ import { promises as fs } from "node:fs";
 type Priority = "P0" | "P1" | "P2" | "P3";
 type FocusName = "general" | "reuse" | "quality" | "efficiency";
 type FocusDefinition = { suffix: string; qualifier: string; context: string };
-type ReviewRunSource = "review" | "fix";
+type ReviewRunSource = "review" | "fix" | "triage";
 type ReviewRunOutcome = "success" | "failed" | "cancelled";
 
 type ReviewTarget =
@@ -204,6 +208,82 @@ type PreparedReviewRun = {
 	baselineFingerprint: ReviewFingerprint;
 	models: Array<{ modelArg: string | undefined; modelLabel: string }>;
 	tasks: FocusTask[];
+};
+
+type TriageFeedbackKind = "review-thread" | "review-summary" | "pr-comment";
+type TriageDecision = "address" | "push_back" | "research" | "ignore";
+
+type TriageFeedbackComment = {
+	author: string;
+	body: string;
+	url?: string;
+	createdAt?: string;
+};
+
+type TriageFeedbackItem = {
+	id: string;
+	kind: TriageFeedbackKind;
+	author: string;
+	location: string;
+	url?: string;
+	body?: string;
+	state?: string;
+	isResolved?: boolean;
+	isOutdated?: boolean;
+	comments?: TriageFeedbackComment[];
+};
+
+type TriageItem = {
+	id: string;
+	decision: TriageDecision;
+	summary: string;
+	rationale: string;
+	action: string;
+};
+
+type TriageMessageItem = TriageItem & {
+	feedbackKind: TriageFeedbackKind;
+	location: string;
+	author: string;
+	url?: string;
+};
+
+type TriageMessageDetails = {
+	kind: "triage";
+	version: 1;
+	generatedAt: string;
+	pr: {
+		number: number;
+		url: string;
+		title: string;
+		baseBranch: string;
+		headBranch: string;
+		ref: string;
+	};
+	scope: {
+		mode: ResolvedScope["kind"];
+		description: string;
+	};
+	feedbackCount: number;
+	items: TriageMessageItem[];
+};
+
+type TriageRunResult =
+	| { ok: false; error: string }
+	| { ok: true; details: TriageMessageDetails };
+
+type TriagePrContext = {
+	prNumber: number;
+	prRef: string;
+	prUrl: string;
+	title: string;
+	body: string;
+	baseBranch: string;
+	headBranch: string;
+	author: string;
+	scope: Extract<ResolvedScope, { kind: "branch-diff" }>;
+	baselineFingerprint: ReviewFingerprint;
+	feedbackItems: TriageFeedbackItem[];
 };
 
 // --- Constants & prompts ---
@@ -388,6 +468,120 @@ At the end, output only this table (no section headings, no summary):
 | # | Location | Finding | Decision | Verification | Notes |
 |---|---|---|---|---|---|`;
 
+const TRIAGE_PROMPT = `You are an expert code reviewer triaging pull request feedback.
+
+Your job is to classify each feedback item into exactly one of these decisions:
+- address: the feedback is correct or worthwhile enough to handle in this PR.
+- push_back: the feedback seems incorrect, inapplicable, or not worth changing.
+- research: you cannot decide yet without external docs, repo conventions, or further verification.
+- ignore: the item is non-actionable noise, already-resolved chatter, or has no remaining ask.
+
+Process:
+1) Review the scoped PR diff and relevant files before deciding.
+2) Use the diff command in the scope instructions as mandatory context.
+3) Triage every feedback item exactly once. Do not omit any id.
+4) If a review thread contains back-and-forth, focus on the latest remaining ask.
+5) Resolved or outdated threads often become ignore, but verify before deciding.
+6) This is a read-only triage. Do not modify files or repository state; do not run mutating commands.
+
+{SCOPE_INSTRUCTIONS}
+
+{PROJECT_GUIDELINES_SECTION}
+
+PR feedback payload (authoritative JSON):
+{TRIAGE_INPUT_JSON}
+
+Output JSON only, with this exact shape:
+{
+  "items": [
+    {
+      "id": "feedback-1",
+      "decision": "address",
+      "summary": "brief description of the feedback",
+      "rationale": "why this decision is correct",
+      "action": "what to do next"
+    }
+  ]
+}
+
+Requirements:
+- Return exactly one item per input feedback id.
+- Keep summary, rationale, and action concise and specific.
+- Before sending, self-check that JSON.parse(output) would succeed.`;
+
+const TRIAGE_METADATA_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number
+      url
+      title
+      body
+      baseRefName
+      headRefName
+      author {
+        login
+      }
+      comments(first: 100) {
+        nodes {
+          id
+          body
+          url
+          createdAt
+          author {
+            login
+          }
+        }
+      }
+      reviews(first: 100) {
+        nodes {
+          id
+          body
+          state
+          url
+          submittedAt
+          author {
+            login
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const TRIAGE_THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          startLine
+          originalStartLine
+          comments(first: 100) {
+            nodes {
+              id
+              body
+              url
+              createdAt
+              author {
+                login
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}`;
+
 const REVIEW_FOCUS_NAMES = Object.keys(REVIEW_FOCUSES) as FocusName[];
 
 // --- Helpers ---
@@ -480,6 +674,7 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 ### Syntax
 - \`/review [mode] [models=<a,b>] [context=<text>]\`
 - \`/fix [mode] [models=<a,b>] [context=<text>]\`
+- \`/triage <number|url>\`
 
 ### Modes
 - \`auto\` (default): working tree first, then branch diff vs base branch.
@@ -501,6 +696,8 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 - \`/review branch main\`
 - \`/review pr 123 models=sonnet,gpt-5\`
 - \`/review uncommitted context="security and error handling"\`
+- \`/triage 123\`
+- \`/triage https://github.com/owner/repo/pull/123\`
 - \`/fix\`
 - \`/fix help\`
 - \`/fix branch main models=sonnet\`
@@ -508,7 +705,12 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 ### /fix behavior
 - Uses only the latest \`customType: "review"\` message payload.
 - If payload is missing or stale, runs a fresh \`/review\` first.
-- Skips execution when there are zero findings.`,
+- Skips execution when there are zero findings.
+
+### /triage behavior
+- Fetches PR feedback from GitHub for the given PR number or URL.
+- Checks out the PR branch locally, then inspects the diff and repository state.
+- Produces one triage row per feedback item with decision \`address\`, \`push_back\`, \`research\`, or \`ignore\`.`,
 	});
 }
 
@@ -760,6 +962,239 @@ async function checkoutPr(pi: ExtensionAPI, prNumber: number): Promise<{ ok: boo
 		return { ok: false, error: (stderr || stdout || "Failed to checkout PR").trim() };
 	}
 	return { ok: true };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function getConnectionNodes(value: unknown): unknown[] {
+	const record = asRecord(value);
+	return record && Array.isArray(record.nodes) ? record.nodes : [];
+}
+
+function getNestedRecord(value: unknown, ...keys: string[]): Record<string, unknown> | null {
+	let current: unknown = value;
+	for (const key of keys) {
+		const record = asRecord(current);
+		if (!record) return null;
+		current = record[key];
+	}
+	return asRecord(current);
+}
+
+function getOptionalString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function getRequiredString(value: unknown): string | null {
+	return typeof value === "string" ? value : null;
+}
+
+function getOptionalNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function getOptionalBoolean(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function getAuthorLogin(value: unknown): string {
+	const author = asRecord(value);
+	return typeof author?.login === "string" ? author.login : "unknown";
+}
+
+async function fetchPrTriageMetadata(pi: ExtensionAPI, prNumber: number): Promise<{
+	prNumber: number;
+	prUrl: string;
+	title: string;
+	body: string;
+	baseBranch: string;
+	headBranch: string;
+	author: string;
+	comments: TriageFeedbackItem[];
+	reviews: TriageFeedbackItem[];
+} | null> {
+	const { stdout, code } = await pi.exec("gh", [
+		"api",
+		"graphql",
+		"-F",
+		"owner={owner}",
+		"-F",
+		"name={repo}",
+		"-F",
+		`number=${prNumber}`,
+		"-f",
+		`query=${TRIAGE_METADATA_QUERY}`,
+	]);
+	if (code !== 0) return null;
+
+	try {
+		const root = asRecord(JSON.parse(stdout));
+		const pr = getNestedRecord(root, "data", "repository", "pullRequest");
+		if (!pr) return null;
+
+		const number = getOptionalNumber(pr.number);
+		const prUrl = getRequiredString(pr.url);
+		const title = getRequiredString(pr.title);
+		const body = getRequiredString(pr.body) ?? "";
+		const baseBranch = getRequiredString(pr.baseRefName);
+		const headBranch = getRequiredString(pr.headRefName);
+		if (!number || !prUrl || !title || !baseBranch || !headBranch) return null;
+
+		const prAuthor = getAuthorLogin(pr.author);
+		const comments = getConnectionNodes(pr.comments)
+			.map((node, index): TriageFeedbackItem | null => {
+				const record = asRecord(node);
+				if (!record) return null;
+				const bodyText = (getRequiredString(record.body) ?? "").trim();
+				const author = getAuthorLogin(record.author);
+				if (!bodyText || author === prAuthor) return null;
+				return {
+					id: `comment-${index + 1}`,
+					kind: "pr-comment",
+					author,
+					location: "PR conversation",
+					url: getOptionalString(record.url),
+					body: bodyText,
+				};
+			})
+			.filter((item): item is TriageFeedbackItem => item !== null);
+
+		const reviews = getConnectionNodes(pr.reviews)
+			.map((node, index): TriageFeedbackItem | null => {
+				const record = asRecord(node);
+				if (!record) return null;
+				const bodyText = (getRequiredString(record.body) ?? "").trim();
+				if (!bodyText) return null;
+				return {
+					id: `review-${index + 1}`,
+					kind: "review-summary",
+					author: getAuthorLogin(record.author),
+					location: "Review summary",
+					url: getOptionalString(record.url),
+					body: bodyText,
+					state: getOptionalString(record.state),
+				};
+			})
+			.filter((item): item is TriageFeedbackItem => item !== null);
+
+		return {
+			prNumber: number,
+			prUrl,
+			title,
+			body,
+			baseBranch,
+			headBranch,
+			author: prAuthor,
+			comments,
+			reviews,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function formatThreadLocation(options: {
+	path?: string;
+	line?: number;
+	originalLine?: number;
+	startLine?: number;
+	originalStartLine?: number;
+}): string {
+	const path = options.path?.trim();
+	const endLine = options.line ?? options.originalLine;
+	const startLine = options.startLine ?? options.originalStartLine;
+	if (!path) return endLine ? `review thread:${endLine}` : "review thread";
+	if (!endLine) return path;
+	if (startLine && startLine !== endLine) return `${path}:${startLine}-${endLine}`;
+	return `${path}:${endLine}`;
+}
+
+function pickThreadAuthor(comments: TriageFeedbackComment[], prAuthor: string): string {
+	const externalComment = comments.find((comment) => comment.author !== prAuthor && comment.author !== "unknown");
+	if (externalComment) return externalComment.author;
+	return comments[0]?.author ?? "unknown";
+}
+
+async function fetchPrReviewThreads(
+	pi: ExtensionAPI,
+	prNumber: number,
+	prAuthor: string,
+): Promise<TriageFeedbackItem[] | null> {
+	const { stdout, code } = await pi.exec("gh", [
+		"api",
+		"graphql",
+		"--paginate",
+		"--slurp",
+		"-F",
+		"owner={owner}",
+		"-F",
+		"name={repo}",
+		"-F",
+		`number=${prNumber}`,
+		"-f",
+		`query=${TRIAGE_THREADS_QUERY}`,
+	]);
+	if (code !== 0) return null;
+
+	try {
+		const pages = JSON.parse(stdout);
+		if (!Array.isArray(pages)) return null;
+
+		const items: TriageFeedbackItem[] = [];
+		for (const page of pages) {
+			const threads = getConnectionNodes(getNestedRecord(page, "data", "repository", "pullRequest", "reviewThreads"));
+			for (const thread of threads) {
+				const record = asRecord(thread);
+				if (!record) continue;
+				const comments = getConnectionNodes(record.comments)
+					.map((node): TriageFeedbackComment | null => {
+						const comment = asRecord(node);
+						if (!comment) return null;
+						const body = (getRequiredString(comment.body) ?? "").trim();
+						if (!body) return null;
+						return {
+							author: getAuthorLogin(comment.author),
+							body,
+							url: getOptionalString(comment.url),
+							createdAt: getOptionalString(comment.createdAt),
+						};
+					})
+					.filter((comment): comment is TriageFeedbackComment => comment !== null);
+				if (comments.length === 0) continue;
+
+				items.push({
+					id: `thread-${items.length + 1}`,
+					kind: "review-thread",
+					author: pickThreadAuthor(comments, prAuthor),
+					location: formatThreadLocation({
+						path: getOptionalString(record.path),
+						line: getOptionalNumber(record.line),
+						originalLine: getOptionalNumber(record.originalLine),
+						startLine: getOptionalNumber(record.startLine),
+						originalStartLine: getOptionalNumber(record.originalStartLine),
+					}),
+					url: comments[comments.length - 1]?.url,
+					isResolved: getOptionalBoolean(record.isResolved),
+					isOutdated: getOptionalBoolean(record.isOutdated),
+					comments,
+				});
+			}
+		}
+
+		return items;
+	} catch {
+		return null;
+	}
+}
+
+function buildTriageFeedbackItems(metadata: {
+	comments: TriageFeedbackItem[];
+	reviews: TriageFeedbackItem[];
+	threads: TriageFeedbackItem[];
+}): TriageFeedbackItem[] {
+	return [...metadata.threads, ...metadata.reviews, ...metadata.comments];
 }
 
 async function loadProjectReviewGuidelines(cwd: string): Promise<string | null> {
@@ -1061,6 +1496,36 @@ function buildFocusPrompt(
 		.replace("{OUTPUT_CONTRACT}", () => REVIEW_JSON_OUTPUT_CONTRACT_PROMPT);
 }
 
+function buildTriagePrompt(
+	context: TriagePrContext,
+	projectGuidelines: string | null,
+): string {
+	const projectGuidelinesSection = projectGuidelines
+		? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace("{PROJECT_GUIDELINES}", () => projectGuidelines)
+		: "";
+	const triageInput = JSON.stringify(
+		{
+			pr: {
+				number: context.prNumber,
+				url: context.prUrl,
+				title: context.title,
+				body: context.body,
+				base_branch: context.baseBranch,
+				head_branch: context.headBranch,
+				author: context.author,
+			},
+			feedback: context.feedbackItems,
+		},
+		null,
+		2,
+	);
+
+	return TRIAGE_PROMPT
+		.replace("{SCOPE_INSTRUCTIONS}", () => buildScopeInstructions(context.scope))
+		.replace("{PROJECT_GUIDELINES_SECTION}", () => projectGuidelinesSection)
+		.replace("{TRIAGE_INPUT_JSON}", () => triageInput);
+}
+
 // --- Focus task execution ---
 
 function extractTextContent(content: unknown): string {
@@ -1133,6 +1598,55 @@ function validateFocusOutput(parsed: unknown): FocusFinding[] {
 		throw new Error("All findings in focus output are malformed.");
 	}
 	return findings;
+}
+
+function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem[]): TriageItem[] {
+	if (!parsed || typeof parsed !== "object") {
+		throw new Error("Triage output must be a JSON object.");
+	}
+	if (!("items" in parsed) || !Array.isArray(parsed.items)) {
+		throw new Error('Triage output is missing required "items" array.');
+	}
+
+	const knownIds = new Set(feedbackItems.map((item) => item.id));
+	const triageById = new Map<string, TriageItem>();
+	for (const item of parsed.items) {
+		if (typeof item !== "object" || item === null) continue;
+		const record = item as Record<string, unknown>;
+		const id = String(record.id ?? "").trim();
+		const decision = String(record.decision ?? "").trim();
+		const summary = String(record.summary ?? "").trim();
+		const rationale = String(record.rationale ?? "").trim();
+		const action = String(record.action ?? "").trim();
+		if (!id || !knownIds.has(id)) continue;
+		if (decision !== "address" && decision !== "push_back" && decision !== "research" && decision !== "ignore") {
+			continue;
+		}
+		if (!summary || !rationale || !action) continue;
+		if (triageById.has(id)) {
+			throw new Error(`Triage output contains duplicate id ${id}.`);
+		}
+		triageById.set(id, {
+			id,
+			decision: decision as TriageDecision,
+			summary,
+			rationale,
+			action,
+		});
+	}
+
+	if (triageById.size === 0 && parsed.items.length > 0) {
+		throw new Error("All triage items are malformed.");
+	}
+
+	const missingIds = feedbackItems.filter((item) => !triageById.has(item.id)).map((item) => item.id);
+	if (missingIds.length > 0) {
+		const preview = missingIds.slice(0, 5).join(", ");
+		const suffix = missingIds.length > 5 ? ", ..." : "";
+		throw new Error(`Triage output is missing ${missingIds.length} feedback item(s): ${preview}${suffix}`);
+	}
+
+	return feedbackItems.map((item) => triageById.get(item.id) as TriageItem);
 }
 
 // These classifiers intentionally rely on current pi CLI stderr wording.
@@ -1417,6 +1931,94 @@ async function runFocusTask(task: FocusTask, cwd: string, control?: ReviewExecut
 	}
 }
 
+async function runTriageTask(options: {
+	ctx: ExtensionCommandContext;
+	cwd: string;
+	prompt: string;
+	model: { modelArg: string | undefined; modelLabel: string };
+	feedbackItems: TriageFeedbackItem[];
+	control?: ReviewExecutionControl;
+}): Promise<{ ok: true; items: TriageItem[] } | { ok: false; error: string }> {
+	const { ctx, cwd, prompt, model, feedbackItems, control } = options;
+	const args = [
+		"--mode",
+		"json",
+		"-p",
+		"--no-session",
+		"--tools",
+		REVIEW_FOCUS_TOOLS,
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+		"--no-themes",
+	];
+	if (model.modelArg) {
+		args.push("--model", model.modelArg, "--models", model.modelArg);
+	}
+
+	for (let attempt = 0; ; attempt += 1) {
+		if (control?.isCancelled()) {
+			return { ok: false, error: REVIEW_CANCELLED_ERROR };
+		}
+
+		const taskResult = await withSpinner(
+			ctx,
+			() => `Triaging PR feedback (${feedbackItems.length} items)`,
+			() => runPiJsonTask({
+				args,
+				prompt,
+				cwd,
+				timeoutMs: REVIEW_TASK_TIMEOUT_MS,
+				control,
+			}),
+		);
+
+		if (taskResult.status === "cancelled") {
+			return { ok: false, error: REVIEW_CANCELLED_ERROR };
+		}
+		if (taskResult.status === "timeout") {
+			return { ok: false, error: "PR triage timed out after 30 minutes." };
+		}
+		if (taskResult.status === "spawn_error") {
+			return { ok: false, error: `Failed to start triage process: ${taskResult.error ?? "unknown error"}` };
+		}
+		if (taskResult.status === "non_zero_exit") {
+			const stderr = taskResult.stderr.trim();
+			const error = `Triage exited with code ${taskResult.exitCode ?? 1}${stderr ? `: ${stderr}` : ""}`;
+			const classification = classifyFocusError(`${taskResult.stderr}\n${error}`);
+			if (classification.errorKind === "missing_api_key") {
+				return {
+					ok: false,
+					error: `Missing API key for provider '${classification.missingApiProvider ?? "unknown"}'. Use /login or configure credentials for that provider.`,
+				};
+			}
+			if (classification.errorKind === "lock_contention" && attempt < REVIEW_STARTUP_RETRY_DELAYS_MS.length) {
+				const baseDelayMs =
+					REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
+					REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
+				await new Promise((resolve) => setTimeout(resolve, withJitter(baseDelayMs)));
+				continue;
+			}
+			return { ok: false, error };
+		}
+
+		const assistantOutput = taskResult.assistantOutput;
+		if (!assistantOutput.trim()) {
+			return { ok: false, error: "Triage returned no assistant output." };
+		}
+
+		try {
+			const parsed = parsePossiblyWrappedJson(assistantOutput);
+			return { ok: true, items: validateTriageOutput(parsed, feedbackItems) };
+		} catch (error) {
+			return {
+				ok: false,
+				error: `Triage output is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+	}
+}
+
 // --- Model resolution & output ---
 
 function pickPreferredModelCandidate<T extends { id: string; provider: string }>(
@@ -1524,6 +2126,25 @@ function buildReviewedScopeLine(scope: ResolvedScope, durationMs: number): strin
 						? `snapshot for ${scope.paths.join(", ")}`
 						: "custom scope";
 	return `Reviewed ${scopeText} in ${formatDuration(durationMs)}.`;
+}
+
+function buildTriagedPrLine(context: TriagePrContext, durationMs: number): string {
+	return `Triaged PR #${context.prNumber} (${context.title}) in ${formatDuration(durationMs)}.`;
+}
+
+function buildTriageMarkdown(context: TriagePrContext, items: TriageMessageItem[], durationMs: number): string {
+	const header = buildTriagedPrLine(context, durationMs);
+	if (items.length === 0) {
+		return `${header}\n\nNo PR feedback items found.`;
+	}
+
+	let table = "| # | Kind | Location | Author | Summary | Decision | Rationale | Action |\n";
+	table += "|---|---|---|---|---|---|---|---|\n";
+	items.forEach((item, index) => {
+		table += `| ${index + 1} | ${escapeCell(item.feedbackKind)} | ${escapeCell(item.location)} | ${escapeCell(item.author)} | ${escapeCell(item.summary)} | ${escapeCell(item.decision)} | ${escapeCell(item.rationale)} | ${escapeCell(item.action)} |\n`;
+	});
+
+	return `${header}\n\n${table}`;
 }
 
 function buildReviewFindingsMarkdown(
@@ -1668,6 +2289,80 @@ async function prepareReviewRun(
 			baselineFingerprint,
 			models,
 			tasks: buildReviewTasks(scope, guidelines, request.additionalContext, models),
+		},
+	};
+}
+
+async function prepareTriageContext(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	prRef: string,
+): Promise<{ ok: false; error: string } | { ok: true; data: TriagePrContext }> {
+	if (!(await isGitRepo(pi))) {
+		return { ok: false, error: "Not a git repository." };
+	}
+	if (await hasPendingTrackedChanges(pi)) {
+		return { ok: false, error: "Cannot checkout PR with pending tracked changes. Commit or stash first." };
+	}
+
+	const prNumber = parsePrReference(prRef);
+	if (!prNumber) {
+		return { ok: false, error: `Invalid PR reference: ${prRef}` };
+	}
+
+	notify(ctx, `Fetching PR #${prNumber} feedback...`, "info");
+	const metadata = await fetchPrTriageMetadata(pi, prNumber);
+	if (!metadata) {
+		return { ok: false, error: `Could not load PR #${prNumber}. Ensure gh is authenticated and PR exists.` };
+	}
+
+	if (await hasPendingTrackedChanges(pi)) {
+		return { ok: false, error: "Cannot checkout PR with pending tracked changes. Commit or stash first." };
+	}
+
+	notify(ctx, `Checking out PR #${prNumber}...`, "info");
+	const checkout = await checkoutPr(pi, prNumber);
+	if (!checkout.ok) {
+		return { ok: false, error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}` };
+	}
+	notify(ctx, `Checked out PR #${prNumber} (${metadata.headBranch}).`, "info");
+
+	const resolvedScope = await resolveBranchDiffScope(pi, {
+		baseBranch: metadata.baseBranch,
+		description: (diffFileCount) => `PR #${prNumber} diff vs ${metadata.baseBranch} (${diffFileCount} files)`,
+		mergeBaseError: `Could not determine merge-base against PR base branch ${metadata.baseBranch}.`,
+		emptyDiffError: `No differences found for PR #${prNumber} against ${metadata.baseBranch}.`,
+	});
+	if (!resolvedScope.scope || resolvedScope.scope.kind !== "branch-diff") {
+		return { ok: false, error: resolvedScope.error ?? `Failed to resolve PR #${prNumber} scope.` };
+	}
+
+	const threads = await fetchPrReviewThreads(pi, prNumber, metadata.author);
+	if (!threads) {
+		return { ok: false, error: `Could not load review threads for PR #${prNumber}. Ensure gh is authenticated and GraphQL access is available.` };
+	}
+
+	const feedbackItems = buildTriageFeedbackItems({
+		comments: metadata.comments,
+		reviews: metadata.reviews,
+		threads,
+	});
+	const baselineFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, false);
+
+	return {
+		ok: true,
+		data: {
+			prNumber,
+			prRef,
+			prUrl: metadata.prUrl,
+			title: metadata.title,
+			body: metadata.body,
+			baseBranch: metadata.baseBranch,
+			headBranch: metadata.headBranch,
+			author: metadata.author,
+			scope: resolvedScope.scope,
+			baselineFingerprint,
+			feedbackItems,
 		},
 	};
 }
@@ -1979,6 +2674,190 @@ async function runReviewPipeline(
 	}
 }
 
+async function runTriagePipeline(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	prRef: string,
+): Promise<TriageRunResult> {
+	const sessionKey = getReviewSessionKey(ctx);
+	const startedAtMs = Date.now();
+
+	const activeProcesses = new Set<ChildProcess>();
+	let cancelRequested = false;
+	let triageOutcome: ReviewRunOutcome = "failed";
+	let reviewStarted = false;
+
+	const cancelActiveProcesses = () => {
+		for (const proc of activeProcesses) {
+			try {
+				proc.kill("SIGKILL");
+			} catch {
+				// Best effort.
+			}
+		}
+		activeProcesses.clear();
+	};
+
+	const requestCancellation = () => {
+		if (cancelRequested) return;
+		cancelRequested = true;
+		cancelActiveProcesses();
+	};
+
+	const executionControl: ReviewExecutionControl = {
+		isCancelled: () => cancelRequested,
+		registerProcess: (proc) => {
+			activeProcesses.add(proc);
+			return () => {
+				activeProcesses.delete(proc);
+			};
+		},
+	};
+
+	let unsubscribeInterrupt: (() => void) | undefined;
+
+	try {
+		const prepared = await prepareTriageContext(pi, ctx, prRef);
+		if (!prepared.ok) {
+			return { ok: false, error: prepared.error };
+		}
+
+		const context = prepared.data;
+		pi.events.emit(REVIEW_EVENT_START, { sessionKey, source: "triage" });
+		reviewStarted = true;
+		runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
+		unsubscribeInterrupt =
+			ctx.hasUI
+				? ctx.ui.onTerminalInput((data) => {
+					if (!matchesKey(data, "escape")) return undefined;
+					if (runtimeState.activePromptCount > 0) return undefined;
+					requestCancellation();
+					return { consume: true };
+				})
+				: undefined;
+
+		if (context.feedbackItems.length === 0) {
+			const details: TriageMessageDetails = {
+				kind: "triage",
+				version: 1,
+				generatedAt: new Date().toISOString(),
+				pr: {
+					number: context.prNumber,
+					url: context.prUrl,
+					title: context.title,
+					baseBranch: context.baseBranch,
+					headBranch: context.headBranch,
+					ref: context.prRef,
+				},
+				scope: {
+					mode: context.scope.kind,
+					description: context.scope.description,
+				},
+				feedbackCount: 0,
+				items: [],
+			};
+			pi.sendMessage(
+				{
+					customType: "review-triage",
+					content: buildTriageMarkdown(context, [], Date.now() - startedAtMs),
+					display: true,
+					details,
+				},
+				{ deliverAs: "followUp" },
+			);
+			notify(ctx, "No PR feedback items found for triage.", "info");
+			triageOutcome = "success";
+			return { ok: true, details };
+		}
+
+		const [projectGuidelines, models] = await Promise.all([
+			loadProjectReviewGuidelines(ctx.cwd),
+			resolveModels(ctx, []),
+		]);
+		const model = models[0];
+		notify(ctx, `Triaging ${context.feedbackItems.length} feedback item(s) with ${model.modelArg ?? model.modelLabel}.`, "info");
+
+		const triageResult = await runTriageTask({
+			ctx,
+			cwd: ctx.cwd,
+			prompt: buildTriagePrompt(context, projectGuidelines),
+			model,
+			feedbackItems: context.feedbackItems,
+			control: executionControl,
+		});
+		if (!triageResult.ok) {
+			if (triageResult.error === REVIEW_CANCELLED_ERROR) {
+				triageOutcome = "cancelled";
+			}
+			return triageResult;
+		}
+		if (cancelRequested) {
+			triageOutcome = "cancelled";
+			return { ok: false, error: REVIEW_CANCELLED_ERROR };
+		}
+
+		const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, false);
+		if (!fingerprintsEqual(context.baselineFingerprint, endingFingerprint)) {
+			return {
+				ok: false,
+				error: "PR triage became stale while running (repository changed). Rerun /triage.",
+			};
+		}
+
+		const items: TriageMessageItem[] = context.feedbackItems.map((feedback, index) => {
+			const triageItem = triageResult.items[index];
+			return {
+				...triageItem,
+				feedbackKind: feedback.kind,
+				location: feedback.location,
+				author: feedback.author,
+				url: feedback.url,
+			};
+		});
+		const details: TriageMessageDetails = {
+			kind: "triage",
+			version: 1,
+			generatedAt: new Date().toISOString(),
+			pr: {
+				number: context.prNumber,
+				url: context.prUrl,
+				title: context.title,
+				baseBranch: context.baseBranch,
+				headBranch: context.headBranch,
+				ref: context.prRef,
+			},
+			scope: {
+				mode: context.scope.kind,
+				description: context.scope.description,
+			},
+			feedbackCount: context.feedbackItems.length,
+			items,
+		};
+
+		pi.sendMessage(
+			{
+				customType: "review-triage",
+				content: buildTriageMarkdown(context, items, Date.now() - startedAtMs),
+				display: true,
+				details,
+			},
+			{ deliverAs: "followUp" },
+		);
+		notify(ctx, `Triage completed: ${items.length} feedback item(s).`, "info");
+		triageOutcome = "success";
+		return { ok: true, details };
+	} finally {
+		unsubscribeInterrupt?.();
+		cancelActiveProcesses();
+		if (runtimeState.activeReviewCancels.get(sessionKey) === requestCancellation) {
+			runtimeState.activeReviewCancels.delete(sessionKey);
+		}
+		if (reviewStarted) {
+			pi.events.emit(REVIEW_EVENT_END, { sessionKey, source: "triage", outcome: triageOutcome });
+		}
+	}
+}
+
 // --- Command handlers ---
 
 function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
@@ -1994,6 +2873,29 @@ function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
 	);
 
 	return FIX_PROMPT.replace("{REVIEW_FINDINGS_JSON}", () => worklistPayload);
+}
+
+function parseTriagePrRef(pi: ExtensionAPI, args: string | undefined, ctx: ExtensionCommandContext): string | null {
+	const raw = args?.trim() ?? "";
+	if (!raw) {
+		notify(ctx, "Usage: /triage <pr-number|url>", "error");
+		return null;
+	}
+
+	const tokens = tokenizeArgs(raw).map(unquoteToken);
+	if (tokens.length === 1 && tokens[0]?.toLowerCase() === "help") {
+		showReviewHelp(pi);
+		return null;
+	}
+	if (tokens.length !== 1 || !tokens[0]) {
+		notify(ctx, "Usage: /triage <pr-number|url>", "error");
+		return null;
+	}
+	if (!parsePrReference(tokens[0])) {
+		notify(ctx, `Invalid PR reference: ${tokens[0]}`, "error");
+		return null;
+	}
+	return tokens[0];
 }
 
 function parseCommandRequest(pi: ExtensionAPI, args: string | undefined, ctx: ExtensionCommandContext): ParsedRequest | null {
@@ -2069,6 +2971,35 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					}
 				} catch (error) {
 					notify(ctx, `Review run failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				} finally {
+					releaseReviewRunLock(sessionKey);
+				}
+			})();
+		},
+	});
+
+	pi.registerCommand("triage", {
+		description:
+			"Fetch PR feedback from GitHub, inspect the checked-out PR diff, and classify each item as address, push_back, research, or ignore.",
+		handler: async (args, ctx) => {
+			const prRef = parseTriagePrRef(pi, args, ctx);
+			if (!prRef) return;
+
+			const sessionKey = acquireReviewRunLock(
+				ctx,
+				"A review-related run is already active in this session. Wait for it to finish before /triage.",
+			);
+			if (!sessionKey) return;
+
+			notify(ctx, "Starting PR triage in background...", "info");
+			void (async () => {
+				try {
+					const result = await runTriagePipeline(pi, ctx, prRef);
+					if (!result.ok) {
+						notify(ctx, result.error, "error");
+					}
+				} catch (error) {
+					notify(ctx, `PR triage failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				} finally {
 					releaseReviewRunLock(sessionKey);
 				}
