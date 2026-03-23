@@ -6,8 +6,10 @@
  *   then emits a single findings report.
  * - /triage fetches PR feedback from GitHub, inspects the checked-out PR diff,
  *   and classifies each item as address, push_back, research, or ignore.
- * - /fix applies findings from the review report. If the latest message is not a
- *   valid/stale review payload, /fix runs a fresh review first and then fixes.
+ * - /fix applies findings from the review report. It reuses the last message only
+ *   when that message is a matching review payload, even if stale. Otherwise it
+ *   runs a fresh review first. If that fresh review becomes stale while running,
+ *   /fix shows the findings and waits for an explicit rerun before applying fixes.
  *
  * Key behavior:
  * - /review is findings-only (no direct edits).
@@ -125,6 +127,12 @@ type ReviewDedupGroup = {
   ids: number[];
 };
 
+type ReviewStaleness = {
+  status: "stale";
+  warning: string;
+  nextStep: string;
+};
+
 type ReviewMessageDetails = {
   kind: "findings";
   version: 1;
@@ -134,12 +142,14 @@ type ReviewMessageDetails = {
     mode: ReviewRequestMode;
     models: string[];
     userArgs: string;
+    signature?: string;
   };
   scope: {
     mode: ResolvedScope["kind"];
     description: string;
   };
   fingerprint: ReviewFingerprint;
+  staleness?: ReviewStaleness;
   focusStatus: Array<{
     focus: FocusName;
     model: string;
@@ -299,6 +309,14 @@ const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
 const REVIEW_UNTRACKED_HASH_DISABLED = "__disabled__";
 const REVIEW_CANCELLED_ERROR = "Review aborted";
+const REVIEW_STALE_SECTION_TITLE = "Repository changed";
+const REVIEW_STALE_REVIEW_WARNING = "Repository changed while this review was running.";
+const REVIEW_STALE_REVIEW_NEXT_STEP = "Results are shown anyway. Run /review again to refresh them.";
+const REVIEW_STALE_FIX_WARNING = "Repository changed while /fix was gathering findings.";
+const REVIEW_STALE_FIX_NEXT_STEP = "No fixes were applied. Run /fix again to continue, or /review first to refresh.";
+const REVIEW_STALE_PAYLOAD_WARNING = "Repository changed since this review was generated.";
+const REVIEW_STALE_PAYLOAD_NEXT_STEP = "Run /review first to refresh it.";
+const REVIEW_STALE_REUSE_WARNING = "Last review is stale. Continuing with /fix. Run /review first to refresh it.";
 const REVIEW_EVENT_START = "review:start";
 const REVIEW_EVENT_END = "review:end";
 const REVIEW_MODE_HINTS = ["help", "auto", "uncommitted", "branch", "commit", "pr", "folder", "custom"] as const;
@@ -741,8 +759,10 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 - \`/fix branch main models=sonnet\`
 
 ### /fix behavior
-- Uses only the latest \`customType: "review"\` message payload.
-- If payload is missing or stale, runs a fresh \`/review\` first.
+- Uses the last message only when it is a matching \`customType: "review"\` payload.
+- Otherwise, runs a fresh \`/review\` first.
+- If the last review is stale, \`/fix\` warns and continues.
+- If a review started by \`/fix\` goes stale mid-run, it shows the findings and applies no fixes.
 - Skips execution when there are zero findings.
 
 ### /triage behavior
@@ -863,6 +883,35 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
   throw new Error(
     `Unknown mode "${mode}". Supported modes: auto, uncommitted, branch, commit, pr, folder, custom.`,
   );
+}
+
+function buildRequestSignature(request: ParsedRequest): string {
+  const additionalContext = request.additionalContext?.trim();
+  const target =
+    request.target.type === "folder"
+      ? { type: "folder", paths: Array.from(new Set(request.target.paths)).sort((a, b) => a.localeCompare(b)) }
+      : request.target.type === "custom"
+        ? { type: "custom", instructions: request.target.instructions.trim() }
+        : request.target.type === "pr"
+          ? { type: "pr", ref: parsePrReference(request.target.ref) ?? request.target.ref.trim() }
+          : request.target.type === "branch"
+            ? { type: "branch", branch: request.target.branch }
+            : request.target.type === "commit"
+              ? { type: "commit", sha: request.target.sha }
+              : { type: request.target.type };
+
+  return JSON.stringify({
+    target,
+    models: Array.from(new Set(request.models)).sort((a, b) => a.localeCompare(b)),
+    additionalContext: additionalContext && additionalContext.length > 0 ? additionalContext : null,
+  });
+}
+
+function reviewMatchesRequest(details: ReviewMessageDetails, request: ParsedRequest): boolean {
+  if (details.request.signature) {
+    return details.request.signature === buildRequestSignature(request);
+  }
+  return details.request.userArgs === request.rawArgs;
 }
 
 // --- Git & fingerprinting ---
@@ -2311,11 +2360,17 @@ function buildTriageMarkdown(context: TriagePrContext, items: TriageMessageItem[
   return `${header}\n\n${table}`;
 }
 
+function appendMarkdownListSection(markdown: string, title: string, items: string[]): string {
+  if (items.length === 0) return markdown;
+  return `${markdown.trimEnd()}\n\n${title}:\n${items.map((item) => `- ${item}`).join("\n")}\n`;
+}
+
 function buildReviewFindingsMarkdown(
   reviewedScopeLine: string,
   findings: ReviewReportFinding[],
   completedReviews: number,
   totalReviews: number,
+  footerNotes: string[] = [],
 ): string {
   const reviewWord = totalReviews === 1 ? "review" : "reviews";
   const completionLine =
@@ -2324,7 +2379,11 @@ function buildReviewFindingsMarkdown(
       : `${completedReviews} of ${totalReviews} ${reviewWord} completed`;
 
   if (findings.length === 0) {
-    return `${reviewedScopeLine}\n\n${completionLine}.\n\nNo findings.\n`;
+    return appendMarkdownListSection(
+      `${reviewedScopeLine}\n\n${completionLine}.\n\nNo findings.\n`,
+      REVIEW_STALE_SECTION_TITLE,
+      footerNotes,
+    );
   }
 
   let table = "| # | Focus | Model | Priority | Location | Finding | Fix suggestion |\n";
@@ -2334,7 +2393,11 @@ function buildReviewFindingsMarkdown(
       finding.priority,
     )} | ${escapeCell(finding.location)} | ${escapeCell(finding.finding)} | ${escapeCell(finding.fix_suggestion)} |\n`;
   });
-  return `${reviewedScopeLine}\n\n${completionLine}:\n\n${table}\n`;
+  return appendMarkdownListSection(
+    `${reviewedScopeLine}\n\n${completionLine}:\n\n${table}\n`,
+    REVIEW_STALE_SECTION_TITLE,
+    footerNotes,
+  );
 }
 
 function buildReviewFailuresMarkdown(failedFocuses: FocusTaskResult[]): string {
@@ -2361,11 +2424,55 @@ function isReviewRequestMode(value: unknown): value is ReviewRequestMode {
   return REQUEST_MODE_PREFIXES.some((prefix) => value.startsWith(prefix) && value.length > prefix.length);
 }
 
+function parseReviewStaleness(value: unknown): ReviewStaleness | undefined | null {
+  if (value === undefined) return undefined;
+  const staleness = asRecord(value);
+  if (!staleness) return null;
+  if (staleness.status !== "stale") return null;
+  if (typeof staleness.warning !== "string") return null;
+  if (typeof staleness.nextStep !== "string") return null;
+  return {
+    status: "stale",
+    warning: staleness.warning,
+    nextStep: staleness.nextStep,
+  };
+}
+
+function buildReviewStaleness(source: ReviewRunSource): ReviewStaleness {
+  if (source === "fix") {
+    return {
+      status: "stale",
+      warning: REVIEW_STALE_FIX_WARNING,
+      nextStep: REVIEW_STALE_FIX_NEXT_STEP,
+    };
+  }
+
+  return {
+    status: "stale",
+    warning: REVIEW_STALE_REVIEW_WARNING,
+    nextStep: REVIEW_STALE_REVIEW_NEXT_STEP,
+  };
+}
+
+function buildStalePayloadStaleness(): ReviewStaleness {
+  return {
+    status: "stale",
+    warning: REVIEW_STALE_PAYLOAD_WARNING,
+    nextStep: REVIEW_STALE_PAYLOAD_NEXT_STEP,
+  };
+}
+
+function buildReviewFooterNotes(staleness: ReviewStaleness | undefined): string[] {
+  if (!staleness) return [];
+  return [staleness.warning, staleness.nextStep];
+}
+
 function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null {
   if (!value || typeof value !== "object") return null;
   const details = value as ReviewMessageDetails;
   if (details.kind !== "findings" || details.version !== 1) return null;
   if (!isReviewRequestMode(details.request?.mode)) return null;
+  if (details.request?.signature !== undefined && typeof details.request.signature !== "string") return null;
   if (!isScopeMode(details.scope?.mode)) return null;
   if (
     !details.fingerprint ||
@@ -2377,24 +2484,24 @@ function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null 
   ) {
     return null;
   }
+
+  const staleness = parseReviewStaleness(details.staleness);
+  if (staleness === null) return null;
+
   if (!Array.isArray(details.focusStatus) || !Array.isArray(details.findings)) return null;
-  return details;
+  return {
+    ...details,
+    staleness,
+  };
 }
 
-function getLastReviewDetails(ctx: ExtensionContext): ReviewMessageDetails | null {
-  const branch = ctx.sessionManager.getBranch();
-  for (let i = branch.length - 1; i >= 0; i -= 1) {
-    const entry = branch[i];
-    if (entry.type !== "custom_message") continue;
-    if (entry.customType !== "review") continue;
-
-    const details = parseReviewMessageDetails(entry.details);
-    if (!details) continue;
-
-    return details;
+function getLastMessageReviewDetails(ctx: ExtensionContext): ReviewMessageDetails | null {
+  const entry = ctx.sessionManager.getBranch().at(-1);
+  if (!entry || entry.type !== "custom_message" || entry.customType !== "review") {
+    return null;
   }
 
-  return null;
+  return parseReviewMessageDetails(entry.details);
 }
 
 // --- Review pipeline ---
@@ -2745,21 +2852,16 @@ async function runReviewPipeline(
     }
 
     const preDedupFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
+    let reviewStaleness: ReviewStaleness | undefined;
     if (!fingerprintsEqual(baselineFingerprint, preDedupFingerprint)) {
-      return {
-        ok: false,
-        error: "Review became stale while running (repository changed). Rerun /review.",
-      };
+      reviewStaleness = buildReviewStaleness(source);
     }
 
     const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, executionControl);
 
     const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
-    if (!fingerprintsEqual(baselineFingerprint, endingFingerprint)) {
-      return {
-        ok: false,
-        error: "Review became stale while running (repository changed). Rerun /review.",
-      };
+    if (!reviewStaleness && !fingerprintsEqual(baselineFingerprint, endingFingerprint)) {
+      reviewStaleness = buildReviewStaleness(source);
     }
 
     if (cancelRequested) {
@@ -2785,6 +2887,7 @@ async function runReviewPipeline(
       findings,
       completedReviews,
       totalReviews,
+      buildReviewFooterNotes(reviewStaleness),
     );
     const details: ReviewMessageDetails = {
       kind: "findings",
@@ -2795,12 +2898,14 @@ async function runReviewPipeline(
         mode: request.mode,
         models: models.map((model) => model.modelLabel),
         userArgs: request.rawArgs,
+        signature: buildRequestSignature(request),
       },
       scope: {
         mode: scope.kind,
         description: scope.description,
       },
-      fingerprint: endingFingerprint,
+      fingerprint: reviewStaleness ? baselineFingerprint : endingFingerprint,
+      staleness: reviewStaleness,
       focusStatus: focusResults.map((focus) => ({
         focus: focus.focus,
         model: focus.model,
@@ -2820,7 +2925,14 @@ async function runReviewPipeline(
       { deliverAs: "followUp" },
     );
 
-    if (failedCount > 0) {
+    if (reviewStaleness) {
+      if (failedCount > 0) {
+        const failedLabel = `review${failedCount === 1 ? "" : "s"}`;
+        notify(ctx, `Review completed with stale partial results: ${failedCount} ${failedLabel} failed.`, "warning");
+      } else {
+        notify(ctx, `Review completed with stale results: ${findings.length} finding(s).`, "warning");
+      }
+    } else if (failedCount > 0) {
       const failedLabel = `review${failedCount === 1 ? "" : "s"}`;
       notify(ctx, `Review completed with partial results: ${failedCount} ${failedLabel} failed.`, "warning");
     } else {
@@ -3033,6 +3145,7 @@ function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
       review_id: reviewMessageDetails.reviewId,
       generated_at: reviewMessageDetails.generatedAt,
       scope: reviewMessageDetails.scope,
+      ...(reviewMessageDetails.staleness ? { staleness: reviewMessageDetails.staleness } : {}),
       findings: reviewMessageDetails.findings,
     },
     null,
@@ -3176,7 +3289,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("fix", {
     description:
-      "Fix findings from latest valid /review message. If missing/stale, runs review first then fixes. Use /review help for modes/options.",
+      "Fix findings when the last message is a matching /review result. Otherwise, runs review first. If the last review is stale, /fix warns and continues; if a /fix-started review goes stale mid-run, /fix shows the findings and applies no fixes. Use /review help for modes/options.",
     getArgumentCompletions: getReviewArgumentCompletions,
     handler: async (args, ctx) => {
       const request = parseCommandRequest(pi, args, ctx);
@@ -3189,23 +3302,24 @@ export default function reviewExtension(pi: ExtensionAPI) {
       if (!sessionKey) return;
 
       try {
-        const hasExplicitArgs = (args?.trim().length ?? 0) > 0;
-        let reviewDetails: ReviewMessageDetails | null = null;
-        let shouldRunFreshReview = hasExplicitArgs;
+        let reviewDetails = getLastMessageReviewDetails(ctx);
+        const lastReviewMatchesRequest = !request.rawArgs || (reviewDetails ? reviewMatchesRequest(reviewDetails, request) : false);
+        const shouldRunFreshReview = !reviewDetails || !lastReviewMatchesRequest;
 
-        if (!shouldRunFreshReview) {
-          reviewDetails = getLastReviewDetails(ctx);
-          if (!reviewDetails) {
-            shouldRunFreshReview = true;
-          } else {
-            const includeUntracked =
-              reviewDetails.scope.mode === "working-tree" ||
-              reviewDetails.scope.mode === "folder";
-            const currentFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
-            if (!fingerprintsEqual(reviewDetails.fingerprint, currentFingerprint)) {
-              shouldRunFreshReview = true;
-              notify(ctx, "Previous review is stale (repository changed). Running a fresh review.", "info");
-            }
+        if (reviewDetails && !shouldRunFreshReview) {
+          const currentFingerprint = await computeCurrentFingerprint(
+            pi,
+            ctx.cwd,
+            reviewDetails.scope.mode === "working-tree" || reviewDetails.scope.mode === "folder",
+          );
+          const hasStalePayload = reviewDetails.staleness?.status === "stale";
+          const isStaleNow = !fingerprintsEqual(reviewDetails.fingerprint, currentFingerprint);
+          if (hasStalePayload || isStaleNow) {
+            reviewDetails = {
+              ...reviewDetails,
+              staleness: reviewDetails.staleness ?? buildStalePayloadStaleness(),
+            };
+            notify(ctx, REVIEW_STALE_REUSE_WARNING, "warning");
           }
         }
 
@@ -3220,6 +3334,10 @@ export default function reviewExtension(pi: ExtensionAPI) {
             return;
           }
           reviewDetails = reviewResult.details;
+          if (reviewDetails.staleness?.status === "stale") {
+            notify(ctx, reviewDetails.staleness.nextStep, "warning");
+            return;
+          }
         }
 
         if (!reviewDetails) {
