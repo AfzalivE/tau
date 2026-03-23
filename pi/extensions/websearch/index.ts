@@ -1,5 +1,6 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Container, Markdown, Spacer, Text, getKeybindings } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 import { createBrowserSession, discoverProfiles } from "./browser/discovery.js";
@@ -196,6 +197,47 @@ async function runSearch(
   throw new Error(lastError ?? "No configured websearch route is available.");
 }
 
+const COLLAPSED_RESULT_LINES = 10;
+
+function trimTrailingEmptyLines(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1] === "") {
+    end--;
+  }
+  return lines.slice(0, end);
+}
+
+function formatWebsearchCall(query: string, theme: any): string {
+  let text = theme.fg("toolTitle", theme.bold("websearch"));
+  if (query) {
+    text += ` ${theme.fg("accent", query)}`;
+  }
+  return text;
+}
+
+function formatExpandHint(theme: any): string {
+  const keys = getKeybindings().getKeys("app.tools.expand");
+  const keyText = (keys.length > 0 ? keys.join("/") : "ctrl+o").toLowerCase();
+  return theme.fg("dim", keyText) + theme.fg("muted", " to expand");
+}
+
+function formatCollapsedWebsearchResult(resultText: string, theme: any): string {
+  const lines = trimTrailingEmptyLines(resultText.split("\n"));
+  if (lines.length === 0) {
+    return `\n${theme.fg("muted", "(no output)")}`;
+  }
+
+  const displayLines = lines.slice(0, COLLAPSED_RESULT_LINES);
+  const remaining = lines.length - displayLines.length;
+
+  let text = `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
+  if (remaining > 0) {
+    text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${formatExpandHint(theme)})`;
+  }
+
+  return text;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "websearch",
@@ -205,12 +247,27 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       query: Type.String({ description: "What to search for" }),
     }),
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      onUpdate?.({
-        content: [{ type: "text", text: "Searching..." }],
-        details: { phase: "searching" },
-      });
+    renderCall(args, theme) {
+      return new Text(formatWebsearchCall(args.query, theme), 0, 0);
+    },
+    renderResult(result, { expanded }, theme) {
+      const content = result.content.find((item) => item.type === "text");
+      const text = content?.type === "text" ? content.text : "";
 
+      if (!expanded) {
+        return new Text(formatCollapsedWebsearchResult(text, theme), 0, 0);
+      }
+
+      if (!text.trim()) {
+        return new Text(`\n${theme.fg("muted", "(no output)")}`, 0, 0);
+      }
+
+      const container = new Container();
+      container.addChild(new Spacer(1));
+      container.addChild(new Markdown(text.trim(), 0, 0, getMarkdownTheme()));
+      return container;
+    },
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const result = await runSearch(ctx, params.query, signal);
       return {
         content: [{ type: "text", text: result.result }],
