@@ -1455,7 +1455,7 @@ async function runSetup(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
   }
 
   runtimeState.authSyncBlocked = false;
-  const syncResult = await withSpinnerStatus(ctx, "setting up Todoist workspace...", async () => {
+  const syncResult = await withSpinnerStatus(ctx, "setting up workspace...", async () => {
     await ensureWorkspace(token, ctx.cwd);
     return syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
   });
@@ -1856,7 +1856,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
     if (first === "sync") {
       if (!ensureNoArgs("sync")) return;
-      const report = await withSpinnerStatus(ctx, "syncing Todoist outbox...", async () =>
+      const report = await withSpinnerStatus(ctx, "syncing outbox...", async () =>
         syncOutbox(pi, ctx, { allowPrompt: true, notify: true }),
       );
       if (!ctx.hasUI) {
