@@ -1455,7 +1455,7 @@ async function runSetup(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
   }
 
   runtimeState.authSyncBlocked = false;
-  const syncResult = await withSpinnerStatus(ctx, "Setting up Todoist workspace...", async () => {
+  const syncResult = await withSpinnerStatus(ctx, "setting up Todoist workspace...", async () => {
     await ensureWorkspace(token, ctx.cwd);
     return syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
   });
@@ -1475,7 +1475,7 @@ async function runListCommand(
   action: ListAction,
   filter?: (task: TodoTask) => boolean,
 ): Promise<void> {
-  const result = await withSpinnerStatus(ctx, "Loading tasks...", async () => {
+  const result = await withSpinnerStatus(ctx, "loading tasks...", async () => {
     await syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
     return gatherTasks(pi, ctx, action, { allowPrompt: true });
   });
@@ -1492,7 +1492,7 @@ async function runListCommand(
 }
 
 async function runDoctor(ctx: ExtensionCommandContext): Promise<void> {
-  const { output, hasToken } = await withSpinnerStatus(ctx, "Running todo doctor...", async () => {
+  const { output, hasToken } = await withSpinnerStatus(ctx, "running todo doctor...", async () => {
     const lines: string[] = [];
     const tokenInfo = await resolveApiTokenFromEnvOrConfig();
     const hasToken = Boolean(tokenInfo.token);
@@ -1856,7 +1856,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
     if (first === "sync") {
       if (!ensureNoArgs("sync")) return;
-      const report = await withSpinnerStatus(ctx, "Syncing Todoist outbox...", async () =>
+      const report = await withSpinnerStatus(ctx, "syncing Todoist outbox...", async () =>
         syncOutbox(pi, ctx, { allowPrompt: true, notify: true }),
       );
       if (!ctx.hasUI) {

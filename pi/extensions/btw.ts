@@ -89,7 +89,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
     let frame = 0;
     const render = () => {
       const spinner = STATUS_SPINNER_FRAMES[frame % STATUS_SPINNER_FRAMES.length];
-      ctx.ui.setStatus(STATUS_KEY, `${spinner} Answering...`);
+      ctx.ui.setStatus(STATUS_KEY, `${spinner} answering...`);
     };
 
     render();

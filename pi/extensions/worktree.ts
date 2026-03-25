@@ -256,7 +256,7 @@ async function withStatus<T>(ctx: ExtensionCommandContext, text: string, fn: () 
 }
 
 function formatPhaseScriptStatus(
-  verb: "Running" | "Finished",
+  verb: "running" | "Finished",
   phase: "setup" | "archive",
   label: string,
 ): string {
@@ -271,7 +271,7 @@ function formatPhaseScriptStatus(
 }
 
 function formatRunningScriptStatus(phase: "setup" | "archive", label: string): string {
-  return formatPhaseScriptStatus("Running", phase, label);
+  return formatPhaseScriptStatus("running", phase, label);
 }
 
 function formatFinishedScriptStatus(phase: "setup" | "archive", label: string): string {
@@ -907,7 +907,7 @@ async function applyWorktreeInclude(
   );
   if (!ok) return;
 
-  await withStatus(ctx, "Copying cached files", async () => {
+  await withStatus(ctx, "copying cached files", async () => {
     for (const entry of entriesToCopy) {
       const src = path.join(sourceRoot, entry.replace(/\/$/, ""));
       const dest = path.join(destRoot, entry.replace(/\/$/, ""));
@@ -1179,7 +1179,7 @@ async function handleNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
 
   await ctx.waitForIdle();
 
-  await withStatus(ctx, `Creating worktree: ${branch}`, async () => {
+  await withStatus(ctx, `creating worktree: ${branch}`, async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
     const defaultMain = await getDefaultMainBranch(pi, repo.mainRoot);
 
@@ -1541,7 +1541,7 @@ async function handleArchive(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg
 
   await ctx.waitForIdle();
 
-  await withSpinnerStatus(ctx, `Archiving ${branch}`, async () => {
+  await withSpinnerStatus(ctx, `archiving ${branch}`, async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
     const defaultMain = await getDefaultMainBranch(pi, repo.mainRoot);
 
@@ -1593,16 +1593,16 @@ async function handleClean(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
 
   await ctx.waitForIdle();
 
-  await withStatus(ctx, "Cleaning pushed worktrees", async () => {
+  await withStatus(ctx, "cleaning pushed worktrees", async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
     const defaultMain = await getDefaultMainBranch(pi, repo.mainRoot);
 
     // Ensure upstream info is up to date before deciding what's "pushed".
     const remotes = await git(pi, repo.mainRoot, ["remote"]);
     if (remotes.code === 0 && remotes.stdout.trim().length > 0) {
-      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "Fetching remotes...");
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "fetching remotes...");
       const fetch = await git(pi, repo.mainRoot, ["fetch", "--all", "--prune"], { timeout: FETCH_TIMEOUT_MS });
-      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "Cleaning pushed worktrees");
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "cleaning pushed worktrees");
 
       if (fetch.killed || fetch.code !== 0) {
         const details = [fetch.stdout.trim(), fetch.stderr.trim()].filter(Boolean).join("\n");
@@ -1789,7 +1789,7 @@ function formatWorktreeLabel(item: WorktreeDisplayItem, theme: Theme): string {
 async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   await ctx.waitForIdle();
 
-  const { repo, items } = await withStatus(ctx, "Listing worktrees", async () => {
+  const { repo, items } = await withStatus(ctx, "listing worktrees", async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
     const worktrees = await listWorktrees(pi, repo.mainRoot);
     const items = await gatherWorktreeDisplayItems(pi, repo, worktrees);
@@ -1881,7 +1881,7 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
   }
 
   if (result.action === "archive") {
-    await withSpinnerStatus(ctx, `Archiving ${result.item.branch}`, async () => {
+    await withSpinnerStatus(ctx, `archiving ${result.item.branch}`, async () => {
       const defaultMain = await getDefaultMainBranch(pi, repo.mainRoot);
       await archiveWorktree(pi, ctx, repo, result.item.branch, "prompt", defaultMain, result.item.wt);
     });

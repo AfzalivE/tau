@@ -2113,7 +2113,7 @@ async function runReviewDedupTask(options: {
 
   const taskResult = await withSpinner(
     ctx,
-    () => `Deduplicating ${findings.length} review findings`,
+    () => `deduplicating ${findings.length} review findings`,
     () => runPiJsonTask({
       args: [
         "--mode",
@@ -2178,7 +2178,7 @@ async function runTriageTask(options: {
 
     const taskResult = await withSpinner(
       ctx,
-      () => `Triaging PR feedback (${feedbackItems.length} items)`,
+      () => `triaging PR feedback (${feedbackItems.length} items)`,
       () => runPiJsonTask({
         args,
         prompt,
@@ -2697,7 +2697,7 @@ async function runFocusTasks(
   let completed = 0;
   return withSpinner(
     ctx,
-    () => `Reviewing (completed ${completed}/${tasks.length})`,
+    () => `reviewing (completed ${completed}/${tasks.length})`,
     () => Promise.all(tasks.map(async (task) => {
       try {
         if (control.isCancelled()) return createCancelledFocusResult(task);
