@@ -6,6 +6,13 @@ import { fileURLToPath } from "node:url";
 import fsp from "node:fs/promises";
 import { spawn } from "node:child_process";
 
+const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const RUN_DIR = path.join(AGENT_DIR, "run");
+const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
+const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
+const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+const AUTO_CONNECT_INTERVAL_MS = 3_000;
+
 type DaemonToClientMessage =
   | { type: "registered"; windowNo: number }
   | { type: "pin"; code: string; expiresAt: number }
@@ -25,13 +32,6 @@ type Config = {
   botToken?: string;
   pairedChatId?: number;
 };
-
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
-const RUN_DIR = path.join(AGENT_DIR, "run");
-const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
-const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
-const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const AUTO_CONNECT_INTERVAL_MS = 3_000;
 
 type PromptStatus = "completed" | "error";
 

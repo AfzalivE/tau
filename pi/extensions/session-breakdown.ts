@@ -34,12 +34,6 @@ import fs from "node:fs/promises";
 import { createReadStream, type Dirent } from "node:fs";
 import readline from "node:readline";
 
-type ModelKey = string; // `${provider}/${model}`
-type CwdKey = string; // normalized cwd path
-type DowKey = string; // "Mon", "Tue", etc.
-type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
-type BreakdownView = "model" | "cwd" | "dow" | "tod";
-
 const DOW_NAMES: DowKey[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = [
@@ -49,6 +43,12 @@ const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = 
   { key: "evening", label: "Evening (17–21)", from: 17, to: 21 },
   { key: "night", label: "Night (22–23)", from: 22, to: 23 },
 ];
+
+type ModelKey = string; // `${provider}/${model}`
+type CwdKey = string; // normalized cwd path
+type DowKey = string; // "Mon", "Tue", etc.
+type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
+type BreakdownView = "model" | "cwd" | "dow" | "tod";
 
 function todBucketForHour(hour: number): TodKey {
   for (const b of TOD_BUCKETS) {

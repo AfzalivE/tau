@@ -29,6 +29,112 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+// --- Constants ---
+
+const INSIGHTS_META_SCHEMA_VERSION = 1;
+const SESSION_FINGERPRINT_VERSION = 1;
+const INSIGHTS_FACET_SCHEMA_VERSION = 1;
+const FACET_PROMPT_VERSION = 1;
+const SYNTHESIS_PROMPT_VERSION = 1;
+
+const MIN_MEANINGFUL_USER_MESSAGES = 2;
+const MIN_DURATION_MINUTES = 1;
+
+const FULL_TRANSCRIPT_MAX_CHARS = 30_000;
+const REDUCED_TRANSCRIPT_HEAD_CHARS = 12_000;
+const REDUCED_TRANSCRIPT_TAIL_CHARS = 12_000;
+const REDUCED_TRANSCRIPT_MAX_CHARS = FULL_TRANSCRIPT_MAX_CHARS;
+
+const AGENT_ROOT = getAgentDir();
+const CACHE_ROOT = path.join(AGENT_ROOT, "insights");
+const META_CACHE_DIR = path.join(CACHE_ROOT, "session-meta");
+const FACET_CACHE_DIR = path.join(CACHE_ROOT, "session-facets");
+
+const GOAL_CATEGORIES = [
+  "debug_investigate",
+  "implement_feature",
+  "fix_bug",
+  "refactor_code",
+  "write_tests",
+  "write_docs",
+  "analyze_data",
+  "understand_codebase",
+  "configure_system",
+  "automation_workflow",
+  "quick_question",
+] as const;
+
+const FRICTION_CATEGORIES = [
+  "misunderstood_request",
+  "wrong_approach",
+  "buggy_code",
+  "too_much_change",
+  "tool_failed",
+  "environment_issue",
+  "context_missing",
+  "branch_confusion",
+] as const;
+
+const FACET_SYSTEM_PROMPT = `You analyze one Pi coding session and extract structured JSON.
+
+Return valid JSON only. No markdown. No prose outside JSON.
+
+Schema:
+{
+  "underlyingGoal": string,
+  "goalCategories": string[],
+  "outcome": "achieved" | "partial" | "blocked" | "unclear",
+  "frictionCategories": string[],
+  "frictionDetail": string,
+  "briefSummary": string,
+  "explicitInstructionsToRemember": string[],
+  "repeatedWorkflowHints": string[]
+}
+
+Allowed goalCategories:
+${GOAL_CATEGORIES.map((item) => `- ${item}`).join("\n")}
+
+Allowed frictionCategories:
+${FRICTION_CATEGORIES.map((item) => `- ${item}`).join("\n")}
+
+Rules:
+- Count only what the user actually wanted.
+- Pick 1-3 goal categories when the session is clear. Use [] only if the goal is genuinely unclear.
+- Outcome should reflect whether the user's requested result was achieved.
+- Friction should stay concrete and session-specific. Use [] when there was no meaningful friction.
+- frictionDetail should be concise and empty when there was no meaningful friction.
+- briefSummary should be at most 2 sentences.
+- explicitInstructionsToRemember should contain only direct, reusable user instructions worth remembering later.
+- repeatedWorkflowHints should capture reusable workflows or collaboration patterns, not one-off task details.
+- Keep arrays short, deduplicated, and high-signal.
+- Self-check that JSON.parse(output) would succeed before responding.`;
+
+const SYNTHESIS_SYSTEM_PROMPT = `You are writing a Pi /insights report.
+
+Return Markdown only.
+
+Use exactly these sections in this order:
+1. ## At a glance
+2. ## What you use Pi for
+3. ## How you tend to work with Pi
+4. ## Repeated instructions worth moving into AGENTS.md
+5. ## Good prompt template candidates
+6. ## Good skill candidates
+7. ## Good extension candidates
+8. ## Where things go wrong
+9. ## Quick wins
+
+Rules:
+- Be concrete and direct.
+- Avoid fluff.
+- Prefer fewer, stronger recommendations over long weak lists.
+- Base recommendations on repeated evidence, not one-off anecdotes.
+- For every AGENTS.md / prompt template / skill / extension recommendation, explain why it belongs in that bucket.
+- If evidence is weak for a section, say so briefly instead of inventing material.
+- Do not mention implementation details of this analytics pipeline.`;
+
+// --- Types ---
+
 type InsightScope = "current" | "project" | "all";
 
 type ReadonlySessionManager = Pick<
@@ -186,108 +292,6 @@ type ProgressState = {
   metaCacheHits: number;
   facetCacheHits: number;
 };
-
-const INSIGHTS_META_SCHEMA_VERSION = 1;
-const SESSION_FINGERPRINT_VERSION = 1;
-const INSIGHTS_FACET_SCHEMA_VERSION = 1;
-const FACET_PROMPT_VERSION = 1;
-const SYNTHESIS_PROMPT_VERSION = 1;
-
-const MIN_MEANINGFUL_USER_MESSAGES = 2;
-const MIN_DURATION_MINUTES = 1;
-
-const FULL_TRANSCRIPT_MAX_CHARS = 30_000;
-const REDUCED_TRANSCRIPT_HEAD_CHARS = 12_000;
-const REDUCED_TRANSCRIPT_TAIL_CHARS = 12_000;
-const REDUCED_TRANSCRIPT_MAX_CHARS = FULL_TRANSCRIPT_MAX_CHARS;
-
-const AGENT_ROOT = getAgentDir();
-const CACHE_ROOT = path.join(AGENT_ROOT, "insights");
-const META_CACHE_DIR = path.join(CACHE_ROOT, "session-meta");
-const FACET_CACHE_DIR = path.join(CACHE_ROOT, "session-facets");
-
-const GOAL_CATEGORIES = [
-  "debug_investigate",
-  "implement_feature",
-  "fix_bug",
-  "refactor_code",
-  "write_tests",
-  "write_docs",
-  "analyze_data",
-  "understand_codebase",
-  "configure_system",
-  "automation_workflow",
-  "quick_question",
-] as const;
-
-const FRICTION_CATEGORIES = [
-  "misunderstood_request",
-  "wrong_approach",
-  "buggy_code",
-  "too_much_change",
-  "tool_failed",
-  "environment_issue",
-  "context_missing",
-  "branch_confusion",
-] as const;
-
-const FACET_SYSTEM_PROMPT = `You analyze one Pi coding session and extract structured JSON.
-
-Return valid JSON only. No markdown. No prose outside JSON.
-
-Schema:
-{
-  "underlyingGoal": string,
-  "goalCategories": string[],
-  "outcome": "achieved" | "partial" | "blocked" | "unclear",
-  "frictionCategories": string[],
-  "frictionDetail": string,
-  "briefSummary": string,
-  "explicitInstructionsToRemember": string[],
-  "repeatedWorkflowHints": string[]
-}
-
-Allowed goalCategories:
-${GOAL_CATEGORIES.map((item) => `- ${item}`).join("\n")}
-
-Allowed frictionCategories:
-${FRICTION_CATEGORIES.map((item) => `- ${item}`).join("\n")}
-
-Rules:
-- Count only what the user actually wanted.
-- Pick 1-3 goal categories when the session is clear. Use [] only if the goal is genuinely unclear.
-- Outcome should reflect whether the user's requested result was achieved.
-- Friction should stay concrete and session-specific. Use [] when there was no meaningful friction.
-- frictionDetail should be concise and empty when there was no meaningful friction.
-- briefSummary should be at most 2 sentences.
-- explicitInstructionsToRemember should contain only direct, reusable user instructions worth remembering later.
-- repeatedWorkflowHints should capture reusable workflows or collaboration patterns, not one-off task details.
-- Keep arrays short, deduplicated, and high-signal.
-- Self-check that JSON.parse(output) would succeed before responding.`;
-
-const SYNTHESIS_SYSTEM_PROMPT = `You are writing a Pi /insights report.
-
-Return Markdown only.
-
-Use exactly these sections in this order:
-1. ## At a glance
-2. ## What you use Pi for
-3. ## How you tend to work with Pi
-4. ## Repeated instructions worth moving into AGENTS.md
-5. ## Good prompt template candidates
-6. ## Good skill candidates
-7. ## Good extension candidates
-8. ## Where things go wrong
-9. ## Quick wins
-
-Rules:
-- Be concrete and direct.
-- Avoid fluff.
-- Prefer fewer, stronger recommendations over long weak lists.
-- Base recommendations on repeated evidence, not one-off anecdotes.
-- For every AGENTS.md / prompt template / skill / extension recommendation, explain why it belongs in that bucket.
-- If evidence is weak for a section, say so briefly instead of inventing material.
-- Do not mention implementation details of this analytics pipeline.`;
 
 class AbortError extends Error {
   constructor() {
@@ -447,6 +451,8 @@ class InsightsReportComponent implements Component {
     return `${this.theme.fg("borderMuted", "│")}${padded}${" ".repeat(rightPad)}${this.theme.fg("borderMuted", "│")}`;
   }
 }
+
+// --- Helpers ---
 
 export default function insightsExtension(pi: ExtensionAPI): void {
   pi.registerCommand("insights", {

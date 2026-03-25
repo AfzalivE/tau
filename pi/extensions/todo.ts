@@ -17,6 +17,8 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// --- Constants ---
+
 const TODOIST_API_BASE_URL = "https://api.todoist.com";
 const TODOIST_API_V1_PREFIX = "/api/v1";
 const TODOIST_TOKEN_ENV = "TODOIST_API_TOKEN";
@@ -40,22 +42,6 @@ const STATUS_KEY = "todo";
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-type PromptStatus = "completed" | "error";
-
-async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "todo" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "todo", status });
-  }
-}
-
 const TODO_ACTIONS = [
   "list_active",
   "list_completed",
@@ -70,6 +56,21 @@ const TODO_ACTIONS = [
   "delete",
 ] as const;
 
+const TodoParams = Type.Object({
+  action: Type.Unsafe<TodoAction>({
+    type: "string",
+    enum: [...TODO_ACTIONS],
+    description: "Todo action",
+  }),
+  id: Type.Optional(Type.String({ description: "Task id (local:<uuid>, todoist:<id>, or plain Todoist id)" })),
+  content: Type.Optional(Type.String({ description: "Task content (create/comment)" })),
+  description: Type.Optional(Type.String({ description: "Task description (create)" })),
+  labels: Type.Optional(Type.Array(Type.String({ description: "Task label" }))),
+});
+
+// --- Types ---
+
+type PromptStatus = "completed" | "error";
 type TodoAction = (typeof TODO_ACTIONS)[number];
 type ListAction = "list_active" | "list_completed" | "list_all";
 type WriteAction = "create" | "comment" | "start" | "stop" | "complete" | "uncomplete" | "delete";
@@ -217,21 +218,7 @@ class UnresolvedLocalTaskError extends Error {
   }
 }
 
-const TodoParams = Type.Object({
-  action: Type.Unsafe<TodoAction>({
-    type: "string",
-    enum: [...TODO_ACTIONS],
-    description: "Todo action",
-  }),
-  id: Type.Optional(Type.String({ description: "Task id (local:<uuid>, todoist:<id>, or plain Todoist id)" })),
-  content: Type.Optional(Type.String({ description: "Task content (create/comment)" })),
-  description: Type.Optional(Type.String({ description: "Task description (create)" })),
-  labels: Type.Optional(Type.Array(Type.String({ description: "Task label" }))),
-});
-
-function textContent(text: string): [{ type: "text"; text: string }] {
-  return [{ type: "text", text }];
-}
+// --- Helpers ---
 
 const runtimeState = {
   localToRemote: new Map<string, string>(),
@@ -246,6 +233,24 @@ const runtimeState = {
   outboxLocks: new Map<string, Promise<void>>(),
   authSyncBlocked: false,
 };
+
+async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
+  pi.events.emit("ui:prompt_start", { source: "todo" });
+
+  let status: PromptStatus = "completed";
+  try {
+    return await run();
+  } catch (error) {
+    status = "error";
+    throw error;
+  } finally {
+    pi.events.emit("ui:prompt_end", { source: "todo", status });
+  }
+}
+
+function textContent(text: string): [{ type: "text"; text: string }] {
+  return [{ type: "text", text }];
+}
 
 function createOperationId(): string {
   return crypto.randomUUID();

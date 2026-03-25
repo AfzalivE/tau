@@ -8,16 +8,6 @@ import path from "node:path";
 import type { BrowserCookie, BrowserProfile } from "../types.js";
 import { withSqliteSnapshot } from "./sqlite.js";
 
-interface ChromiumBrowserConfig {
-  name: string;
-  baseDir: string;
-  keychainService?: string;
-  keychainAccount?: string;
-  secretToolApp?: string;
-}
-
-const passwordCache = new Map<string, string | null>();
-
 const MACOS_BROWSER_CONFIGS: ChromiumBrowserConfig[] = [
   {
     name: "Chromium",
@@ -67,6 +57,16 @@ const LINUX_BROWSER_CONFIGS: ChromiumBrowserConfig[] = [
     secretToolApp: "microsoft-edge",
   },
 ];
+
+interface ChromiumBrowserConfig {
+  name: string;
+  baseDir: string;
+  keychainService?: string;
+  keychainAccount?: string;
+  secretToolApp?: string;
+}
+
+const passwordCache = new Map<string, string | null>();
 
 function browserConfigs(): ChromiumBrowserConfig[] {
   if (process.platform === "darwin") return MACOS_BROWSER_CONFIGS;

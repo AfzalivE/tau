@@ -40,260 +40,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
-// --- Types ---
-
-type Priority = "P0" | "P1" | "P2" | "P3";
-type FocusName = "general" | "reuse" | "quality" | "efficiency";
-type FocusDefinition = { suffix: string; qualifier: string; context: string };
-type ReviewRunSource = "review" | "fix" | "triage";
-type ReviewRunOutcome = "success" | "failed" | "cancelled";
-type ModelFamily = "openai" | "anthropic";
-
-type ReviewTarget =
-  | { type: "auto" }
-  | { type: "uncommitted" }
-  | { type: "branch"; branch: string }
-  | { type: "commit"; sha: string }
-  | { type: "pr"; ref: string }
-  | { type: "folder"; paths: string[] }
-  | { type: "custom"; instructions: string };
-
-type ReviewRequestMode =
-  | "auto"
-  | "uncommitted"
-  | `branch:${string}`
-  | `commit:${string}`
-  | `pr:${string}`
-  | `folder:${string}`
-  | "custom";
-
-type ParsedRequest = {
-  target: ReviewTarget;
-  mode: ReviewRequestMode;
-  models: string[];
-  rawArgs: string;
-  additionalContext?: string;
-};
-
-type ReviewFingerprint = {
-  headSha: string;
-  branch: string;
-  trackedDiffHash: string;
-  untrackedHash: string;
-};
-
-type FocusFinding = {
-  priority: Priority;
-  location: string;
-  finding: string;
-  suggestion: string;
-};
-
-type FocusOutput = {
-  focus: FocusName;
-  model: string;
-  findings: FocusFinding[];
-};
-
-type FocusTask = {
-  focus: FocusName;
-  modelArg: string | undefined;
-  modelLabel: string;
-  prompt: string;
-};
-
-type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "rate_limit" | "other";
-
-type FocusTaskResult = {
-  focus: FocusName;
-  model: string;
-  ok: boolean;
-  output?: FocusOutput;
-  error?: string;
-  errorKind?: FocusTaskErrorKind;
-  missingApiProvider?: string;
-};
-
-type ReviewReportFinding = {
-  priority: Priority;
-  location: string;
-  finding: string;
-  suggestion: string;
-  focus: string;
-  model: string;
-};
-
-type ReviewDedupGroup = {
-  ids: number[];
-};
-
-type ReviewStaleness = {
-  status: "stale";
-  warning: string;
-  nextStep: string;
-};
-
-type ReviewMessageDetails = {
-  request: {
-    mode: ReviewRequestMode;
-    signature: string;
-  };
-  scope: {
-    mode: ResolvedScope["kind"];
-    description: string;
-  };
-  fingerprint: ReviewFingerprint;
-  staleness?: ReviewStaleness;
-  focusStatus: Array<{
-    focus: FocusName;
-    model: string;
-    ok: boolean;
-    error?: string;
-  }>;
-  findings: ReviewReportFinding[];
-};
-
-type ReviewRunResult =
-  | { ok: false; error: string }
-  | { ok: true; details: ReviewMessageDetails };
-
-type ResolvedScope =
-  | {
-      kind: "working-tree";
-      trackedFiles: string[];
-      untrackedFiles: string[];
-      hasHead: boolean;
-      description: string;
-    }
-  | {
-      kind: "branch-diff";
-      baseBranch: string;
-      mergeBase: string;
-      diffFiles: string[];
-      description: string;
-    }
-  | {
-      kind: "commit";
-      sha: string;
-      description: string;
-    }
-  | {
-      kind: "folder";
-      paths: string[];
-      description: string;
-    }
-  | {
-      kind: "custom";
-      instructions: string;
-      description: string;
-    };
-
-type ReviewExecutionControl = {
-  isCancelled: () => boolean;
-  registerProcess: (proc: ChildProcess) => () => void;
-};
-
-type PiJsonTaskStatus = "ok" | "cancelled" | "timeout" | "spawn_error" | "non_zero_exit" | "assistant_error";
-
-type PiJsonTaskResult = {
-  status: PiJsonTaskStatus;
-  assistantOutput: string;
-  stderr: string;
-  exitCode?: number;
-  error?: string;
-};
-
-type PiJsonTaskOptions = {
-  args: string[];
-  prompt: string;
-  cwd: string;
-  timeoutMs: number;
-  control?: ReviewExecutionControl;
-};
-
-type PreparedReviewRun = {
-  scope: ResolvedScope;
-  includeUntracked: boolean;
-  baselineFingerprint: ReviewFingerprint;
-  models: Array<{ modelArg: string | undefined; modelLabel: string }>;
-  tasks: FocusTask[];
-};
-
-type TriageFeedbackKind = "review-thread" | "review-summary" | "pr-comment";
-type TriageDecision = "address" | "push_back" | "research" | "ignore";
-
-type TriageFeedbackComment = {
-  author: string;
-  body: string;
-  url?: string;
-  createdAt?: string;
-};
-
-type TriageFeedbackItem = {
-  id: string;
-  kind: TriageFeedbackKind;
-  author: string;
-  location: string;
-  url?: string;
-  body?: string;
-  state?: string;
-  isResolved?: boolean;
-  isOutdated?: boolean;
-  comments?: TriageFeedbackComment[];
-};
-
-type TriageItem = {
-  id: string;
-  decision: TriageDecision;
-  summary: string;
-  rationale: string;
-  action: string;
-};
-
-type TriageMessageItem = TriageItem & {
-  feedbackKind: TriageFeedbackKind;
-  location: string;
-  author: string;
-  url?: string;
-};
-
-type TriageMessageDetails = {
-  generatedAt: string;
-  pr: {
-    number: number;
-    url: string;
-    title: string;
-    baseBranch: string;
-    headBranch: string;
-    ref: string;
-  };
-  scope: {
-    mode: ResolvedScope["kind"];
-    description: string;
-  };
-  feedbackCount: number;
-  items: TriageMessageItem[];
-};
-
-type TriageRunResult =
-  | { ok: false; error: string }
-  | { ok: true; details: TriageMessageDetails };
-
-type TriagePrContext = {
-  prNumber: number;
-  prRef: string;
-  prUrl: string;
-  title: string;
-  body: string;
-  baseBranch: string;
-  headBranch: string;
-  author: string;
-  scope: Extract<ResolvedScope, { kind: "branch-diff" }>;
-  baselineFingerprint: ReviewFingerprint;
-  feedbackItems: TriageFeedbackItem[];
-};
-
-// --- Constants & prompts ---
+// --- Constants ---
 
 const REVIEW_FOCUS_TOOLS = "read,bash,grep,find,ls";
 const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -635,6 +382,259 @@ const TRIAGE_THREADS_QUERY = `query($owner: String!, $name: String!, $number: In
 }`;
 
 const REVIEW_FOCUS_NAMES = Object.keys(REVIEW_FOCUSES) as FocusName[];
+
+// --- Types ---
+
+type Priority = "P0" | "P1" | "P2" | "P3";
+type FocusName = "general" | "reuse" | "quality" | "efficiency";
+type FocusDefinition = { suffix: string; qualifier: string; context: string };
+type ReviewRunSource = "review" | "fix" | "triage";
+type ReviewRunOutcome = "success" | "failed" | "cancelled";
+type ModelFamily = "openai" | "anthropic";
+
+type ReviewTarget =
+  | { type: "auto" }
+  | { type: "uncommitted" }
+  | { type: "branch"; branch: string }
+  | { type: "commit"; sha: string }
+  | { type: "pr"; ref: string }
+  | { type: "folder"; paths: string[] }
+  | { type: "custom"; instructions: string };
+
+type ReviewRequestMode =
+  | "auto"
+  | "uncommitted"
+  | `branch:${string}`
+  | `commit:${string}`
+  | `pr:${string}`
+  | `folder:${string}`
+  | "custom";
+
+type ParsedRequest = {
+  target: ReviewTarget;
+  mode: ReviewRequestMode;
+  models: string[];
+  rawArgs: string;
+  additionalContext?: string;
+};
+
+type ReviewFingerprint = {
+  headSha: string;
+  branch: string;
+  trackedDiffHash: string;
+  untrackedHash: string;
+};
+
+type FocusFinding = {
+  priority: Priority;
+  location: string;
+  finding: string;
+  suggestion: string;
+};
+
+type FocusOutput = {
+  focus: FocusName;
+  model: string;
+  findings: FocusFinding[];
+};
+
+type FocusTask = {
+  focus: FocusName;
+  modelArg: string | undefined;
+  modelLabel: string;
+  prompt: string;
+};
+
+type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "rate_limit" | "other";
+
+type FocusTaskResult = {
+  focus: FocusName;
+  model: string;
+  ok: boolean;
+  output?: FocusOutput;
+  error?: string;
+  errorKind?: FocusTaskErrorKind;
+  missingApiProvider?: string;
+};
+
+type ReviewReportFinding = {
+  priority: Priority;
+  location: string;
+  finding: string;
+  suggestion: string;
+  focus: string;
+  model: string;
+};
+
+type ReviewDedupGroup = {
+  ids: number[];
+};
+
+type ReviewStaleness = {
+  status: "stale";
+  warning: string;
+  nextStep: string;
+};
+
+type ReviewMessageDetails = {
+  request: {
+    mode: ReviewRequestMode;
+    signature: string;
+  };
+  scope: {
+    mode: ResolvedScope["kind"];
+    description: string;
+  };
+  fingerprint: ReviewFingerprint;
+  staleness?: ReviewStaleness;
+  focusStatus: Array<{
+    focus: FocusName;
+    model: string;
+    ok: boolean;
+    error?: string;
+  }>;
+  findings: ReviewReportFinding[];
+};
+
+type ReviewRunResult =
+  | { ok: false; error: string }
+  | { ok: true; details: ReviewMessageDetails };
+
+type ResolvedScope =
+  | {
+      kind: "working-tree";
+      trackedFiles: string[];
+      untrackedFiles: string[];
+      hasHead: boolean;
+      description: string;
+    }
+  | {
+      kind: "branch-diff";
+      baseBranch: string;
+      mergeBase: string;
+      diffFiles: string[];
+      description: string;
+    }
+  | {
+      kind: "commit";
+      sha: string;
+      description: string;
+    }
+  | {
+      kind: "folder";
+      paths: string[];
+      description: string;
+    }
+  | {
+      kind: "custom";
+      instructions: string;
+      description: string;
+    };
+
+type ReviewExecutionControl = {
+  isCancelled: () => boolean;
+  registerProcess: (proc: ChildProcess) => () => void;
+};
+
+type PiJsonTaskStatus = "ok" | "cancelled" | "timeout" | "spawn_error" | "non_zero_exit" | "assistant_error";
+
+type PiJsonTaskResult = {
+  status: PiJsonTaskStatus;
+  assistantOutput: string;
+  stderr: string;
+  exitCode?: number;
+  error?: string;
+};
+
+type PiJsonTaskOptions = {
+  args: string[];
+  prompt: string;
+  cwd: string;
+  timeoutMs: number;
+  control?: ReviewExecutionControl;
+};
+
+type PreparedReviewRun = {
+  scope: ResolvedScope;
+  includeUntracked: boolean;
+  baselineFingerprint: ReviewFingerprint;
+  models: Array<{ modelArg: string | undefined; modelLabel: string }>;
+  tasks: FocusTask[];
+};
+
+type TriageFeedbackKind = "review-thread" | "review-summary" | "pr-comment";
+type TriageDecision = "address" | "push_back" | "research" | "ignore";
+
+type TriageFeedbackComment = {
+  author: string;
+  body: string;
+  url?: string;
+  createdAt?: string;
+};
+
+type TriageFeedbackItem = {
+  id: string;
+  kind: TriageFeedbackKind;
+  author: string;
+  location: string;
+  url?: string;
+  body?: string;
+  state?: string;
+  isResolved?: boolean;
+  isOutdated?: boolean;
+  comments?: TriageFeedbackComment[];
+};
+
+type TriageItem = {
+  id: string;
+  decision: TriageDecision;
+  summary: string;
+  rationale: string;
+  action: string;
+};
+
+type TriageMessageItem = TriageItem & {
+  feedbackKind: TriageFeedbackKind;
+  location: string;
+  author: string;
+  url?: string;
+};
+
+type TriageMessageDetails = {
+  generatedAt: string;
+  pr: {
+    number: number;
+    url: string;
+    title: string;
+    baseBranch: string;
+    headBranch: string;
+    ref: string;
+  };
+  scope: {
+    mode: ResolvedScope["kind"];
+    description: string;
+  };
+  feedbackCount: number;
+  items: TriageMessageItem[];
+};
+
+type TriageRunResult =
+  | { ok: false; error: string }
+  | { ok: true; details: TriageMessageDetails };
+
+type TriagePrContext = {
+  prNumber: number;
+  prRef: string;
+  prUrl: string;
+  title: string;
+  body: string;
+  baseBranch: string;
+  headBranch: string;
+  author: string;
+  scope: Extract<ResolvedScope, { kind: "branch-diff" }>;
+  baselineFingerprint: ReviewFingerprint;
+  feedbackItems: TriageFeedbackItem[];
+};
 
 // --- Helpers ---
 

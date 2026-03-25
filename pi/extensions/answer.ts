@@ -25,16 +25,6 @@ import {
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 
-// Structured output format for question extraction
-interface ExtractedQuestion {
-  question: string;
-  context?: string;
-}
-
-interface ExtractionResult {
-  questions: ExtractedQuestion[];
-}
-
 const SYSTEM_PROMPT = `You extract items that need user input from assistant text:
 
 - Direct questions
@@ -89,6 +79,16 @@ Example output:
 
 const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
 const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
+
+// Structured output format for question extraction
+interface ExtractedQuestion {
+  question: string;
+  context?: string;
+}
+
+interface ExtractionResult {
+  questions: ExtractedQuestion[];
+}
 
 type ModelFamily = "openai" | "anthropic";
 

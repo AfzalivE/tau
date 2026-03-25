@@ -13,6 +13,24 @@ import { compact } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 
+const LOOP_PRESETS = [
+  { value: "tests", label: "Until tests pass", description: "" },
+  { value: "custom", label: "Until custom condition", description: "" },
+  { value: "self", label: "Self driven (agent decides)", description: "" },
+] as const;
+
+const LOOP_STATE_ENTRY = "loop-state";
+const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
+const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
+
+const SUMMARY_SYSTEM_PROMPT = `You summarize loop breakout conditions for a status widget.
+Return a concise phrase (max 6 words) that says when the loop should stop.
+Use plain text only, no quotes, no punctuation, no prefix.
+
+Form should be "breaks when ...", "loops until ...", "stops on ...", "runs until ...", or similar.
+Use the best form that makes sense for the loop condition.
+`;
+
 type LoopMode = "tests" | "custom" | "self";
 
 type LoopToolDetails = {
@@ -28,15 +46,8 @@ type LoopStateData = {
   loopCount?: number;
 };
 
-const LOOP_PRESETS = [
-  { value: "tests", label: "Until tests pass", description: "" },
-  { value: "custom", label: "Until custom condition", description: "" },
-  { value: "self", label: "Self driven (agent decides)", description: "" },
-] as const;
-
-const LOOP_STATE_ENTRY = "loop-state";
-
 type PromptStatus = "completed" | "error";
+type ModelFamily = "openai" | "anthropic";
 
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
   pi.events.emit("ui:prompt_start", { source: "loop" });
@@ -51,19 +62,6 @@ async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Pro
     pi.events.emit("ui:prompt_end", { source: "loop", status });
   }
 }
-
-const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
-const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
-
-type ModelFamily = "openai" | "anthropic";
-
-const SUMMARY_SYSTEM_PROMPT = `You summarize loop breakout conditions for a status widget.
-Return a concise phrase (max 6 words) that says when the loop should stop.
-Use plain text only, no quotes, no punctuation, no prefix.
-
-Form should be "breaks when ...", "loops until ...", "stops on ...", "runs until ...", or similar.
-Use the best form that makes sense for the loop condition.
-`;
 
 function detectModelFamily(provider: string): ModelFamily | null {
   const normalizedProvider = provider.toLowerCase();

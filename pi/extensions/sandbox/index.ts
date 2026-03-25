@@ -52,6 +52,40 @@ import {
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { type BashOperations, createBashTool } from "@mariozechner/pi-coding-agent";
 
+// --- Constants ---
+
+const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
+
+const DEFAULT_CONFIG: SandboxConfig = {
+  enabled: true,
+  mode: DEFAULT_PROMPT_MODE,
+  network: {
+    allowedDomains: [
+      "npmjs.org",
+      "*.npmjs.org",
+      "registry.npmjs.org",
+      "registry.yarnpkg.com",
+      "pypi.org",
+      "*.pypi.org",
+      "github.com",
+      "*.github.com",
+      "api.github.com",
+      "raw.githubusercontent.com",
+    ],
+    deniedDomains: [],
+  },
+  filesystem: {
+    denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
+    allowWrite: [".", "/tmp"],
+    denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+  },
+};
+
+const STATUS_KEY = "sandbox";
+const SANDBOX_BLOCK_LIMIT = 50;
+
+// --- Types ---
+
 type PromptMode = "interactive" | "non-interactive";
 
 type SandboxBypassReason = "no-sandbox-flag" | "config-disabled";
@@ -85,6 +119,15 @@ type SandboxBlockReason =
 type SandboxConfigPathStatus = "loaded" | "parse-error";
 type SandboxConfigPathLabel = "Global" | "Project";
 
+type PromptStatus = "completed" | "error";
+type UiLevel = "info" | "warning" | "error";
+
+type ListOp = "add" | "remove";
+type NetworkList = "allow" | "deny";
+type FilesystemList = "deny-read" | "allow-write" | "deny-write";
+
+type FilesystemViolationKind = "read" | "write" | "unknown";
+
 interface SandboxBlock {
   timestamp: number;
   kind: SandboxBlockKind;
@@ -107,37 +150,12 @@ interface LoadedSandboxConfig {
   paths: SandboxConfigPath[];
 }
 
-const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
+interface FilesystemViolation {
+  kind: FilesystemViolationKind;
+  path?: string;
+}
 
-const DEFAULT_CONFIG: SandboxConfig = {
-  enabled: true,
-  mode: DEFAULT_PROMPT_MODE,
-  network: {
-    allowedDomains: [
-      "npmjs.org",
-      "*.npmjs.org",
-      "registry.npmjs.org",
-      "registry.yarnpkg.com",
-      "pypi.org",
-      "*.pypi.org",
-      "github.com",
-      "*.github.com",
-      "api.github.com",
-      "raw.githubusercontent.com",
-    ],
-    deniedDomains: [],
-  },
-  filesystem: {
-    denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
-    allowWrite: [".", "/tmp"],
-    denyWrite: [".env", ".env.*", "*.pem", "*.key"],
-  },
-};
-
-const STATUS_KEY = "sandbox";
-const SANDBOX_BLOCK_LIMIT = 50;
-
-type PromptStatus = "completed" | "error";
+// --- Helpers ---
 
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
   pi.events.emit("ui:prompt_start", { source: "sandbox" });
@@ -151,19 +169,6 @@ async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Pro
   } finally {
     pi.events.emit("ui:prompt_end", { source: "sandbox", status });
   }
-}
-
-type UiLevel = "info" | "warning" | "error";
-
-type ListOp = "add" | "remove";
-type NetworkList = "allow" | "deny";
-type FilesystemList = "deny-read" | "allow-write" | "deny-write";
-
-type FilesystemViolationKind = "read" | "write" | "unknown";
-
-interface FilesystemViolation {
-  kind: FilesystemViolationKind;
-  path?: string;
 }
 
 function normalizePromptMode(value: unknown): PromptMode {

@@ -15,6 +15,21 @@ import type { PiModelSelection } from "./providers/pi-model.shared.js";
 import { selectCurrentPiModel, selectFallbackPiModel } from "./providers/pi-model.shared.js";
 import type { BrowserProfile, WebsearchAuthSource, WebsearchBackendId, WebsearchBrowserFamily, WebsearchConfig, WebsearchResult, WebsearchRouteId } from "./types.js";
 
+const PI_ROUTE_HANDLERS: Record<`pi:${WebsearchBackendId}`, PiRouteHandler> = {
+  "pi:openai-codex": {
+    predicate: isPiOpenAICodexModel,
+    search: searchWithPiOpenAICodex,
+  },
+  "pi:anthropic": {
+    predicate: isPiAnthropicModel,
+    search: searchWithPiAnthropic,
+  },
+  "pi:gemini": {
+    predicate: isPiGeminiModel,
+    search: searchWithPiGemini,
+  },
+};
+
 interface SearchSummary {
   result: string;
   route: WebsearchRouteId;
@@ -30,21 +45,6 @@ interface PiRouteHandler {
   predicate: (model: Model<Api>) => boolean;
   search: (selection: PiModelSelection, query: string, signal?: AbortSignal) => Promise<WebsearchResult>;
 }
-
-const PI_ROUTE_HANDLERS: Record<`pi:${WebsearchBackendId}`, PiRouteHandler> = {
-  "pi:openai-codex": {
-    predicate: isPiOpenAICodexModel,
-    search: searchWithPiOpenAICodex,
-  },
-  "pi:anthropic": {
-    predicate: isPiAnthropicModel,
-    search: searchWithPiAnthropic,
-  },
-  "pi:gemini": {
-    predicate: isPiGeminiModel,
-    search: searchWithPiGemini,
-  },
-};
 
 function toSearchSummary(route: WebsearchRouteId, result: WebsearchResult): SearchSummary {
   return {
