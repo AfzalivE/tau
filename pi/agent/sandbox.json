@@ -62,6 +62,7 @@
       ".",
       "/tmp",
       "/private/tmp",
+      "~/.pi/agent/*.lock",
       "~/.gnupg",
       "~/.cache",
       "~/.docker",
