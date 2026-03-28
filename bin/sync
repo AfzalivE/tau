@@ -7,12 +7,12 @@ set -euo pipefail
 #   - ~/.agents/AGENTS.md                 (shared instructions)
 #   - ~/.agents/skills                    (Agent Skills standard)
 #   - ~/.agents/pi/extensions             (Pi-specific extensions)
-#   - ~/.agents/pi/agent/sandbox.json     (Pi sandbox config)
+#   - ~/.agents/pi/agent/*.json           (Pi JSON config defaults)
 #
 # Targets:
 #   - Codex:  ~/.codex/AGENTS.md
 #   - Claude: ~/.claude/CLAUDE.md + ~/.claude/skills
-#   - Pi:     ~/.pi/agent/AGENTS.md + ~/.pi/agent/extensions + ~/.pi/agent/sandbox.json
+#   - Pi:     ~/.pi/agent/AGENTS.md + ~/.pi/agent/extensions + ~/.pi/agent/*.json
 #
 # Notes:
 #   - Pi and Codex auto-discover skills from ~/.agents/skills.
@@ -22,12 +22,10 @@ AGENTS_SKILLS_DIR="${HOME}/.agents/skills"
 AGENTS_INSTRUCTIONS_FILE="${HOME}/.agents/AGENTS.md"
 AGENTS_PI_EXTENSIONS_DIR="${HOME}/.agents/pi/extensions"
 AGENTS_PI_AGENT_DIR="${HOME}/.agents/pi/agent"
-AGENTS_PI_SANDBOX_FILE="${AGENTS_PI_AGENT_DIR}/sandbox.json"
 
 CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
 PI_AGENT_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_AGENT_DIR}/extensions"
-PI_SANDBOX_FILE="${PI_AGENT_DIR}/sandbox.json"
 
 CODEX_INSTRUCTIONS_FILE="${HOME}/.codex/AGENTS.md"
 CLAUDE_INSTRUCTIONS_FILE="${HOME}/.claude/CLAUDE.md"
@@ -57,7 +55,7 @@ Notes:
   - ~/.agents/skills are symlinked only to ~/.claude/skills.
   - Codex and Pi auto-discover skills from ~/.agents/skills.
   - Pi extensions are synced from ~/.agents/pi/extensions to ~/.pi/agent/extensions, excluding node_modules.
-  - Pi sandbox config is symlinked from ~/.agents/pi/agent/sandbox.json to ~/.pi/agent/sandbox.json.
+  - Pi JSON config files are symlinked from ~/.agents/pi/agent/*.json to ~/.pi/agent/*.json.
 EOF
 }
 
@@ -124,6 +122,15 @@ for entry in "${AGENTS_PI_EXTENSIONS_DIR}"/*; do
   fi
 done
 
+pi_agent_json_files=()
+for entry in "${AGENTS_PI_AGENT_DIR}"/*.json; do
+  [[ -e "${entry}" ]] || continue
+  base="$(basename "${entry}")"
+  [[ "${base}" == .* ]] && continue
+  [[ -f "${entry}" ]] || continue
+  pi_agent_json_files+=("${base}")
+done
+
 declare -a plan=()
 
 plan_symlink() {
@@ -139,12 +146,24 @@ plan_remove() {
     "${PI_EXTENSIONS_DIR}"/* | \
     "${CODEX_INSTRUCTIONS_FILE}" | \
     "${CLAUDE_INSTRUCTIONS_FILE}" | \
-    "${PI_INSTRUCTIONS_FILE}" | \
-    "${PI_SANDBOX_FILE}")
+    "${PI_INSTRUCTIONS_FILE}")
       plan+=("rmrf:${path}")
       ;;
     *)
       echo "error: refusing to remove unexpected path: ${path}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+plan_remove_pi_agent_json() {
+  local path="$1"
+  case "${path}" in
+    "${PI_AGENT_DIR}"/*.json)
+      plan+=("rmrf:${path}")
+      ;;
+    *)
+      echo "error: refusing to remove unexpected Pi JSON config path: ${path}" >&2
       exit 1
       ;;
   esac
@@ -211,23 +230,29 @@ else
   echo "warn: ${AGENTS_INSTRUCTIONS_FILE} not found; skipping instruction sync" >&2
 fi
 
-# --- Pi sandbox config ---
-if [[ -f "${AGENTS_PI_SANDBOX_FILE}" ]]; then
-  if [[ -L "${PI_SANDBOX_FILE}" ]]; then
-    existing_target="$(readlink "${PI_SANDBOX_FILE}")"
-    if [[ "${existing_target}" != "${AGENTS_PI_SANDBOX_FILE}" ]]; then
-      plan_remove "${PI_SANDBOX_FILE}"
-      plan_symlink "${AGENTS_PI_SANDBOX_FILE}" "${PI_SANDBOX_FILE}"
+# --- Pi JSON config ---
+for json_name in "${pi_agent_json_files[@]}"; do
+  src="${AGENTS_PI_AGENT_DIR}/${json_name}"
+  dest="${PI_AGENT_DIR}/${json_name}"
+
+  if [[ -L "${dest}" ]]; then
+    existing_target="$(readlink "${dest}")"
+    if [[ "${existing_target}" == "${src}" ]]; then
+      continue
     fi
-  elif [[ -e "${PI_SANDBOX_FILE}" ]]; then
-    plan_remove "${PI_SANDBOX_FILE}"
-    plan_symlink "${AGENTS_PI_SANDBOX_FILE}" "${PI_SANDBOX_FILE}"
-  else
-    plan_symlink "${AGENTS_PI_SANDBOX_FILE}" "${PI_SANDBOX_FILE}"
+    plan_remove_pi_agent_json "${dest}"
+    plan_symlink "${src}" "${dest}"
+    continue
   fi
-else
-  echo "warn: ${AGENTS_PI_SANDBOX_FILE} not found; skipping Pi sandbox config sync" >&2
-fi
+
+  if [[ -e "${dest}" ]]; then
+    plan_remove_pi_agent_json "${dest}"
+    plan_symlink "${src}" "${dest}"
+    continue
+  fi
+
+  plan_symlink "${src}" "${dest}"
+done
 
 # --- Pi extensions ---
 for ext_name in "${pi_extensions[@]}"; do
@@ -293,6 +318,31 @@ if [[ "${PRUNE}" -eq 1 ]]; then
 
     if [[ "${keep}" -eq 0 ]]; then
       plan_remove "${entry}"
+    fi
+  done
+
+  # Prune repo-managed pi agent JSON symlinks that no longer exist in ~/.agents/pi/agent/
+  for entry in "${PI_AGENT_DIR}"/*.json; do
+    [[ -e "${entry}" ]] || continue
+    [[ -L "${entry}" ]] || continue
+
+    existing_target="$(readlink "${entry}")"
+    case "${existing_target}" in
+      "${AGENTS_PI_AGENT_DIR}"/*.json) ;;
+      *) continue ;;
+    esac
+
+    base="$(basename "${entry}")"
+    keep=0
+    for json_name in "${pi_agent_json_files[@]}"; do
+      if [[ "${base}" == "${json_name}" ]]; then
+        keep=1
+        break
+      fi
+    done
+
+    if [[ "${keep}" -eq 0 ]]; then
+      plan_remove_pi_agent_json "${entry}"
     fi
   done
 fi

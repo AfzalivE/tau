@@ -8,7 +8,7 @@ Reusable agent harness shared across Codex, Claude, and Pi. Everything lives her
 AGENTS.md              Shared base instructions (symlinked into each agent folder)
 skills/                Skill source of truth (SKILL.md + optional scripts/assets)
 pi/extensions/         Pi-specific extensions
-pi/agent/sandbox.json  Repo-managed Pi sandbox defaults
+pi/agent/*.json        Repo-managed Pi JSON defaults
 bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
 ```
 
@@ -21,7 +21,7 @@ bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
 | Instructions | `~/.codex/AGENTS.md` | `~/.claude/CLAUDE.md` | `~/.pi/agent/AGENTS.md` |
 | Skills | `~/.agents/skills` | `~/.claude/skills/` | `~/.agents/skills` |
 | Extensions | — | — | `~/.pi/agent/extensions/` |
-| Sandbox config | — | — | `~/.pi/agent/sandbox.json` |
+| JSON config | — | — | `~/.pi/agent/*.json` |
 
 ```bash
 ~/.agents/bin/sync --prune
@@ -57,6 +57,7 @@ bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
 | interlude | `ctrl+x` <small>(configurable)</small> | Stash the current message draft, send one interlude message, then restore the draft |
 | loop | `/loop` | Repeat a prompt until the agent signals success |
 | notify |  | Terminal notification when the agent is waiting for input |
+| openai-verbosity | `/verbosity` | Set verbosity for supported OpenAI models |
 | review | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes |
 | sandbox | `/sandbox` | OS-level sandboxing for bash commands with runtime overrides |
 | session-breakdown | `/session-breakdown` | Usage stats and contribution-style calendar |
