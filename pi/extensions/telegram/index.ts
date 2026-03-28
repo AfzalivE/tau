@@ -13,6 +13,8 @@ const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const AUTO_CONNECT_INTERVAL_MS = 3_000;
+const COMPACTION_RELEASE_DELAY_MS = 500;
+const COMPACTION_STALE_RESET_MS = 120_000;
 
 type DaemonToClientMessage =
   | { type: "registered"; sessionNo: number }
@@ -23,8 +25,8 @@ type DaemonToClientMessage =
   | { type: "abort" };
 
 type ClientToDaemonMessage =
-  | { type: "register"; windowId: string; cwd: string; sessionName?: string; busy: boolean }
-  | { type: "meta"; cwd: string; sessionName?: string; busy: boolean }
+  | { type: "register"; windowId: string; cwd: string; sessionName?: string; busy: boolean; compacting: boolean }
+  | { type: "meta"; cwd: string; sessionName?: string; busy: boolean; compacting: boolean }
   | { type: "request_pin" }
   | { type: "shutdown" }
   | { type: "turn_end"; text: string };
@@ -258,12 +260,112 @@ export default function (pi: ExtensionAPI) {
     windowId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     sessionNo: null as number | null,
     busy: false,
+    compacting: false,
+    pendingInjectedTexts: [] as string[],
+    flushInjectedTextsPromise: null as Promise<void> | null,
+    pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
+    compactionResetTimer: null as ReturnType<typeof setTimeout> | null,
     lastCtx: null as ExtensionContext | null,
     connectPromise: null as Promise<void> | null,
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
   };
 
   const daemonMessageHandlers = new Set<(msg: DaemonToClientMessage) => void>();
+
+  function clearPendingInjectedFlushTimer() {
+    if (!state.pendingInjectedFlushTimer) return;
+    clearTimeout(state.pendingInjectedFlushTimer);
+    state.pendingInjectedFlushTimer = null;
+  }
+
+  function schedulePendingInjectedFlush(delayMs = 0) {
+    if (state.pendingInjectedFlushTimer) return;
+    state.pendingInjectedFlushTimer = setTimeout(() => {
+      state.pendingInjectedFlushTimer = null;
+      void flushPendingInjectedTexts();
+    }, delayMs);
+    state.pendingInjectedFlushTimer.unref?.();
+  }
+
+  function clearCompactionResetTimer() {
+    if (!state.compactionResetTimer) return;
+    clearTimeout(state.compactionResetTimer);
+    state.compactionResetTimer = null;
+  }
+
+  function applyCompactingState(compacting: boolean, ctx?: ExtensionContext | null) {
+    state.compacting = compacting;
+
+    if (compacting) {
+      clearCompactionResetTimer();
+      state.compactionResetTimer = setTimeout(() => {
+        state.compactionResetTimer = null;
+        applyCompactingState(false, state.lastCtx);
+      }, COMPACTION_STALE_RESET_MS);
+      state.compactionResetTimer.unref?.();
+    } else {
+      clearCompactionResetTimer();
+    }
+
+    const currentCtx = ctx ?? state.lastCtx;
+    if (currentCtx) {
+      if (isSocketConnected()) {
+        updateMeta(currentCtx);
+      } else {
+        void tryAutoConnect();
+      }
+    }
+
+    if (!compacting) {
+      void flushPendingInjectedTexts();
+    }
+  }
+
+  async function flushPendingInjectedTexts(): Promise<void> {
+    if (state.flushInjectedTextsPromise) {
+      await state.flushInjectedTextsPromise;
+      return;
+    }
+
+    const flushPromise = (async () => {
+      while (true) {
+        const ctx = state.lastCtx;
+        const text = state.pendingInjectedTexts[0];
+        if (!ctx || !text) return;
+        if (state.compacting) return;
+        if (ctx.isIdle() && ctx.hasPendingMessages()) {
+          schedulePendingInjectedFlush(500);
+          return;
+        }
+
+        try {
+          if (ctx.isIdle()) {
+            pi.sendUserMessage(text);
+            state.pendingInjectedTexts.shift();
+            if (state.pendingInjectedTexts.length > 0) {
+              schedulePendingInjectedFlush(500);
+            }
+            return;
+          }
+
+          pi.sendUserMessage(text, { deliverAs: "followUp" });
+          state.pendingInjectedTexts.shift();
+        } catch {
+          schedulePendingInjectedFlush(500);
+          return;
+        }
+      }
+    })();
+
+    state.flushInjectedTextsPromise = flushPromise;
+    try {
+      await flushPromise;
+    } finally {
+      if (state.flushInjectedTextsPromise === flushPromise) {
+        state.flushInjectedTextsPromise = null;
+      }
+    }
+  }
 
   function isSocketConnected() {
     return !!(state.socket && !state.socket.destroyed);
@@ -315,6 +417,7 @@ export default function (pi: ExtensionAPI) {
       cwd: ctx.cwd,
       sessionName,
       busy: state.busy,
+      compacting: state.compacting,
     });
   }
 
@@ -398,6 +501,7 @@ export default function (pi: ExtensionAPI) {
         cwd: ctx.cwd,
         sessionName: pi.getSessionName() ?? undefined,
         busy: state.busy,
+        compacting: state.compacting,
       });
     })();
 
@@ -514,16 +618,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (msg.type === "inject") {
-      const ctx = state.lastCtx;
-      if (!ctx) return;
       const text = msg.text;
       if (!text) return;
-
-      if (!ctx.isIdle()) {
-        pi.sendUserMessage(text, { deliverAs: "followUp" });
-      } else {
-        pi.sendUserMessage(text);
-      }
+      state.pendingInjectedTexts.push(text);
+      void flushPendingInjectedTexts();
       return;
     }
 
@@ -539,33 +637,58 @@ export default function (pi: ExtensionAPI) {
     state.lastCtx = ctx;
     startAutoConnectLoop();
     void tryAutoConnect();
+    void flushPendingInjectedTexts();
   });
 
   pi.on("session_switch", async (_event, ctx) => {
     state.lastCtx = ctx;
     if (isSocketConnected()) {
       updateMeta(ctx);
+      void flushPendingInjectedTexts();
       return;
     }
     void tryAutoConnect();
+    void flushPendingInjectedTexts();
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    if (state.compacting) {
+      applyCompactingState(false, ctx);
+    }
+
     state.busy = true;
     if (isSocketConnected()) {
       updateMeta(ctx);
+      void flushPendingInjectedTexts();
       return;
     }
     void tryAutoConnect();
+    void flushPendingInjectedTexts();
   });
 
   pi.on("agent_end", async (_event, ctx) => {
     state.busy = false;
     if (isSocketConnected()) {
       updateMeta(ctx);
+      void flushPendingInjectedTexts();
       return;
     }
     void tryAutoConnect();
+    void flushPendingInjectedTexts();
+  });
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    applyCompactingState(true, ctx);
+    event.signal.addEventListener("abort", () => applyCompactingState(false, state.lastCtx ?? ctx), { once: true });
+  });
+
+  pi.on("session_compact", async (_event, ctx) => {
+    clearCompactionResetTimer();
+    state.compactionResetTimer = setTimeout(() => {
+      state.compactionResetTimer = null;
+      applyCompactingState(false, state.lastCtx ?? ctx);
+    }, COMPACTION_RELEASE_DELAY_MS);
+    state.compactionResetTimer.unref?.();
   });
 
   pi.on("turn_end", async (event: any) => {
@@ -577,6 +700,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     stopAutoConnectLoop();
+    clearPendingInjectedFlushTimer();
+    clearCompactionResetTimer();
+    state.busy = false;
+    state.compacting = false;
+    state.pendingInjectedTexts = [];
     disconnect(false);
     state.lastCtx = null;
   });

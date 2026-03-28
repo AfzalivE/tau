@@ -60,7 +60,7 @@ First time:
 - `/session quit N` – quit a specific headless session
 - `/unpair` – unpair Telegram and terminate headless sessions
 - `/esc` – abort current run in the active session
-- plain text – send to the active session (queued as follow-up if the agent is busy)
+- plain text – send to the active session (queued as follow-up if the agent is busy, or held until compaction finishes)
 
 ## Notes
 
@@ -74,4 +74,6 @@ First time:
   - For short messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
   - Long messages are sent as plain text chunks.
 - System/daemon messages are sent in italics.
+- When a session starts compacting, Telegram receives `[session N] compacting`.
+- Messages sent during compaction are queued and delivered after compaction finishes.
 - While the active session is busy, the daemon sends Telegram `typing…` chat actions periodically.

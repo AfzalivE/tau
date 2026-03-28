@@ -34,6 +34,7 @@ const UNPAIRED_IDLE_SHUTDOWN_MS = 60_000;
 const HEADLESS_START_TIMEOUT_MS = 10_000;
 const HEADLESS_STOP_TIMEOUT_MS = 5_000;
 const HEADLESS_ABORT_TIMEOUT_MS = 60_000;
+const POST_COMPACTION_RETRY_GRACE_MS = 500;
 const MAX_UNREAD_TURNS_PER_SESSION = 20;
 const MAX_QUEUED_HEADLESS_PROMPTS = 20;
 const PI_EXECUTABLE = process.env.PI_TELEGRAM_PI_EXECUTABLE || "pi";
@@ -518,6 +519,67 @@ function clearActivityNotice(sessionKey) {
   }
 }
 
+function resolveSessionCompactionWaiters(session) {
+  if (!session.compactionWaiters?.size) return;
+  for (const waiter of session.compactionWaiters) {
+    waiter.resolve();
+  }
+  session.compactionWaiters.clear();
+}
+
+function rejectSessionCompactionWaiters(session, error) {
+  if (!session.compactionWaiters?.size) return;
+  for (const waiter of session.compactionWaiters) {
+    waiter.reject(error);
+  }
+  session.compactionWaiters.clear();
+}
+
+function waitForSessionCompactionToFinish(session) {
+  if (!session.compacting) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    if (!session.compactionWaiters) {
+      session.compactionWaiters = new Set();
+    }
+
+    session.compactionWaiters.add({ resolve, reject });
+  });
+}
+
+function setSessionCompacting(session, compacting) {
+  const next = Boolean(compacting);
+  const previous = Boolean(session.compacting);
+  if (previous === next) return;
+
+  session.compacting = next;
+
+  if (next) {
+    if (pairedChatId) {
+      botSendSystem(pairedChatId, `[session ${session.sessionNo}] compacting`).catch(() => {});
+    }
+    return;
+  }
+
+  resolveSessionCompactionWaiters(session);
+}
+
+async function waitForHeadlessSessionPromptWindow(session) {
+  while (sessions.has(session.key)) {
+    await refreshHeadlessSessionState(session).catch(() => {});
+
+    const pendingMessageCount = typeof session.pendingMessageCount === "number" ? session.pendingMessageCount : 0;
+    const waitingForRetryStart = !session.busy && session.retryAfterCompactionUntil > Date.now();
+    if (!session.compacting && !waitingForRetryStart && (session.busy || pendingMessageCount === 0)) {
+      return;
+    }
+
+    await sleep(100);
+  }
+
+  throw new Error("Session is no longer available.");
+}
+
 function markSessionSeen(session) {
   chatState.lastSeenSeqBySessionKey[session.key] = session.lastTurnSeq;
   session.unreadTurns = [];
@@ -829,6 +891,14 @@ async function refreshHeadlessSessionState(session) {
     session.busy = data.isStreaming;
     updateTypingIndicator();
   }
+
+  if (typeof data.pendingMessageCount === "number") {
+    session.pendingMessageCount = data.pendingMessageCount;
+  }
+
+  if (typeof data.isCompacting === "boolean") {
+    setSessionCompacting(session, data.isCompacting);
+  }
 }
 
 async function refreshHeadlessSessionStates(targets) {
@@ -899,6 +969,9 @@ async function createHeadlessSession(cwd) {
         ? stateResponse.data.sessionName.trim()
         : undefined,
     busy: Boolean(stateResponse.data?.isStreaming),
+    compacting: Boolean(stateResponse.data?.isCompacting),
+    pendingMessageCount: Number.isFinite(stateResponse.data?.pendingMessageCount) ? stateResponse.data.pendingMessageCount : 0,
+    retryAfterCompactionUntil: 0,
     lastTurnText: undefined,
     lastTurnSeq: 0,
     unreadTurns: [],
@@ -908,6 +981,7 @@ async function createHeadlessSession(cwd) {
     closing: false,
     queuedPromptCount: 0,
     pendingSendCount: 0,
+    compactionWaiters: new Set(),
     sendQueue: Promise.resolve(),
     async sendText(text) {
       const backlogSize = session.pendingSendCount + session.queuedPromptCount;
@@ -918,6 +992,8 @@ async function createHeadlessSession(cwd) {
       session.pendingSendCount += 1;
       const sendOperation = session.sendQueue
         .then(async () => {
+          await waitForHeadlessSessionPromptWindow(session);
+
           const waitForStart = !session.busy;
           session.queuedPromptCount += 1;
 
@@ -960,7 +1036,20 @@ async function createHeadlessSession(cwd) {
   rpc.onEvent((event) => {
     if (!sessions.has(session.key)) return;
 
+    if (event.type === "compaction_start") {
+      session.retryAfterCompactionUntil = 0;
+      setSessionCompacting(session, true);
+      return;
+    }
+
+    if (event.type === "compaction_end") {
+      session.retryAfterCompactionUntil = event.willRetry ? Date.now() + POST_COMPACTION_RETRY_GRACE_MS : 0;
+      setSessionCompacting(session, false);
+      return;
+    }
+
     if (event.type === "agent_start") {
+      session.retryAfterCompactionUntil = 0;
       session.queuedPromptCount = Math.max(0, session.queuedPromptCount - 1);
       session.busy = true;
       updateTypingIndicator();
@@ -981,6 +1070,7 @@ async function createHeadlessSession(cwd) {
   });
 
   rpc.onClose(() => {
+    rejectSessionCompactionWaiters(session, new Error("Session ended while compacting."));
     const removed = removeSession(session.key);
     if (!removed || shuttingDown || session.closing) return;
     if (!pairedChatId) return;
@@ -1240,13 +1330,22 @@ async function startServer() {
             cwd: msg.cwd,
             sessionName: msg.sessionName,
             busy: !!msg.busy,
+            compacting: !!existing?.compacting,
             lastTurnText: existing?.lastTurnText,
             lastTurnSeq: existing?.lastTurnSeq ?? 0,
             unreadTurns: existing?.unreadTurns ?? [],
             droppedUnreadTurns: existing?.droppedUnreadTurns ?? 0,
+            compactionWaiters: existing?.compactionWaiters ?? new Set(),
+            sendQueue: existing?.sendQueue ?? Promise.resolve(),
             async sendText(text) {
-              if (socket.destroyed) throw new Error("Session is no longer connected.");
-              send({ type: "inject", text });
+              const sendOperation = session.sendQueue.then(async () => {
+                await waitForSessionCompactionToFinish(session);
+                if (socket.destroyed) throw new Error("Session is no longer connected.");
+                send({ type: "inject", text });
+              });
+
+              session.sendQueue = sendOperation.catch(() => {});
+              await sendOperation;
             },
             async abort() {
               if (socket.destroyed) throw new Error("Session is no longer connected.");
@@ -1267,6 +1366,7 @@ async function startServer() {
           };
 
           sessions.set(sessionKey, session);
+          setSessionCompacting(session, !!msg.compacting);
           send({ type: "registered", sessionNo });
           updateTypingIndicator();
           break;
@@ -1279,6 +1379,9 @@ async function startServer() {
           session.cwd = msg.cwd ?? session.cwd;
           session.sessionName = msg.sessionName ?? session.sessionName;
           session.busy = !!msg.busy;
+          if (typeof msg.compacting === "boolean") {
+            setSessionCompacting(session, msg.compacting);
+          }
           if (chatState.activeSessionKey === sessionKey) updateTypingIndicator();
           break;
         }
@@ -1338,6 +1441,7 @@ async function startServer() {
 
       const current = sessions.get(sessionKey);
       if (current && current.kind === "window" && current.socket === socket) {
+        rejectSessionCompactionWaiters(current, new Error("Session ended while compacting."));
         removeSession(sessionKey);
       }
 
