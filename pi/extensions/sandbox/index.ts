@@ -1593,7 +1593,7 @@ export default function (pi: ExtensionAPI) {
           applyRuntimeConfigForSession(ctx, runtimeConfig, "active");
         }
 
-        notify(ctx, "Sandbox enabled for this session", "info");
+        notify(ctx, "Sandbox enabled", "info");
         return;
       }
 
@@ -1610,7 +1610,7 @@ export default function (pi: ExtensionAPI) {
 
         sandboxState = { status: "suspended", runtimeConfig: sandboxState.runtimeConfig };
         setSandboxStatus(ctx, false);
-        notify(ctx, "Sandbox disabled for this session", "info");
+        notify(ctx, "Sandbox disabled", "info");
         return;
       }
 
