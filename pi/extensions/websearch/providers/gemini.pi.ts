@@ -51,12 +51,18 @@ function resolveGeminiInteractionsUrl(baseUrl?: string): string {
 }
 
 function buildGeminiHeaders(selection: PiModelSelection): Record<string, string> {
+  const headers = { ...(selection.headers ?? {}) };
+
   return {
-    ...(selection.model.headers ?? {}),
-    "x-goog-api-key": selection.apiKey,
+    ...headers,
+    ...(hasHeader(headers, "x-goog-api-key") || !selection.apiKey ? {} : { "x-goog-api-key": selection.apiKey }),
     "content-type": "application/json",
     accept: "application/json",
   };
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  return Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
 }
 
 function extractAnnotationSources(output: { annotations?: Array<{ source?: string; url?: string; title?: string }> }): WebsearchSource[] {

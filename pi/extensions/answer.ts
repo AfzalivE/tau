@@ -90,6 +90,20 @@ interface ExtractionResult {
   questions: ExtractedQuestion[];
 }
 
+interface ModelRequestAuth {
+  model: Model<Api>;
+  apiKey?: string;
+  headers?: Record<string, string>;
+}
+
+type ModelAuthLookup = {
+  find: (provider: string, modelId: string) => Model<Api> | undefined;
+  getApiKeyAndHeaders: (model: Model<Api>) => Promise<
+    | { ok: true; apiKey?: string; headers?: Record<string, string> }
+    | { ok: false; error: string }
+  >;
+};
+
 type ModelFamily = "openai" | "anthropic";
 
 function detectModelFamily(provider: string): ModelFamily | null {
@@ -104,13 +118,10 @@ function detectModelFamily(provider: string): ModelFamily | null {
  */
 async function selectExtractionModel(
   currentModel: Model<Api>,
-  modelRegistry: {
-    find: (provider: string, modelId: string) => Model<Api> | undefined;
-    getApiKey: (model: Model<Api>) => Promise<string | undefined>;
-  },
-): Promise<Model<Api>> {
+  modelRegistry: ModelAuthLookup,
+): Promise<ModelRequestAuth | null> {
   const family = detectModelFamily(currentModel.provider);
-  if (!family) return currentModel;
+  if (!family) return resolveModelRequestAuth(modelRegistry, currentModel);
 
   const modelId = family === "openai" ? OPENAI_FAST_MODEL_ID : ANTHROPIC_FAST_MODEL_ID;
   const providerCandidates =
@@ -122,13 +133,21 @@ async function selectExtractionModel(
     const model = modelRegistry.find(provider, modelId);
     if (!model) continue;
 
-    const apiKey = await modelRegistry.getApiKey(model);
-    if (apiKey) {
-      return model;
+    const auth = await resolveModelRequestAuth(modelRegistry, model);
+    if (auth) {
+      return auth;
     }
   }
 
-  return currentModel;
+  return resolveModelRequestAuth(modelRegistry, currentModel);
+}
+
+async function resolveModelRequestAuth(
+  modelRegistry: ModelAuthLookup,
+  model: Model<Api>,
+): Promise<ModelRequestAuth | null> {
+  const auth = await modelRegistry.getApiKeyAndHeaders(model);
+  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers } : null;
 }
 
 /**
@@ -485,15 +504,18 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Select the best model for extraction (prefer a fast model in the current family).
-      const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+      const extractionSelection = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+      if (!extractionSelection) {
+        ctx.ui.notify("No configured Pi model is available for question extraction", "error");
+        return;
+      }
 
       // Run extraction with loader UI
       const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
-        const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
+        const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionSelection.model.id}...`);
         loader.onAbort = () => done(null);
 
         const doExtract = async () => {
-          const apiKey = await ctx.modelRegistry.getApiKey(extractionModel);
           const userMessage: UserMessage = {
             role: "user",
             content: [{ type: "text", text: lastAssistantText! }],
@@ -501,9 +523,9 @@ export default function (pi: ExtensionAPI) {
           };
 
           const response = await complete(
-            extractionModel,
+            extractionSelection.model,
             { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            { apiKey, signal: loader.signal },
+            { apiKey: extractionSelection.apiKey, headers: extractionSelection.headers, signal: loader.signal },
           );
 
           if (response.stopReason === "aborted") {

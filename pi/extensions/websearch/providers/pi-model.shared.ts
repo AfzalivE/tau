@@ -3,7 +3,8 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 export interface PiModelSelection {
   model: Model<Api>;
-  apiKey: string;
+  apiKey?: string;
+  headers?: Record<string, string>;
 }
 
 export async function selectCurrentPiModel(
@@ -12,8 +13,7 @@ export async function selectCurrentPiModel(
 ): Promise<PiModelSelection | null> {
   if (!ctx.model || !predicate(ctx.model)) return null;
 
-  const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-  return apiKey ? { model: ctx.model, apiKey } : null;
+  return resolvePiModelSelection(ctx.model, ctx);
 }
 
 export async function selectFallbackPiModel(
@@ -29,11 +29,19 @@ export async function selectFallbackPiModel(
   }));
 
   for (const model of candidates) {
-    const apiKey = await ctx.modelRegistry.getApiKey(model);
-    if (apiKey) return { model, apiKey };
+    const selection = await resolvePiModelSelection(model, ctx);
+    if (selection) return selection;
   }
 
   return null;
+}
+
+async function resolvePiModelSelection(
+  model: Model<Api>,
+  ctx: Pick<ExtensionContext, "modelRegistry">,
+): Promise<PiModelSelection | null> {
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers } : null;
 }
 
 function rankPiModels(models: Model<Api>[]): Model<Api>[] {

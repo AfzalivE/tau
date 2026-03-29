@@ -17,7 +17,7 @@ export async function searchWithPiAnthropic(
     body: JSON.stringify({
       model: selection.model.id,
       max_tokens: 1800,
-      system: buildAnthropicSystem(selection.apiKey),
+      system: buildAnthropicSystem(getAnthropicCredential(selection)),
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
       messages: [{ role: "user", content: buildWebsearchPrompt(query) }],
     }),
@@ -51,12 +51,13 @@ export async function searchWithPiAnthropic(
 }
 
 function buildAnthropicHeaders(selection: PiModelSelection): Record<string, string> {
-  const apiKey = selection.apiKey;
+  const credential = getAnthropicCredential(selection);
+  const headers = { ...(selection.headers ?? {}) };
 
-  if (isAnthropicOAuthToken(apiKey)) {
+  if (isAnthropicOAuthToken(credential)) {
     return {
-      ...(selection.model.headers ?? {}),
-      authorization: `Bearer ${apiKey}`,
+      ...headers,
+      ...(hasHeader(headers, "authorization") || !credential ? {} : { authorization: `Bearer ${credential}` }),
       "anthropic-version": "2023-06-01",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,web-search-2025-03-05",
       "anthropic-dangerous-direct-browser-access": "true",
@@ -68,8 +69,10 @@ function buildAnthropicHeaders(selection: PiModelSelection): Record<string, stri
   }
 
   return {
-    ...(selection.model.headers ?? {}),
-    "x-api-key": apiKey,
+    ...headers,
+    ...(hasHeader(headers, "authorization") || hasHeader(headers, "x-api-key") || !credential
+      ? {}
+      : { "x-api-key": credential }),
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "web-search-2025-03-05",
     "content-type": "application/json",
@@ -82,7 +85,7 @@ function resolveAnthropicMessagesUrl(baseUrl?: string): string {
   return normalized.endsWith("/v1/messages") ? normalized : `${normalized}/v1/messages`;
 }
 
-function buildAnthropicSystem(apiKey: string): string | Array<{ type: "text"; text: string }> {
+function buildAnthropicSystem(apiKey?: string): string | Array<{ type: "text"; text: string }> {
   if (!isAnthropicOAuthToken(apiKey)) return WEBSEARCH_SYSTEM_PROMPT;
 
   return [
@@ -91,8 +94,31 @@ function buildAnthropicSystem(apiKey: string): string | Array<{ type: "text"; te
   ];
 }
 
-function isAnthropicOAuthToken(apiKey: string): boolean {
-  return apiKey.includes("sk-ant-oat");
+function getAnthropicCredential(selection: PiModelSelection): string | undefined {
+  return selection.apiKey
+    ?? getBearerToken(selection.headers)
+    ?? getHeaderValue(selection.headers, "x-api-key");
+}
+
+function getBearerToken(headers?: Record<string, string>): string | undefined {
+  const authorization = getHeaderValue(headers, "authorization");
+  if (!authorization) return undefined;
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1];
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  return Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
+}
+
+function getHeaderValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const key = Object.keys(headers).find((headerName) => headerName.toLowerCase() === name.toLowerCase());
+  return key ? headers[key] : undefined;
+}
+
+function isAnthropicOAuthToken(apiKey?: string): boolean {
+  return Boolean(apiKey?.includes("sk-ant-oat"));
 }
 
 export function isPiAnthropicModel(model: Model<Api>): boolean {

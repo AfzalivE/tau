@@ -9,13 +9,18 @@ export async function searchWithPiOpenAICodex(
   query: string,
   signal?: AbortSignal,
 ): Promise<WebsearchResult> {
+  const apiKey = resolveApiKey(selection);
+  if (!apiKey) {
+    throw new Error("OpenAI Codex auth is not configured.");
+  }
+
   const result = await runOpenAICodexSearch({
-    apiKey: selection.apiKey,
-    accountId: decodeJwtAccountId(selection.apiKey),
+    apiKey,
+    accountId: decodeJwtAccountId(apiKey),
     model: selection.model.id,
     query,
     baseUrl: selection.model.baseUrl,
-    headers: selection.model.headers,
+    headers: selection.headers,
     signal,
   });
 
@@ -25,6 +30,17 @@ export async function searchWithPiOpenAICodex(
     answer: result.answer,
     sources: result.sources,
   };
+}
+
+function resolveApiKey(selection: PiModelSelection): string | undefined {
+  if (selection.apiKey) return selection.apiKey;
+
+  const authorization = Object.entries(selection.headers ?? {})
+    .find(([name]) => name.toLowerCase() === "authorization")?.[1];
+  if (!authorization) return undefined;
+
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1];
 }
 
 export function isPiOpenAICodexModel(model: Model<Api>): boolean {

@@ -137,6 +137,12 @@ Rules:
 
 type InsightScope = "current" | "project" | "all";
 
+type ConfiguredModelSelection = {
+  model: Model<Api>;
+  apiKey?: string;
+  headers?: Record<string, string>;
+};
+
 type ReadonlySessionManager = Pick<
   SessionManager,
   | "getEntries"
@@ -553,7 +559,7 @@ async function runInsightsCommand(args: string | undefined, ctx: ExtensionComman
 async function runInsightsPipeline(
   scope: InsightScope,
   ctx: ExtensionCommandContext,
-  selection: { model: Model<Api>; apiKey: string } | null,
+  selection: ConfiguredModelSelection | null,
   signal: AbortSignal,
   onProgress: (update: Partial<ProgressState>) => void,
 ): Promise<InsightsResult> {
@@ -713,12 +719,12 @@ function describeScope(scope: InsightScope): string {
 
 async function getConfiguredModelSelection(
   ctx: Pick<ExtensionCommandContext, "model" | "modelRegistry">,
-): Promise<{ model: Model<Api>; apiKey: string } | null> {
+): Promise<ConfiguredModelSelection | null> {
   if (!ctx.model) return null;
 
-  const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-  if (!apiKey) return null;
-  return { model: ctx.model, apiKey };
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+  if (!auth.ok) return null;
+  return { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers };
 }
 
 async function listTargets(
@@ -801,7 +807,7 @@ async function loadOrExtractFacet(
   meta: SessionMeta,
   cacheInfo: SessionCacheInfo,
   runtime: SessionRuntime | undefined,
-  selection: { model: Model<Api>; apiKey: string },
+  selection: ConfiguredModelSelection,
   signal: AbortSignal,
 ): Promise<{ facet?: SessionFacet; cacheHit: boolean }> {
   if (cacheInfo.cacheKey) {
@@ -1234,7 +1240,7 @@ function appendReducedBlock(
 async function extractFacet(
   meta: SessionMeta,
   transcript: PreparedTranscript,
-  selection: { model: Model<Api>; apiKey: string },
+  selection: ConfiguredModelSelection,
   signal: AbortSignal,
 ): Promise<SessionFacet> {
   throwIfAborted(signal);
@@ -1266,6 +1272,7 @@ async function extractFacet(
     },
     {
       apiKey: selection.apiKey,
+      headers: selection.headers,
       signal,
     },
   );
@@ -1376,7 +1383,7 @@ function buildAggregate(scope: InsightScope, sessionsConsidered: number, analyse
 
 async function synthesizeReport(
   aggregate: InsightsAggregate,
-  selection: { model: Model<Api>; apiKey: string },
+  selection: ConfiguredModelSelection,
   signal: AbortSignal,
 ): Promise<string> {
   throwIfAborted(signal);
@@ -1429,6 +1436,7 @@ async function synthesizeReport(
     },
     {
       apiKey: selection.apiKey,
+      headers: selection.headers,
       signal,
     },
   );
@@ -1773,10 +1781,20 @@ function summarizeToolCall(name: string, args: Record<string, unknown>): string 
   }
 
   if (name === "edit") {
-    const oldTextLength = typeof args.oldText === "string" ? args.oldText.length : undefined;
-    const newTextLength = typeof args.newText === "string" ? args.newText.length : undefined;
-    if (typeof oldTextLength === "number") lines.push(`old_text_chars: ${oldTextLength}`);
-    if (typeof newTextLength === "number") lines.push(`new_text_chars: ${newTextLength}`);
+    const editBlocks = Array.isArray(args.edits)
+      ? args.edits.filter((edit): edit is Record<string, unknown> => isRecord(edit))
+      : [];
+    const oldTextLength = editBlocks.reduce(
+      (sum, edit) => sum + (typeof edit.oldText === "string" ? edit.oldText.length : 0),
+      typeof args.oldText === "string" ? args.oldText.length : 0,
+    );
+    const newTextLength = editBlocks.reduce(
+      (sum, edit) => sum + (typeof edit.newText === "string" ? edit.newText.length : 0),
+      typeof args.newText === "string" ? args.newText.length : 0,
+    );
+    if (editBlocks.length > 0) lines.push(`edit_blocks: ${editBlocks.length}`);
+    if (oldTextLength > 0) lines.push(`old_text_chars: ${oldTextLength}`);
+    if (newTextLength > 0) lines.push(`new_text_chars: ${newTextLength}`);
   }
 
   if (!command && !targetPath) {
