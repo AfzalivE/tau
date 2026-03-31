@@ -44,8 +44,9 @@ Guidelines:
 
 Entity ID changes can break references in:
 
-- automations, scripts, scenes, helpers, dashboards
-- template sensors, trigger IDs, notify targets, etc
+- automations, scripts, scenes, dashboards
+- template sensors, trigger IDs, notify targets
+- **group helper memberships** (config entry–based groups do NOT auto-update when member entity_ids are renamed; members silently disappear)
 
 Make a plan to **search and update references** before applying large ID renames.
 
@@ -60,9 +61,10 @@ Use this whenever changing `entity_id`s (or helper ids) in bulk:
 2. Find references: `scripts/ha_ops.js find-references --needle <old>` (or `--map-json rename_map.json`).
 3. Write a rename map (`old -> new`) and a timestamped change log (markdown).
 4. Apply renames via WS `config/entity_registry/update` in small batches (stop if a target id already exists).
-5. Update references (automations/scripts/scenes/dashboards/templates) and re-run the reference finder until clean.
-6. Validate behavior: automation traces + event tail (`state_changed`, `zha_event`) for the specific entities.
-7. Snapshot after and diff with baseline (fast way to confirm what actually changed).
+5. Update group helper memberships: `scripts/ha_ops.js update-groups --map-json rename_map.json` (renames are not propagated to config entry–based groups automatically).
+6. Update references (automations/scripts/scenes/dashboards/templates) and re-run the reference finder until clean.
+7. Validate behavior: automation traces + event tail (`state_changed`, `zha_event`) for the specific entities.
+8. Snapshot after and diff with baseline (fast way to confirm what actually changed).
 
 ## 3) Areas, floors, labels
 

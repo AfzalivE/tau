@@ -132,6 +132,26 @@ node scripts/ha_ops.js find-references \
   --map-json rename_map.json --backup-root /path/to/backup
 ```
 
+### `ha_ops.js update-groups` - Update group memberships after renames
+
+Entity ID renames (via the entity registry) do **not** propagate to config
+entry–based group helpers. This command rewrites group member lists using a
+rename map.
+
+```bash
+# Preview which groups would be updated
+node scripts/ha_ops.js update-groups \
+  --map-json rename_map.json
+
+# Apply changes
+node scripts/ha_ops.js update-groups \
+  --map-json rename_map.json --apply
+
+# Output plan as JSON
+node scripts/ha_ops.js update-groups \
+  --map-json rename_map.json --json
+```
+
 ### `ha_ops.js tail-events` - Monitor events in real-time
 
 ```bash

@@ -404,6 +404,7 @@ function printTopHelp() {
 	console.log(
 		"  rollback                Rollback registry changes from a snapshot",
 	);
+	console.log("  update-groups            Update group helper memberships from a rename map");
 	console.log("  find-references          Find entity_id/string references");
 	console.log(
 		"  traces                   List/view automation or script traces",
@@ -451,6 +452,8 @@ async function run() {
 				return await cmdTailEvents(args);
 			case "name-review-from-backup":
 				return await cmdNameReviewFromBackup(args);
+			case "update-groups":
+				return await cmdUpdateGroups(args);
 			default:
 				printTopHelp();
 				die(`Unknown command: ${command}`);
@@ -708,6 +711,28 @@ async function cleanupLoadContext(rest, ws, states, dryRun) {
 	};
 
 	return ctx;
+}
+
+async function updateGroupMembers(rest, configEntryId, members) {
+	const optionsFlow = await rest.postJson(
+		"/api/config/config_entries/options/flow",
+		{ handler: configEntryId },
+	);
+	const flowId = getStr(optionsFlow, "flow_id");
+	if (!flowId) {
+		throw new Error(
+			`No flow_id in response: ${JSON.stringify(optionsFlow).slice(0, 200)}`,
+		);
+	}
+	const schema = optionsFlow.data_schema || [];
+	const hideMembersField = schema.find((f) => f.name === "hide_members");
+	const allField = schema.find((f) => f.name === "all");
+	const hideMembers = hideMembersField?.description?.suggested_value ?? true;
+	const all = allField?.description?.suggested_value ?? false;
+	await rest.postJson(
+		`/api/config/config_entries/options/flow/${flowId}`,
+		{ entities: members, hide_members: hideMembers, all },
+	);
 }
 
 async function cleanupRenameEntity(ctx, entityId, oldName, newName, category) {
@@ -996,23 +1021,7 @@ async function cleanupStepCreateGroups(ctx, blueprintPattern) {
 					continue;
 				}
 
-				const optionsFlow = await ctx.rest.postJson(
-					"/api/config/config_entries/options/flow",
-					{
-						handler: configEntryId,
-					},
-				);
-				const flowId = getStr(optionsFlow, "flow_id");
-				if (flowId) {
-					await ctx.rest.postJson(
-						`/api/config/config_entries/options/flow/${flowId}`,
-						{
-							entities: switches,
-							hide_members: true,
-							all: false,
-						},
-					);
-				}
+				await updateGroupMembers(ctx.rest, configEntryId, switches);
 
 				const payload = { entity_id: desiredGroupId, name: groupName };
 				if (targetAreaId) payload.area_id = targetAreaId;
@@ -3018,6 +3027,190 @@ async function cmdNameReviewFromBackup(argv) {
 	fs.writeFileSync(outPath, lines.join("\n"), "utf-8");
 	console.log(outPath);
 	return 0;
+}
+
+// -------------------------
+// update-groups
+// -------------------------
+
+function printUpdateGroupsHelp() {
+	console.log("Usage: node scripts/ha_ops.js update-groups [options]");
+	console.log("");
+	console.log(
+		"Apply a rename map to group helper memberships. Entity ID renames",
+	);
+	console.log(
+		"(via the entity registry) do NOT propagate to config-entry-based",
+	);
+	console.log(
+		"group helpers. This command finds affected groups and rewrites",
+	);
+	console.log("their member lists using the provided rename map.");
+	console.log("");
+	console.log("Options:");
+	console.log(
+		"  --map-json <path>    JSON file mapping old entity_ids to new (required)",
+	);
+	console.log(
+		"  --dry-run            Preview changes without applying (default: on)",
+	);
+	console.log("  --apply              Apply changes");
+	console.log("  --json               Output plan as JSON");
+	console.log("  -h, --help           Show this help");
+}
+
+async function cmdUpdateGroups(argv) {
+	const { values } = parseArgs({
+		args: argv,
+		options: {
+			help: { type: "boolean", short: "h" },
+			"map-json": { type: "string", default: "" },
+			apply: { type: "boolean", default: false },
+			json: { type: "boolean", default: false },
+		},
+	});
+
+	if (values.help) {
+		printUpdateGroupsHelp();
+		return 0;
+	}
+
+	const mapPath = values["map-json"];
+	if (!mapPath) die("--map-json is required", 2);
+	if (!fs.existsSync(mapPath)) die(`File not found: ${mapPath}`, 2);
+
+	let renameMap;
+	try {
+		renameMap = JSON.parse(fs.readFileSync(mapPath, "utf-8"));
+	} catch (e) {
+		die(`Failed to parse ${mapPath}: ${e?.message || e}`, 2);
+	}
+	if (
+		!renameMap ||
+		typeof renameMap !== "object" ||
+		Array.isArray(renameMap) ||
+		!Object.keys(renameMap).length
+	) {
+		die("Rename map must be a non-empty { oldId: newId } object", 2);
+	}
+
+	const dryRun = !values.apply;
+
+	let rest;
+	try {
+		rest = new HARest();
+	} catch (e) {
+		die(e?.message || String(e), 2);
+	}
+
+	const ws = await new HAWebSocket().connect();
+	try {
+		const entities = await ws.call("config/entity_registry/list");
+		if (!Array.isArray(entities)) die("Unexpected entity registry response", 2);
+
+		// Find group helpers whose members overlap with the rename map.
+		const oldIds = new Set(Object.keys(renameMap));
+		const groupEntries = entities.filter(
+			(e) => e && typeof e === "object" && e.platform === "group",
+		);
+
+		const states = await rest.getJson("/api/states");
+		if (!Array.isArray(states)) die("Failed to load states", 1);
+		const stateByEid = new Map();
+		for (const s of states) {
+			if (s && typeof s === "object" && typeof s.entity_id === "string") {
+				stateByEid.set(s.entity_id, s);
+			}
+		}
+
+		const plan = [];
+		for (const entry of groupEntries) {
+			const groupEid = getStr(entry, "entity_id");
+			const configEntryId = getStr(entry, "config_entry_id");
+			if (!groupEid || !configEntryId) continue;
+
+			const st = stateByEid.get(groupEid);
+			const members =
+				st && Array.isArray(st.attributes?.entity_id)
+					? st.attributes.entity_id
+					: [];
+
+			const affected = members.filter((m) => oldIds.has(m));
+			if (!affected.length) continue;
+
+			const newMembers = members.map((m) => renameMap[m] || m);
+			plan.push({
+				groupEid,
+				configEntryId,
+				oldMembers: members,
+				newMembers,
+				renames: affected.map((m) => [m, renameMap[m]]),
+			});
+		}
+
+		if (!plan.length) {
+			console.log("No group helpers affected by this rename map.");
+			return 0;
+		}
+
+		if (values.json) {
+			console.log(
+				JSON.stringify(
+					{ dry_run: dryRun, groups: plan.map((item) => ({
+						group: item.groupEid,
+						renames: Object.fromEntries(item.renames),
+						old_members: item.oldMembers,
+						new_members: item.newMembers,
+					})) },
+					null,
+					2,
+				),
+			);
+			return 0;
+		}
+
+		console.log(
+			`${dryRun ? "[dry-run] " : ""}${plan.length} group(s) to update:\n`,
+		);
+		for (const item of plan) {
+			console.log(`  ${item.groupEid}:`);
+			for (const [old, nw] of item.renames) {
+				console.log(`    ${old} -> ${nw}`);
+			}
+		}
+
+		if (dryRun) {
+			console.log("\nRe-run with --apply to apply.");
+			return 0;
+		}
+
+		const progress = new ProgressReporter(
+			plan.length,
+			"Updating groups: ",
+		);
+		const failures = [];
+
+		for (const item of plan) {
+			try {
+				await updateGroupMembers(rest, item.configEntryId, item.newMembers);
+			} catch (e) {
+				failures.push(`${item.groupEid}: ${e?.message || e}`);
+			}
+			progress.update();
+		}
+		progress.finish();
+
+		if (failures.length) {
+			console.log(`\n${failures.length} failure(s):`);
+			for (const f of failures) console.log(`  ${f}`);
+			return 1;
+		}
+
+		console.log(`\nUpdated ${plan.length} group(s).`);
+		return 0;
+	} finally {
+		await ws.close();
+	}
 }
 
 run()
