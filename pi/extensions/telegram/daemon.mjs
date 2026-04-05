@@ -25,9 +25,6 @@ const TELEGRAM_COMMANDS = [
 
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 30;
 const TELEGRAM_HTTP_TIMEOUT_MS = 35_000;
-const POLLING_RESTART_THRESHOLD = 3;
-const POLLING_ERROR_WINDOW_MS = 120_000;
-const POLLING_RESTART_DELAY_MS = 1_000;
 const POLLING_STOP_TIMEOUT_MS = 4_000;
 const ACTIVITY_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 const UNPAIRED_IDLE_SHUTDOWN_MS = 60_000;
@@ -495,9 +492,6 @@ let shutdownTimer = null;
 let typingTimer = null;
 let server = null;
 let shuttingDown = false;
-let pollingRestartInProgress = false;
-let consecutiveNetworkPollingErrors = 0;
-let lastNetworkPollingErrorAt = 0;
 
 function isAuthorizedChat(chatId) {
   return pairedChatId !== undefined && chatId === pairedChatId;
@@ -696,41 +690,11 @@ async function stopAllHeadlessSessions() {
   );
 }
 
-function markPollingHealthy() {
-  consecutiveNetworkPollingErrors = 0;
-  lastNetworkPollingErrorAt = 0;
-}
-
 async function stopPollingWithTimeout(reason) {
   if (!bot) return;
 
   const stopPromise = bot.stopPolling({ cancel: true, reason }).catch(() => {});
   await Promise.race([stopPromise, sleep(POLLING_STOP_TIMEOUT_MS)]);
-}
-
-async function restartPolling(reason) {
-  if (!bot || shuttingDown || pollingRestartInProgress) return;
-
-  pollingRestartInProgress = true;
-  console.error(`[telegram] ${reason}. Restarting polling...`);
-
-  try {
-    await stopPollingWithTimeout("Polling recovery");
-
-    if (shuttingDown) return;
-
-    await sleep(POLLING_RESTART_DELAY_MS);
-
-    if (shuttingDown) return;
-
-    await bot.startPolling({ restart: true });
-    markPollingHealthy();
-    console.error("[telegram] Polling restarted.");
-  } catch (error) {
-    console.error(`[telegram] Failed to restart polling: ${errorMessage(error)}`);
-  } finally {
-    pollingRestartInProgress = false;
-  }
 }
 
 async function shutdownDaemon({ clearPairingState = false } = {}) {
@@ -1609,39 +1573,20 @@ bot = new TelegramBot(config.botToken, {
 });
 
 void syncBotCommands();
+// node-telegram-bot-api already retries failed polls. Avoid stop/start
+// recovery here: cancelling an in-flight poll can spin up overlapping
+// pollers and replay the same Telegram update multiple times.
 bot.on("polling_error", (error) => {
   const message = errorMessage(error);
-
-  if (!isLikelyNetworkPollingError(error)) {
-    console.error(`[telegram] polling_error: ${message}`);
-    markPollingHealthy();
-    return;
-  }
-
-  const now = Date.now();
-  if (lastNetworkPollingErrorAt && now - lastNetworkPollingErrorAt > POLLING_ERROR_WINDOW_MS) {
-    consecutiveNetworkPollingErrors = 0;
-  }
-
-  lastNetworkPollingErrorAt = now;
-  consecutiveNetworkPollingErrors += 1;
-
-  console.error(
-    `[telegram] polling_error (network ${consecutiveNetworkPollingErrors}/${POLLING_RESTART_THRESHOLD}): ${message}`,
-  );
-
-  if (consecutiveNetworkPollingErrors >= POLLING_RESTART_THRESHOLD) {
-    void restartPolling("Detected repeated network polling errors");
-  }
+  const kind = isLikelyNetworkPollingError(error) ? "polling_error (network)" : "polling_error";
+  console.error(`[telegram] ${kind}: ${message}`);
 });
 
 bot.on("message", (msg) => {
-  markPollingHealthy();
   handleTelegramMessage(msg).catch((error) => console.error("[telegram] telegram handler error", error));
 });
 
 bot.on("callback_query", (query) => {
-  markPollingHealthy();
   (async () => {
     const chatId = query.message?.chat?.id;
     if (!chatId || !isAuthorizedChat(chatId)) {
