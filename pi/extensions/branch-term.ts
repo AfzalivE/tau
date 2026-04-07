@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import * as fs from "node:fs"
 import * as path from "node:path"
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent"
-import { SessionManager } from "@mariozechner/pi-coding-agent"
+import { CURRENT_SESSION_VERSION, SessionManager, type SessionHeader } from "@mariozechner/pi-coding-agent"
 
 const TERMINAL_FLAG = "branch-term"
 const TMUX_LAYOUT_FLAG = "branch-tmux-layout"
@@ -179,6 +181,39 @@ function notifyManualResume(ctx: ExtensionCommandContext, command: string): void
   ctx.ui.notify(ctx.ui.theme.fg("text", command), "info")
 }
 
+function hasValidSessionFile(sessionFile: string): boolean {
+  if (!fs.existsSync(sessionFile)) return false
+
+  try {
+    const firstLine = fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]?.trim()
+    if (!firstLine) return false
+
+    const header = JSON.parse(firstLine) as Partial<SessionHeader>
+    return header.type === "session" && typeof header.id === "string"
+  } catch {
+    return false
+  }
+}
+
+function createFreshSessionFile(cwd: string, sessionDir: string): string {
+  fs.mkdirSync(sessionDir, { recursive: true })
+
+  const sessionId = randomUUID()
+  const timestamp = new Date().toISOString()
+  const fileTimestamp = timestamp.replace(/[:.]/g, "-")
+  const sessionFile = path.join(sessionDir, `${fileTimestamp}_${sessionId}.jsonl`)
+  const header: SessionHeader = {
+    type: "session",
+    version: CURRENT_SESSION_VERSION,
+    id: sessionId,
+    timestamp,
+    cwd,
+  }
+
+  fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`)
+  return sessionFile
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerFlag(TERMINAL_FLAG, {
     description:
@@ -210,15 +245,28 @@ export default function (pi: ExtensionAPI) {
       }
 
       const leafId = ctx.sessionManager.getLeafId()
-      if (!leafId) {
-        if (ctx.hasUI) ctx.ui.notify("No messages yet. Nothing to branch.", "error")
-        return
-      }
+      const hasAssistantReply = ctx.sessionManager.getEntries().some(
+        (entry) => entry.type === "message" && entry.message.role === "assistant",
+      )
 
-      const forkManager = SessionManager.open(sessionFile)
-      const forkFile = forkManager.createBranchedSession(leafId)
-      if (!forkFile) {
-        throw new Error("Failed to create branched session")
+      let forkFile: string
+      if (leafId && hasValidSessionFile(sessionFile)) {
+        const forkManager = SessionManager.open(sessionFile)
+        const branchedSessionFile = forkManager.createBranchedSession(leafId)
+        if (!branchedSessionFile) {
+          throw new Error("Failed to create branched session")
+        }
+        forkFile = branchedSessionFile
+      } else {
+        if (hasAssistantReply) {
+          throw new Error(`Current session file is missing or invalid: ${sessionFile}`)
+        }
+
+        const message = "Current session has no persisted history yet. Opening a fresh session."
+        if (ctx.hasUI) ctx.ui.notify(message, "warning")
+        else console.log(message)
+
+        forkFile = createFreshSessionFile(ctx.cwd, ctx.sessionManager.getSessionDir())
       }
 
       const resumeCommand = `cd ${shellQuoteCompact(ctx.cwd)} && pi --session ${formatResumeSessionArgument(forkFile)}`
