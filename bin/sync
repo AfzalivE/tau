@@ -34,20 +34,30 @@ PI_INSTRUCTIONS_FILE="${PI_AGENT_DIR}/AGENTS.md"
 DRY_RUN=0
 YES=0
 PRUNE=0
+SYNC_CODEX=0
+SYNC_CLAUDE=0
+SYNC_PI=0
+AGENT_FILTER_SET=0
 
 usage() {
   cat <<'EOF'
-	Symlink ~/.agents into Codex + Claude + Pi.
+	Symlink ~/.agents into selected agent configs.
 
 Usage:
-  sync [--dry-run] [--yes] [--prune]
+  sync [--dry-run] [--yes] [--prune] [--codex] [--claude] [--pi]
 
 Options:
   --dry-run   Print planned changes only
   --yes       Apply without prompting
-  --prune     Remove skills/extensions from agent folders that are not present in ~/.agents
+  --prune     Remove skills/extensions from selected agent folders that are not present in ~/.agents
+  --codex     Sync only Codex-managed files
+  --claude    Sync only Claude-managed files
+  --pi        Sync only Pi-managed files
 
 Notes:
+  - If no agent flag is provided, sync Codex, Claude, and Pi.
+  - If any agent flag is provided, sync only the specified agents.
+  - Agent flags can be combined.
   - ~/.agents/AGENTS.md is symlinked to:
       - ~/.codex/AGENTS.md
       - ~/.claude/CLAUDE.md
@@ -73,6 +83,21 @@ while [[ $# -gt 0 ]]; do
       PRUNE=1
       shift
       ;;
+    --codex)
+      SYNC_CODEX=1
+      AGENT_FILTER_SET=1
+      shift
+      ;;
+    --claude)
+      SYNC_CLAUDE=1
+      AGENT_FILTER_SET=1
+      shift
+      ;;
+    --pi)
+      SYNC_PI=1
+      AGENT_FILTER_SET=1
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -85,13 +110,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${AGENT_FILTER_SET}" -eq 0 ]]; then
+  SYNC_CODEX=1
+  SYNC_CLAUDE=1
+  SYNC_PI=1
+fi
+
 mkdir -p \
   "${AGENTS_SKILLS_DIR}" \
   "${AGENTS_PI_EXTENSIONS_DIR}" \
-  "${AGENTS_PI_AGENT_DIR}" \
-  "${CLAUDE_SKILLS_DIR}" \
-  "${PI_AGENT_DIR}" \
-  "${PI_EXTENSIONS_DIR}"
+  "${AGENTS_PI_AGENT_DIR}"
+
+if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
+  mkdir -p "${CLAUDE_SKILLS_DIR}"
+fi
+
+if [[ "${SYNC_PI}" -eq 1 ]]; then
+  mkdir -p \
+    "${PI_AGENT_DIR}" \
+    "${PI_EXTENSIONS_DIR}"
+fi
 
 skills=()
 for skill_dir in "${AGENTS_SKILLS_DIR}"/*; do
@@ -170,39 +208,55 @@ plan_remove_pi_agent_json() {
 }
 
 # --- Skills ---
-for skill_name in "${skills[@]}"; do
-  skill_dir="${AGENTS_SKILLS_DIR}/${skill_name}"
-  for target_root in "${CLAUDE_SKILLS_DIR}"; do
-    target="${target_root}/${skill_name}"
+if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
+  for skill_name in "${skills[@]}"; do
+    skill_dir="${AGENTS_SKILLS_DIR}/${skill_name}"
+    for target_root in "${CLAUDE_SKILLS_DIR}"; do
+      target="${target_root}/${skill_name}"
 
-    if [[ -L "${target}" ]]; then
-      existing_target="$(readlink "${target}")"
-      if [[ "${existing_target}" == "${skill_dir}" ]]; then
+      if [[ -L "${target}" ]]; then
+        existing_target="$(readlink "${target}")"
+        if [[ "${existing_target}" == "${skill_dir}" ]]; then
+          continue
+        fi
+        plan_remove "${target}"
+        plan_symlink "${skill_dir}" "${target}"
         continue
       fi
-      plan_remove "${target}"
+
+      if [[ -d "${target}" ]]; then
+        plan_remove "${target}"
+        plan_symlink "${skill_dir}" "${target}"
+        continue
+      fi
+
+      if [[ -e "${target}" ]]; then
+        echo "skip: ${target} exists and is not a directory/symlink" >&2
+        continue
+      fi
+
       plan_symlink "${skill_dir}" "${target}"
-      continue
-    fi
-
-    if [[ -d "${target}" ]]; then
-      plan_remove "${target}"
-      plan_symlink "${skill_dir}" "${target}"
-      continue
-    fi
-
-    if [[ -e "${target}" ]]; then
-      echo "skip: ${target} exists and is not a directory/symlink" >&2
-      continue
-    fi
-
-    plan_symlink "${skill_dir}" "${target}"
+    done
   done
-done
+fi
 
 # --- Instructions ---
 if [[ -f "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
-  for target in "${CODEX_INSTRUCTIONS_FILE}" "${CLAUDE_INSTRUCTIONS_FILE}" "${PI_INSTRUCTIONS_FILE}"; do
+  instruction_targets=()
+
+  if [[ "${SYNC_CODEX}" -eq 1 ]]; then
+    instruction_targets+=("${CODEX_INSTRUCTIONS_FILE}")
+  fi
+
+  if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
+    instruction_targets+=("${CLAUDE_INSTRUCTIONS_FILE}")
+  fi
+
+  if [[ "${SYNC_PI}" -eq 1 ]]; then
+    instruction_targets+=("${PI_INSTRUCTIONS_FILE}")
+  fi
+
+  for target in "${instruction_targets[@]}"; do
     if [[ -L "${target}" ]]; then
       existing_target="$(readlink "${target}")"
       if [[ "${existing_target}" == "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
@@ -231,66 +285,91 @@ else
 fi
 
 # --- Pi JSON config ---
-for json_name in "${pi_agent_json_files[@]}"; do
-  src="${AGENTS_PI_AGENT_DIR}/${json_name}"
-  dest="${PI_AGENT_DIR}/${json_name}"
+if [[ "${SYNC_PI}" -eq 1 ]]; then
+  for json_name in "${pi_agent_json_files[@]}"; do
+    src="${AGENTS_PI_AGENT_DIR}/${json_name}"
+    dest="${PI_AGENT_DIR}/${json_name}"
 
-  if [[ -L "${dest}" ]]; then
-    existing_target="$(readlink "${dest}")"
-    if [[ "${existing_target}" == "${src}" ]]; then
+    if [[ -L "${dest}" ]]; then
+      existing_target="$(readlink "${dest}")"
+      if [[ "${existing_target}" == "${src}" ]]; then
+        continue
+      fi
+      plan_remove_pi_agent_json "${dest}"
+      plan_symlink "${src}" "${dest}"
       continue
     fi
-    plan_remove_pi_agent_json "${dest}"
-    plan_symlink "${src}" "${dest}"
-    continue
-  fi
 
-  if [[ -e "${dest}" ]]; then
-    plan_remove_pi_agent_json "${dest}"
-    plan_symlink "${src}" "${dest}"
-    continue
-  fi
-
-  plan_symlink "${src}" "${dest}"
-done
-
-# --- Pi extensions ---
-for ext_name in "${pi_extensions[@]}"; do
-  src="${AGENTS_PI_EXTENSIONS_DIR}/${ext_name}"
-  dest="${PI_EXTENSIONS_DIR}/${ext_name}"
-
-  if [[ -L "${dest}" ]]; then
-    existing_target="$(readlink "${dest}")"
-    if [[ "${existing_target}" == "${src}" ]]; then
+    if [[ -e "${dest}" ]]; then
+      plan_remove_pi_agent_json "${dest}"
+      plan_symlink "${src}" "${dest}"
       continue
     fi
-    plan_remove "${dest}"
-    plan_symlink "${src}" "${dest}"
-    continue
-  fi
 
-  if [[ -e "${dest}" ]]; then
-    # Match instructions behavior: replace existing file/dir with the symlink.
-    plan_remove "${dest}"
     plan_symlink "${src}" "${dest}"
-    continue
-  fi
+  done
 
-  plan_symlink "${src}" "${dest}"
-done
+  # --- Pi extensions ---
+  for ext_name in "${pi_extensions[@]}"; do
+    src="${AGENTS_PI_EXTENSIONS_DIR}/${ext_name}"
+    dest="${PI_EXTENSIONS_DIR}/${ext_name}"
+
+    if [[ -L "${dest}" ]]; then
+      existing_target="$(readlink "${dest}")"
+      if [[ "${existing_target}" == "${src}" ]]; then
+        continue
+      fi
+      plan_remove "${dest}"
+      plan_symlink "${src}" "${dest}"
+      continue
+    fi
+
+    if [[ -e "${dest}" ]]; then
+      # Match instructions behavior: replace existing file/dir with the symlink.
+      plan_remove "${dest}"
+      plan_symlink "${src}" "${dest}"
+      continue
+    fi
+
+    plan_symlink "${src}" "${dest}"
+  done
+fi
 
 # --- Prune ---
 if [[ "${PRUNE}" -eq 1 ]]; then
-  # Prune Claude skills
-  for target_root in "${CLAUDE_SKILLS_DIR}"; do
-    for entry in "${target_root}"/*; do
+  if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
+    # Prune Claude skills
+    for target_root in "${CLAUDE_SKILLS_DIR}"; do
+      for entry in "${target_root}"/*; do
+        [[ -e "${entry}" ]] || continue
+        base="$(basename "${entry}")"
+        [[ "${base}" == ".system" ]] && continue
+
+        keep=0
+        for skill_name in "${skills[@]}"; do
+          if [[ "${base}" == "${skill_name}" ]]; then
+            keep=1
+            break
+          fi
+        done
+
+        if [[ "${keep}" -eq 0 ]]; then
+          plan_remove "${entry}"
+        fi
+      done
+    done
+  fi
+
+  if [[ "${SYNC_PI}" -eq 1 ]]; then
+    # Prune pi extensions
+    for entry in "${PI_EXTENSIONS_DIR}"/*; do
       [[ -e "${entry}" ]] || continue
       base="$(basename "${entry}")"
-      [[ "${base}" == ".system" ]] && continue
+      [[ "${base}" == "node_modules" ]] && continue
 
       keep=0
-      for skill_name in "${skills[@]}"; do
-        if [[ "${base}" == "${skill_name}" ]]; then
+      for ext_name in "${pi_extensions[@]}"; do
+        if [[ "${base}" == "${ext_name}" ]]; then
           keep=1
           break
         fi
@@ -300,51 +379,32 @@ if [[ "${PRUNE}" -eq 1 ]]; then
         plan_remove "${entry}"
       fi
     done
-  done
 
-  # Prune pi extensions
-  for entry in "${PI_EXTENSIONS_DIR}"/*; do
-    [[ -e "${entry}" ]] || continue
-    base="$(basename "${entry}")"
-    [[ "${base}" == "node_modules" ]] && continue
+    # Prune repo-managed pi agent JSON symlinks that no longer exist in ~/.agents/pi/agent/
+    for entry in "${PI_AGENT_DIR}"/*.json; do
+      [[ -e "${entry}" ]] || continue
+      [[ -L "${entry}" ]] || continue
 
-    keep=0
-    for ext_name in "${pi_extensions[@]}"; do
-      if [[ "${base}" == "${ext_name}" ]]; then
-        keep=1
-        break
+      existing_target="$(readlink "${entry}")"
+      case "${existing_target}" in
+        "${AGENTS_PI_AGENT_DIR}"/*.json) ;;
+        *) continue ;;
+      esac
+
+      base="$(basename "${entry}")"
+      keep=0
+      for json_name in "${pi_agent_json_files[@]}"; do
+        if [[ "${base}" == "${json_name}" ]]; then
+          keep=1
+          break
+        fi
+      done
+
+      if [[ "${keep}" -eq 0 ]]; then
+        plan_remove_pi_agent_json "${entry}"
       fi
     done
-
-    if [[ "${keep}" -eq 0 ]]; then
-      plan_remove "${entry}"
-    fi
-  done
-
-  # Prune repo-managed pi agent JSON symlinks that no longer exist in ~/.agents/pi/agent/
-  for entry in "${PI_AGENT_DIR}"/*.json; do
-    [[ -e "${entry}" ]] || continue
-    [[ -L "${entry}" ]] || continue
-
-    existing_target="$(readlink "${entry}")"
-    case "${existing_target}" in
-      "${AGENTS_PI_AGENT_DIR}"/*.json) ;;
-      *) continue ;;
-    esac
-
-    base="$(basename "${entry}")"
-    keep=0
-    for json_name in "${pi_agent_json_files[@]}"; do
-      if [[ "${base}" == "${json_name}" ]]; then
-        keep=1
-        break
-      fi
-    done
-
-    if [[ "${keep}" -eq 0 ]]; then
-      plan_remove_pi_agent_json "${entry}"
-    fi
-  done
+  fi
 fi
 
 echo "Planned changes:"
