@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sync ~/.agents into coding agents via symlinks.
+# Set up ~/.agents in coding agents via symlinks, then install runtime npm
+# dependencies for relevant repo packages.
 #
 # Source of truth:
 #   - ~/.agents/AGENTS.md                 (shared instructions)
@@ -19,10 +20,11 @@ set -euo pipefail
 #   - Pi does not auto-discover ~/.agents/AGENTS.md as global context.
 
 # --- Config ---
-readonly AGENTS_SKILLS_DIR="${HOME}/.agents/skills"
-readonly AGENTS_INSTRUCTIONS_FILE="${HOME}/.agents/AGENTS.md"
-readonly AGENTS_PI_EXTENSIONS_DIR="${HOME}/.agents/pi/extensions"
-readonly AGENTS_PI_AGENT_DIR="${HOME}/.agents/pi/agent"
+readonly AGENTS_ROOT="${HOME}/.agents"
+readonly AGENTS_SKILLS_DIR="${AGENTS_ROOT}/skills"
+readonly AGENTS_INSTRUCTIONS_FILE="${AGENTS_ROOT}/AGENTS.md"
+readonly AGENTS_PI_EXTENSIONS_DIR="${AGENTS_ROOT}/pi/extensions"
+readonly AGENTS_PI_AGENT_DIR="${AGENTS_ROOT}/pi/agent"
 
 readonly CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
 readonly PI_AGENT_DIR="${HOME}/.pi/agent"
@@ -41,16 +43,26 @@ SYNC_CLAUDE=0
 SYNC_PI=0
 AGENT_FILTER_SET=0
 
+declare -a PLAN_ACTIONS=()
+declare -a PLAN_DESTS=()
+declare -a PLAN_SRCS=()
+declare -a INSTALL_COMMANDS=()
+declare -a INSTALL_DIRS=()
+
 # --- Main flow ---
 main() {
   parse_args "$@"
   apply_default_agent_selection
+  validate_checkout_location
   validate_roots
-  reset_plan
-  plan_changes
+  reset_sync_plan
+  reset_dependency_plan
+  plan_sync_changes
+  plan_dependency_setup
+  ensure_runtime_dependencies
 
-  if [[ "${#PLAN_ACTIONS[@]}" -eq 0 ]]; then
-    print_no_changes
+  if [[ "${#PLAN_ACTIONS[@]}" -eq 0 && "${#INSTALL_DIRS[@]}" -eq 0 ]]; then
+    print_no_work
     return 0
   fi
 
@@ -62,7 +74,8 @@ main() {
 
   confirm_apply
   preflight_apply_roots
-  apply_plan
+  run_dependency_setup
+  apply_sync_plan
   print_applied_summary
 }
 
@@ -117,6 +130,16 @@ apply_default_agent_selection() {
   fi
 }
 
+validate_checkout_location() {
+  local checkout_root
+  checkout_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+  if [[ "${checkout_root}" != "${AGENTS_ROOT}" ]]; then
+    echo "error: setup must be run from $(format_home_path "${AGENTS_ROOT}")" >&2
+    exit 1
+  fi
+}
+
 validate_roots() {
   validate_directory_root "${AGENTS_SKILLS_DIR}"
   validate_directory_root "${AGENTS_PI_EXTENSIONS_DIR}"
@@ -141,7 +164,7 @@ visit_selected_target_roots() {
   fi
 }
 
-reset_plan() {
+reset_sync_plan() {
   PLAN_ACTIONS=()
   PLAN_DESTS=()
   PLAN_SRCS=()
@@ -150,8 +173,13 @@ reset_plan() {
   PLAN_REMOVE_COUNT=0
 }
 
+reset_dependency_plan() {
+  INSTALL_COMMANDS=()
+  INSTALL_DIRS=()
+}
+
 # --- Planning ---
-plan_changes() {
+plan_sync_changes() {
   plan_claude_skills_sync
   plan_instructions_sync
   plan_pi_json_sync
@@ -179,7 +207,7 @@ plan_claude_skills_sync() {
 
 plan_instructions_sync() {
   if [[ ! -f "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
-    echo "warn: $(format_path "${AGENTS_INSTRUCTIONS_FILE}") not found; skipping instruction sync" >&2
+    echo "warn: $(format_home_path "${AGENTS_INSTRUCTIONS_FILE}") not found; skipping instruction sync" >&2
     return 0
   fi
 
@@ -275,17 +303,6 @@ plan_pi_json_prune() {
     [[ -e "${entry}" || -L "${entry}" ]] || continue
     [[ -L "${entry}" ]] || continue
 
-    local existing_target
-    existing_target="$(readlink "${entry}")"
-
-    case "${existing_target}" in
-      "${AGENTS_PI_AGENT_DIR}"/*.json)
-        ;;
-      *)
-        continue
-        ;;
-    esac
-
     local base
     base="$(basename "${entry}")"
 
@@ -293,27 +310,87 @@ plan_pi_json_prune() {
       continue
     fi
 
-    plan_remove "${entry}"
+    local existing_target
+    existing_target="$(readlink "${entry}")"
+
+    case "${existing_target}" in
+      */pi/agent/*.json)
+        plan_remove "${entry}"
+        ;;
+    esac
   done
 }
 
+plan_dependency_setup() {
+  plan_package_installs_under "${AGENTS_SKILLS_DIR}"
+
+  if [[ "${SYNC_PI}" -eq 1 ]]; then
+    plan_package_setup "${AGENTS_PI_EXTENSIONS_DIR}"
+    plan_package_installs_under "${AGENTS_PI_EXTENSIONS_DIR}" 1
+  fi
+}
+
+plan_package_installs_under() {
+  local root="$1"
+  local skip_root="${2:-0}"
+  [[ -d "${root}" ]] || return 0
+
+  local package_json
+  while IFS= read -r package_json; do
+    local package_dir
+    package_dir="$(dirname "${package_json}")"
+
+    if [[ "${skip_root}" -eq 1 && "${package_dir}" == "${root}" ]]; then
+      continue
+    fi
+
+    package_has_runtime_dependencies "${package_json}" || continue
+    plan_package_setup "${package_dir}"
+  done < <(find "${root}" -path '*/node_modules' -prune -o -name package.json -print | sort)
+}
+
+plan_package_setup() {
+  local package_dir="$1"
+  [[ -f "${package_dir}/package.json" ]] || return 0
+
+  if ! package_needs_setup "${package_dir}"; then
+    return 0
+  fi
+
+  INSTALL_DIRS+=("${package_dir}")
+  INSTALL_COMMANDS+=("$(package_install_command "${package_dir}")")
+}
+
 # --- Output and apply ---
-print_no_changes() {
+print_no_work() {
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "Dry run: no changes."
+    echo "Dry run: nothing to do."
   else
-    echo "No changes."
+    echo "Nothing to do."
   fi
 }
 
 print_plan() {
+  if [[ "${#PLAN_ACTIONS[@]}" -gt 0 ]]; then
+    print_sync_plan
+  fi
+
+  if [[ "${#INSTALL_DIRS[@]}" -gt 0 ]]; then
+    if [[ "${#PLAN_ACTIONS[@]}" -gt 0 ]]; then
+      echo
+    fi
+    print_dependency_plan
+  fi
+}
+
+print_sync_plan() {
   local total="${#PLAN_ACTIONS[@]}"
   local header
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    header="Dry run: ${total} planned $(pluralize "${total}" "change")"
+    header="Dry run: ${total} planned $(pluralize "${total}" "sync change" "sync changes")"
   else
-    header="Planned ${total} $(pluralize "${total}" "change")"
+    header="Sync changes: ${total} planned"
   fi
 
   echo "${header}"
@@ -322,20 +399,16 @@ print_plan() {
   local printed_group=0
   local group
   for group in Codex Claude Pi; do
-    if print_plan_group "${group}" "${printed_group}"; then
+    if print_sync_group "${group}" "${printed_group}"; then
       printed_group=1
     fi
   done
 
-  local summary
-  summary="$(change_summary)"
-  if [[ -n "${summary}" ]]; then
-    echo
-    echo "Summary: ${total} $(pluralize "${total}" "change") (${summary})"
-  fi
+  echo
+  echo "Summary: ${total} $(pluralize "${total}" "sync change" "sync changes") ($(sync_summary))"
 }
 
-print_plan_group() {
+print_sync_group() {
   local group="$1"
   local printed_any="$2"
   local group_count=0
@@ -355,13 +428,13 @@ print_plan_group() {
 
     local action="${PLAN_ACTIONS[$index]}"
     local dest
-    dest="$(format_path "${PLAN_DESTS[$index]}")"
+    dest="$(format_home_path "${PLAN_DESTS[$index]}")"
 
     if [[ "${action}" == "remove" ]]; then
       printf '  %-7s %s\n' "${action}" "${dest}"
     else
       local src
-      src="$(format_path "${PLAN_SRCS[$index]}")"
+      src="$(format_home_path "${PLAN_SRCS[$index]}")"
       printf '  %-7s %s -> %s\n' "${action}" "${dest}" "${src}"
     fi
 
@@ -369,6 +442,29 @@ print_plan_group() {
   done
 
   [[ "${group_count}" -gt 0 ]]
+}
+
+print_dependency_plan() {
+  local total="${#INSTALL_DIRS[@]}"
+  local header
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    header="Dry run: ${total} planned $(pluralize "${total}" "package setup" "package setups")"
+  else
+    header="Dependency setup: ${total} planned"
+  fi
+
+  echo "${header}"
+  echo
+  echo "Packages"
+
+  local index
+  for index in "${!INSTALL_DIRS[@]}"; do
+    printf '  npm %-7s %s\n' "${INSTALL_COMMANDS[$index]}" "$(format_repo_path "${INSTALL_DIRS[$index]}")"
+  done
+
+  echo
+  echo "Summary: ${total} $(pluralize "${total}" "package setup" "package setups") ($(install_summary))"
 }
 
 confirm_apply() {
@@ -381,9 +477,8 @@ confirm_apply() {
     exit 2
   fi
 
-  local total="${#PLAN_ACTIONS[@]}"
   local answer
-  read -r -p "Apply ${total} $(pluralize "${total}" "change")? [y/N] " answer
+  read -r -p "Proceed with $(apply_summary)? [y/N] " answer
 
   case "${answer}" in
     y | Y | yes | YES)
@@ -396,10 +491,14 @@ confirm_apply() {
 }
 
 preflight_apply_roots() {
+  if [[ "${#PLAN_ACTIONS[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
   visit_selected_target_roots prepare_directory_root
 }
 
-apply_plan() {
+apply_sync_plan() {
   local index
   for index in "${!PLAN_ACTIONS[@]}"; do
     local action="${PLAN_ACTIONS[$index]}"
@@ -425,79 +524,69 @@ apply_plan() {
   done
 }
 
-print_applied_summary() {
-  local total="${#PLAN_ACTIONS[@]}"
-  local summary
-  summary="$(change_summary)"
-
-  if [[ -n "${summary}" ]]; then
-    echo "Applied ${total} $(pluralize "${total}" "change") (${summary})."
-  else
-    echo "Applied ${total} $(pluralize "${total}" "change")."
+run_dependency_setup() {
+  if [[ "${#INSTALL_DIRS[@]}" -eq 0 ]]; then
+    return 0
   fi
+
+  run_package_installs
 }
 
-change_summary() {
-  local parts=()
+run_package_installs() {
+  local index
+  for index in "${!INSTALL_DIRS[@]}"; do
+    local command="${INSTALL_COMMANDS[$index]}"
+    local dir="${INSTALL_DIRS[$index]}"
 
-  if [[ "${PLAN_CREATE_COUNT}" -gt 0 ]]; then
-    parts+=("${PLAN_CREATE_COUNT} $(pluralize "${PLAN_CREATE_COUNT}" "addition")")
-  fi
-
-  if [[ "${PLAN_REPLACE_COUNT}" -gt 0 ]]; then
-    parts+=("${PLAN_REPLACE_COUNT} $(pluralize "${PLAN_REPLACE_COUNT}" "replacement")")
-  fi
-
-  if [[ "${PLAN_REMOVE_COUNT}" -gt 0 ]]; then
-    parts+=("${PLAN_REMOVE_COUNT} $(pluralize "${PLAN_REMOVE_COUNT}" "removal")")
-  fi
-
-  local summary=""
-  local index=0
-  local part
-  for part in "${parts[@]}"; do
-    if [[ "${index}" -gt 0 ]]; then
-      summary+=", "
-    fi
-    summary+="${part}"
-    index=$((index + 1))
+    echo
+    echo "==> npm ${command} in $(format_repo_path "${dir}")"
+    (
+      cd "${dir}"
+      if [[ "${dir}" == "${AGENTS_PI_EXTENSIONS_DIR}" ]]; then
+        npm "${command}" --include=dev
+      else
+        npm "${command}"
+      fi
+    )
   done
+}
 
-  printf '%s' "${summary}"
+print_applied_summary() {
+  if [[ "${#PLAN_ACTIONS[@]}" -gt 0 ]]; then
+    echo "Applied ${#PLAN_ACTIONS[@]} $(pluralize "${#PLAN_ACTIONS[@]}" "sync change" "sync changes") ($(sync_summary))."
+  fi
+
+  if [[ "${#INSTALL_DIRS[@]}" -gt 0 ]]; then
+    echo "Installed ${#INSTALL_DIRS[@]} $(pluralize "${#INSTALL_DIRS[@]}" "package" "packages") ($(install_summary))."
+  fi
 }
 
 # --- Low-level helpers ---
 usage() {
   cat <<'EOF'
-	Symlink ~/.agents into selected agent configs.
+	Set up ~/.agents in selected agent configs.
 
 Usage:
-  sync [--dry-run] [--yes] [--prune] [--codex] [--claude] [--pi]
+  setup [--dry-run] [--yes] [--prune] [--codex] [--claude] [--pi]
 
 Options:
-  --dry-run   Print planned changes only
+  --dry-run   Print planned sync and npm install steps only
   --yes       Apply without prompting
-  --prune     Remove skills/extensions from selected agent folders that are not present in ~/.agents
-  --codex     Sync only Codex-managed files
-  --claude    Sync only Claude-managed files
-  --pi        Sync only Pi-managed files
+  --prune     Remove skills and extensions from selected agent folders that are not present in ~/.agents
+  --codex     Set up only Codex-managed files and relevant package dependencies
+  --claude    Set up only Claude-managed files and relevant package dependencies
+  --pi        Set up only Pi-managed files and relevant package dependencies
 
 Notes:
-  - If no agent flag is provided, sync Codex, Claude, and Pi.
-  - If any agent flag is provided, sync only the specified agents.
+  - If no agent flag is provided, set up Codex, Claude, and Pi.
+  - If any agent flag is provided, set up only the specified agents.
   - Agent flags can be combined.
-  - ~/.agents/AGENTS.md is symlinked to:
-      - ~/.codex/AGENTS.md
-      - ~/.claude/CLAUDE.md
-      - ~/.pi/agent/AGENTS.md
-  - ~/.agents/skills are symlinked only to ~/.claude/skills.
-  - Codex and Pi auto-discover skills from ~/.agents/skills.
-  - Pi extensions are synced from ~/.agents/pi/extensions to ~/.pi/agent/extensions, excluding node_modules.
-  - Pi JSON config files are symlinked from ~/.agents/pi/agent/*.json to ~/.pi/agent/*.json.
+  - Installs runtime dependencies for packages that declare dependencies, plus the shared Pi extensions package.
+  - Uses npm ci when package-lock.json exists; otherwise uses npm install.
 EOF
 }
 
-format_path() {
+format_home_path() {
   local path="$1"
 
   case "${path}" in
@@ -506,6 +595,22 @@ format_path() {
       ;;
     "${HOME}/"*)
       printf '~/%s' "${path#"${HOME}/"}"
+      ;;
+    *)
+      printf '%s' "${path}"
+      ;;
+  esac
+}
+
+format_repo_path() {
+  local path="$1"
+
+  case "${path}" in
+    "${AGENTS_ROOT}")
+      printf '.'
+      ;;
+    "${AGENTS_ROOT}/"*)
+      printf '%s' "${path#"${AGENTS_ROOT}/"}"
       ;;
     *)
       printf '%s' "${path}"
@@ -523,6 +628,114 @@ pluralize() {
   else
     printf '%s' "${plural}"
   fi
+}
+
+sync_summary() {
+  local parts=()
+
+  if [[ "${PLAN_CREATE_COUNT}" -gt 0 ]]; then
+    parts+=("${PLAN_CREATE_COUNT} $(pluralize "${PLAN_CREATE_COUNT}" "addition")")
+  fi
+
+  if [[ "${PLAN_REPLACE_COUNT}" -gt 0 ]]; then
+    parts+=("${PLAN_REPLACE_COUNT} $(pluralize "${PLAN_REPLACE_COUNT}" "replacement")")
+  fi
+
+  if [[ "${PLAN_REMOVE_COUNT}" -gt 0 ]]; then
+    parts+=("${PLAN_REMOVE_COUNT} $(pluralize "${PLAN_REMOVE_COUNT}" "removal")")
+  fi
+
+  join_parts ", " "${parts[@]}"
+}
+
+package_install_command() {
+  local package_dir="$1"
+
+  if [[ -f "${package_dir}/package-lock.json" ]]; then
+    printf 'ci'
+  else
+    printf 'install'
+  fi
+}
+
+package_needs_setup() {
+  local package_dir="$1"
+
+  if [[ ! -f "${package_dir}/package-lock.json" ]]; then
+    return 0
+  fi
+
+  local install_marker="${package_dir}/node_modules/.package-lock.json"
+
+  if [[ ! -f "${install_marker}" ]]; then
+    return 0
+  fi
+
+  if [[ "${package_dir}/package-lock.json" -nt "${install_marker}" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+install_summary() {
+  local ci_count=0
+  local install_count=0
+  local command
+
+  for command in "${INSTALL_COMMANDS[@]}"; do
+    case "${command}" in
+      ci)
+        ci_count=$((ci_count + 1))
+        ;;
+      install)
+        install_count=$((install_count + 1))
+        ;;
+    esac
+  done
+
+  local parts=()
+  if [[ "${ci_count}" -gt 0 ]]; then
+    parts+=("${ci_count} npm ci")
+  fi
+  if [[ "${install_count}" -gt 0 ]]; then
+    parts+=("${install_count} npm install")
+  fi
+
+  join_parts ", " "${parts[@]}"
+}
+
+apply_summary() {
+  local parts=()
+
+  if [[ "${#PLAN_ACTIONS[@]}" -gt 0 ]]; then
+    parts+=("${#PLAN_ACTIONS[@]} $(pluralize "${#PLAN_ACTIONS[@]}" "sync change" "sync changes")")
+  fi
+
+  if [[ "${#INSTALL_DIRS[@]}" -gt 0 ]]; then
+    parts+=("${#INSTALL_DIRS[@]} $(pluralize "${#INSTALL_DIRS[@]}" "package install" "package installs")")
+  fi
+
+  join_parts ", " "${parts[@]}"
+}
+
+join_parts() {
+  local separator="$1"
+  shift
+
+  local joined=""
+  local index=0
+  local part
+  for part in "$@"; do
+    [[ -n "${part}" ]] || continue
+    if [[ "${index}" -gt 0 ]]; then
+      joined+="${separator}"
+    fi
+    joined+="${part}"
+    index=$((index + 1))
+  done
+
+  printf '%s' "${joined}"
 }
 
 classify_managed_path() {
@@ -558,7 +771,7 @@ validate_directory_root() {
   done
 
   if [[ -e "${probe}" && ! -d "${probe}" ]]; then
-    echo "error: expected directory root but found non-directory ancestor: $(format_path "${probe}")" >&2
+    echo "error: expected directory root but found non-directory ancestor: $(format_home_path "${probe}")" >&2
     exit 1
   fi
 }
@@ -567,12 +780,12 @@ prepare_directory_root() {
   local path="$1"
 
   if ! mkdir -p "${path}"; then
-    echo "error: failed to prepare directory root: $(format_path "${path}")" >&2
+    echo "error: failed to prepare directory root: $(format_home_path "${path}")" >&2
     exit 1
   fi
 
   if [[ ! -w "${path}" ]]; then
-    echo "error: directory root is not writable: $(format_path "${path}")" >&2
+    echo "error: directory root is not writable: $(format_home_path "${path}")" >&2
     exit 1
   fi
 }
@@ -581,7 +794,7 @@ ensure_managed_path() {
   local path="$1"
 
   if [[ "$(classify_managed_path "${path}")" == "Other" ]]; then
-    echo "error: refusing to manage unexpected path: $(format_path "${path}")" >&2
+    echo "error: refusing to manage unexpected path: $(format_home_path "${path}")" >&2
     exit 1
   fi
 }
@@ -640,7 +853,7 @@ plan_link() {
       if [[ -d "${dest}" ]]; then
         add_plan replace "${dest}" "${src}"
       elif [[ -e "${dest}" ]]; then
-        echo "skip: $(format_path "${dest}") exists and is not a directory/symlink" >&2
+        echo "skip: $(format_home_path "${dest}") exists and is not a directory/symlink" >&2
       else
         add_plan create "${dest}" "${src}"
       fi
@@ -649,7 +862,7 @@ plan_link() {
       if [[ -f "${dest}" ]]; then
         add_plan replace "${dest}" "${src}"
       elif [[ -e "${dest}" ]]; then
-        echo "skip: $(format_path "${dest}") exists and is not a file/symlink" >&2
+        echo "skip: $(format_home_path "${dest}") exists and is not a file/symlink" >&2
       else
         add_plan create "${dest}" "${src}"
       fi
@@ -666,6 +879,11 @@ plan_link() {
       exit 1
       ;;
   esac
+}
+
+package_has_runtime_dependencies() {
+  local package_json="$1"
+  grep -q '"dependencies"[[:space:]]*:' "${package_json}"
 }
 
 is_syncable_pi_extension_source() {
@@ -695,6 +913,27 @@ is_syncable_pi_extension_source() {
       return 1
       ;;
   esac
+}
+
+ensure_runtime_dependencies() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ "${#INSTALL_DIRS[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  require_command npm
+}
+
+require_command() {
+  local command="$1"
+
+  if ! command -v "${command}" >/dev/null 2>&1; then
+    echo "error: required command not found: ${command}" >&2
+    exit 1
+  fi
 }
 
 main "$@"
