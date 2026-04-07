@@ -37,6 +37,7 @@
  * 1. Copy sandbox/ directory to ~/.pi/agent/extensions/
  * 2. Run `npm install` in ~/.pi/agent/extensions/sandbox/
  *
+ * macOS also requires: ripgrep
  * Linux also requires: bubblewrap, socat, ripgrep
  */
 
@@ -98,7 +99,7 @@ const GIT_METADATA_DIR_CACHE = new Map<string, string | null>();
 
 type PromptMode = "interactive" | "non-interactive";
 
-type SandboxBypassReason = "no-sandbox-flag" | "config-disabled";
+type SandboxBypassReason = "no-sandbox-flag" | "config-disabled" | "missing-dependencies";
 type SandboxBlockedReason = "unsupported-platform" | "init-failed";
 
 type SandboxRunMode = "sandbox" | "user-disabled" | SandboxBypassReason | SandboxBlockedReason;
@@ -122,6 +123,7 @@ type SandboxBlockReason =
   | "explicit-deny-domain"
   | "missing-allow-write"
   | "missing-allowed-domain"
+  | "missing-dependencies"
   | "unsupported-platform"
   | "init-failed"
   | "already-approved-still-failed"
@@ -1524,9 +1526,9 @@ function describeSandboxRuntimeState(state: SandboxState, promptMode: PromptMode
   if (state.status === "pending") return "pending";
   if (state.status === "suspended") return `suspended (${promptMode})`;
   if (state.status === "bypassed") {
-    return state.reason === "no-sandbox-flag"
-      ? "bypassed (--no-sandbox)"
-      : "bypassed (config disabled)";
+    if (state.reason === "no-sandbox-flag") return "bypassed (--no-sandbox)";
+    if (state.reason === "config-disabled") return "bypassed (config disabled)";
+    return "bypassed (missing dependencies)";
   }
   return state.reason === "unsupported-platform"
     ? "blocked (unsupported platform)"
@@ -1584,6 +1586,14 @@ function notifySandboxConfigParseErrors(ctx: ExtensionContext, paths: SandboxCon
     .map((configPath) => `${configPath.label.toLowerCase()} (${configPath.path})`)
     .join(", ");
   notify(ctx, `Could not parse sandbox config: ${details}`, "warning");
+}
+
+function getSandboxDependencyErrors(config: SandboxConfig): string[] {
+  return SandboxManager.checkDependencies(config.ripgrep).errors;
+}
+
+function formatMissingSandboxDependenciesWarning(errors: string[]): string {
+  return `Sandbox disabled: ${errors.join("; ")}`;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1741,6 +1751,22 @@ export default function (pi: ExtensionAPI) {
     config: SandboxConfig,
   ): Promise<SandboxRuntimeConfig | null> => {
     promptMode = normalizePromptMode(config.mode);
+
+    const dependencyErrors = getSandboxDependencyErrors(config);
+    if (dependencyErrors.length > 0) {
+      promptMode = DEFAULT_PROMPT_MODE;
+      pendingNetworkApprovals.clear();
+      sandboxState = { status: "bypassed", reason: "missing-dependencies" };
+      recordRuntimeBlock(
+        "init",
+        "missing-dependencies",
+        `sandbox dependencies missing: ${dependencyErrors.join("; ")}`,
+      );
+      setSandboxStatus(ctx, false);
+      notify(ctx, formatMissingSandboxDependenciesWarning(dependencyErrors), "warning");
+      return null;
+    }
+
     const runtimeConfig = toRuntimeConfig(config);
 
     try {
