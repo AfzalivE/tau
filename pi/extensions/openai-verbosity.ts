@@ -4,7 +4,11 @@ import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 const STATUS_KEY = "openai-verbosity";
-const SUPPORTED_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
+const SUPPORTED_APIS = new Set([
+  "openai-responses",
+  "openai-codex-responses",
+  "azure-openai-responses",
+]);
 
 type Verbosity = "low" | "medium" | "high";
 type VerbositySetting = Verbosity | "auto";

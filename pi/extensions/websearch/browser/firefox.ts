@@ -64,9 +64,8 @@ export function discoverFirefoxProfiles(preferredProfileName?: string): BrowserP
     const profilePathValue = section.Path;
     if (!profilePathValue) continue;
 
-    const profilePath = section.IsRelative === "1"
-      ? path.join(baseDir, profilePathValue)
-      : profilePathValue;
+    const profilePath =
+      section.IsRelative === "1" ? path.join(baseDir, profilePathValue) : profilePathValue;
     const cookiesPath = path.join(profilePath, "cookies.sqlite");
     if (!existsSync(cookiesPath)) continue;
 
@@ -90,7 +89,10 @@ export function discoverFirefoxProfiles(preferredProfileName?: string): BrowserP
     : sorted;
 }
 
-function isPreferredFirefoxProfile(profile: BrowserProfile, preferredProfileName?: string): boolean {
+function isPreferredFirefoxProfile(
+  profile: BrowserProfile,
+  preferredProfileName?: string,
+): boolean {
   if (!preferredProfileName) return false;
   return (
     profile.profileName === preferredProfileName ||
@@ -106,9 +108,11 @@ export function loadFirefoxCookies(profile: BrowserProfile): BrowserCookie[] {
     return withSqliteSnapshot(cookiesPath, "websearch-firefox", (tempDbPath) => {
       const db = new DatabaseSync(tempDbPath, { readOnly: true });
       try {
-        const rows = db.prepare(
-          "SELECT name, value, host, path, isSecure FROM moz_cookies ORDER BY host ASC, path DESC, expiry DESC",
-        ).all() as Array<Record<string, unknown>>;
+        const rows = db
+          .prepare(
+            "SELECT name, value, host, path, isSecure FROM moz_cookies ORDER BY host ASC, path DESC, expiry DESC",
+          )
+          .all() as Array<Record<string, unknown>>;
 
         const cookies: BrowserCookie[] = [];
         const seen = new Set<string>();

@@ -49,9 +49,10 @@ export function loadConfig(): WebsearchConfig {
   try {
     raw = JSON.parse(readFileSync(WEBSEARCH_CONFIG_PATH, "utf8")) as Record<string, unknown>;
   } catch (error) {
-    const code = error && typeof error === "object" && "code" in error
-      ? (error as { code?: string }).code
-      : undefined;
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
     if (code === "ENOENT") {
       raw = {};
     } else {
@@ -60,9 +61,10 @@ export function loadConfig(): WebsearchConfig {
     }
   }
 
-  const profiles = raw.profiles && typeof raw.profiles === "object"
-    ? raw.profiles as Record<string, unknown>
-    : {};
+  const profiles =
+    raw.profiles && typeof raw.profiles === "object"
+      ? (raw.profiles as Record<string, unknown>)
+      : {};
 
   return {
     routes: sanitizeRoutes(raw.routes),

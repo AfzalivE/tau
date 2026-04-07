@@ -1,5 +1,11 @@
 import type { BrowserCookie, BrowserSession, WebsearchResult } from "../types.js";
-import { browserHeaders, buildCookieHeader, dedupeSources, extractMarkdownSources, hasCookie } from "../normalize.js";
+import {
+  browserHeaders,
+  buildCookieHeader,
+  dedupeSources,
+  extractMarkdownSources,
+  hasCookie,
+} from "../normalize.js";
 import { buildWebsearchPrompt } from "./search-prompt.shared.js";
 import { fetchText, withTimeout } from "./shared.js";
 
@@ -13,7 +19,11 @@ const REQUIRED_COOKIE_NAMES = ["__Secure-1PSID", "__Secure-1PSIDTS"];
 export const browserGemini = {
   backend: "gemini" as const,
   domains: ["google.com"],
-  async search(session: BrowserSession, query: string, signal?: AbortSignal): Promise<WebsearchResult> {
+  async search(
+    session: BrowserSession,
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<WebsearchResult> {
     for (const cookieName of REQUIRED_COOKIE_NAMES) {
       if (!hasCookie(GEMINI_APP_URL, session.cookies, cookieName)) {
         throw new Error(`Missing required Google cookie: ${cookieName}`);
@@ -52,7 +62,10 @@ async function queryGemini(
 ): Promise<string> {
   const body = new URLSearchParams();
   body.set("at", accessToken);
-  body.set("f.req", JSON.stringify([null, JSON.stringify([[buildWebsearchPrompt(query)], null, null])]));
+  body.set(
+    "f.req",
+    JSON.stringify([null, JSON.stringify([[buildWebsearchPrompt(query)], null, null])]),
+  );
 
   const rawText = await fetchText(GEMINI_STREAM_GENERATE_URL, {
     method: "POST",
@@ -97,7 +110,10 @@ async function fetchAccessToken(cookies: BrowserCookie[], signal?: AbortSignal):
   throw new Error("Could not authenticate with Gemini Web.");
 }
 
-async function getActiveGoogleEmail(cookies: BrowserCookie[], signal?: AbortSignal): Promise<string | null> {
+async function getActiveGoogleEmail(
+  cookies: BrowserCookie[],
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
     const response = await fetchText(GOOGLE_LIST_ACCOUNTS_URL, {
       headers: browserHeaders({

@@ -1,5 +1,11 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
-import { defineTool, getMarkdownTheme, keyHint, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import {
+  defineTool,
+  getMarkdownTheme,
+  keyHint,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
@@ -13,7 +19,15 @@ import { browserOpenAICodex } from "./providers/openai-codex.browser.js";
 import { isPiOpenAICodexModel, searchWithPiOpenAICodex } from "./providers/openai-codex.pi.js";
 import type { PiModelSelection } from "./providers/pi-model.shared.js";
 import { selectCurrentPiModel, selectFallbackPiModel } from "./providers/pi-model.shared.js";
-import type { BrowserProfile, WebsearchAuthSource, WebsearchBackendId, WebsearchBrowserFamily, WebsearchConfig, WebsearchResult, WebsearchRouteId } from "./types.js";
+import type {
+  BrowserProfile,
+  WebsearchAuthSource,
+  WebsearchBackendId,
+  WebsearchBrowserFamily,
+  WebsearchConfig,
+  WebsearchResult,
+  WebsearchRouteId,
+} from "./types.js";
 
 const PI_ROUTE_HANDLERS: Record<`pi:${WebsearchBackendId}`, PiRouteHandler> = {
   "pi:openai-codex": {
@@ -43,7 +57,11 @@ interface SearchSummary {
 
 interface PiRouteHandler {
   predicate: (model: Model<Api>) => boolean;
-  search: (selection: PiModelSelection, query: string, signal?: AbortSignal) => Promise<WebsearchResult>;
+  search: (
+    selection: PiModelSelection,
+    query: string,
+    signal?: AbortSignal,
+  ) => Promise<WebsearchResult>;
 }
 
 function toSearchSummary(route: WebsearchRouteId, result: WebsearchResult): SearchSummary {
@@ -62,7 +80,9 @@ function toSearchSummary(route: WebsearchRouteId, result: WebsearchResult): Sear
 function currentPiRoute(ctx: ExtensionContext): `pi:${WebsearchBackendId}` | null {
   if (!ctx.model) return null;
 
-  for (const [route, handler] of Object.entries(PI_ROUTE_HANDLERS) as Array<[`pi:${WebsearchBackendId}`, PiRouteHandler]>) {
+  for (const [route, handler] of Object.entries(PI_ROUTE_HANDLERS) as Array<
+    [`pi:${WebsearchBackendId}`, PiRouteHandler]
+  >) {
     if (handler.predicate(ctx.model)) return route;
   }
 
@@ -77,9 +97,10 @@ async function executePiRoute(
   signal?: AbortSignal,
 ): Promise<SearchSummary | null> {
   const handler = PI_ROUTE_HANDLERS[route];
-  const selection = mode === "current"
-    ? await selectCurrentPiModel(ctx, handler.predicate)
-    : await selectFallbackPiModel(ctx, handler.predicate);
+  const selection =
+    mode === "current"
+      ? await selectCurrentPiModel(ctx, handler.predicate)
+      : await selectFallbackPiModel(ctx, handler.predicate);
 
   return selection ? toSearchSummary(route, await handler.search(selection, query, signal)) : null;
 }
@@ -99,8 +120,7 @@ async function searchPiRoute(
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
-  return signal?.aborted === true
-    || (error instanceof Error && error.name === "AbortError");
+  return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -128,7 +148,9 @@ async function searchBrowserRoute(
   profileCache: Partial<Record<WebsearchBrowserFamily, BrowserProfile[]>>,
   signal?: AbortSignal,
 ): Promise<SearchSummary | null> {
-  const profileFamily: WebsearchBrowserFamily = route.startsWith("firefox:") ? "firefox" : "chromium";
+  const profileFamily: WebsearchBrowserFamily = route.startsWith("firefox:")
+    ? "firefox"
+    : "chromium";
   const browserProvider = route.endsWith(":gemini") ? browserGemini : browserOpenAICodex;
   const configuredProfileName = config.profiles[profileFamily];
   const profiles = getBrowserProfiles(profileCache, profileFamily, config);
@@ -145,7 +167,9 @@ async function searchBrowserRoute(
       const session = createBrowserSession(profile, browserProvider.domains);
       if (!session) {
         if (configuredProfileName) {
-          throw new Error(`Configured ${profileFamily} profile has no usable session: ${configuredProfileName}`);
+          throw new Error(
+            `Configured ${profileFamily} profile has no usable session: ${configuredProfileName}`,
+          );
         }
         continue;
       }
@@ -233,53 +257,55 @@ function formatCollapsedWebsearchResult(resultText: string, theme: any): string 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerTool(defineTool({
-    name: "websearch",
-    label: "Websearch",
-    description:
-      "Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions.",
-    promptSnippet: "Search the web for current or external information unavailable in local files",
-    promptGuidelines: [
-      "Use this for recent facts, live service behavior, or external documentation that is not already present in the repo.",
-      "Do not use websearch when repository files or supplied context already answer the question.",
-    ],
-    parameters: Type.Object({
-      query: Type.String({ description: "What to search for" }),
+  pi.registerTool(
+    defineTool({
+      name: "websearch",
+      label: "Websearch",
+      description: "Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions.",
+      promptSnippet:
+        "Search the web for current or external information unavailable in local files",
+      promptGuidelines: [
+        "Use this for recent facts, live service behavior, or external documentation that is not already present in the repo.",
+        "Do not use websearch when repository files or supplied context already answer the question.",
+      ],
+      parameters: Type.Object({
+        query: Type.String({ description: "What to search for" }),
+      }),
+      renderCall(args, theme) {
+        return new Text(formatWebsearchCall(args.query, theme), 0, 0);
+      },
+      renderResult(result, { expanded }, theme) {
+        const content = result.content.find((item) => item.type === "text");
+        const text = content?.type === "text" ? content.text : "";
+
+        if (!expanded) {
+          return new Text(formatCollapsedWebsearchResult(text, theme), 0, 0);
+        }
+
+        if (!text.trim()) {
+          return new Text(`\n${theme.fg("muted", "(no output)")}`, 0, 0);
+        }
+
+        const container = new Container();
+        container.addChild(new Spacer(1));
+        container.addChild(new Markdown(text.trim(), 0, 0, getMarkdownTheme()));
+        return container;
+      },
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const result = await runSearch(ctx, params.query, signal);
+        return {
+          content: [{ type: "text", text: result.result }],
+          details: {
+            route: result.route,
+            backend: result.backend,
+            authSource: result.authSource,
+            browserName: result.browserName,
+            profile: result.profile,
+            accountLabel: result.accountLabel,
+            sources: result.sources,
+          },
+        };
+      },
     }),
-    renderCall(args, theme) {
-      return new Text(formatWebsearchCall(args.query, theme), 0, 0);
-    },
-    renderResult(result, { expanded }, theme) {
-      const content = result.content.find((item) => item.type === "text");
-      const text = content?.type === "text" ? content.text : "";
-
-      if (!expanded) {
-        return new Text(formatCollapsedWebsearchResult(text, theme), 0, 0);
-      }
-
-      if (!text.trim()) {
-        return new Text(`\n${theme.fg("muted", "(no output)")}`, 0, 0);
-      }
-
-      const container = new Container();
-      container.addChild(new Spacer(1));
-      container.addChild(new Markdown(text.trim(), 0, 0, getMarkdownTheme()));
-      return container;
-    },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const result = await runSearch(ctx, params.query, signal);
-      return {
-        content: [{ type: "text", text: result.result }],
-        details: {
-          route: result.route,
-          backend: result.backend,
-          authSource: result.authSource,
-          browserName: result.browserName,
-          profile: result.profile,
-          accountLabel: result.accountLabel,
-          sources: result.sources,
-        },
-      };
-    },
-  }));
+  );
 }

@@ -98,9 +98,10 @@ interface ModelRequestAuth {
 
 type ModelAuthLookup = {
   find: (provider: string, modelId: string) => Model<Api> | undefined;
-  getApiKeyAndHeaders: (model: Model<Api>) => Promise<
-    | { ok: true; apiKey?: string; headers?: Record<string, string> }
-    | { ok: false; error: string }
+  getApiKeyAndHeaders: (
+    model: Model<Api>,
+  ) => Promise<
+    { ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }
   >;
 };
 
@@ -198,11 +199,7 @@ class QnAComponent implements Component {
   private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
   private gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
-  constructor(
-    questions: ExtractedQuestion[],
-    tui: TUI,
-    onDone: (result: string | null) => void,
-  ) {
+  constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void) {
     this.questions = questions;
     this.answers = questions.map(() => "");
     this.tui = tui;
@@ -286,7 +283,11 @@ class QnAComponent implements Component {
         this.submit();
         return;
       }
-      if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data.toLowerCase() === "n") {
+      if (
+        matchesKey(data, Key.escape) ||
+        matchesKey(data, Key.ctrl("c")) ||
+        data.toLowerCase() === "n"
+      ) {
         this.showingConfirmation = false;
         this.invalidate();
         this.tui.requestRender();
@@ -464,55 +465,60 @@ class QnAComponent implements Component {
 
 export default function (pi: ExtensionAPI) {
   const answerHandler = async (ctx: ExtensionContext) => {
-      if (!ctx.hasUI) {
-        ctx.ui.notify("answer requires interactive mode", "error");
-        return;
-      }
+    if (!ctx.hasUI) {
+      ctx.ui.notify("answer requires interactive mode", "error");
+      return;
+    }
 
-      if (!ctx.model) {
-        ctx.ui.notify("No model selected", "error");
-        return;
-      }
+    if (!ctx.model) {
+      ctx.ui.notify("No model selected", "error");
+      return;
+    }
 
-      // Find the last assistant message on the current branch
-      const branch = ctx.sessionManager.getBranch();
-      let lastAssistantText: string | undefined;
+    // Find the last assistant message on the current branch
+    const branch = ctx.sessionManager.getBranch();
+    let lastAssistantText: string | undefined;
 
-      for (let i = branch.length - 1; i >= 0; i--) {
-        const entry = branch[i];
-        if (entry.type === "message") {
-          const msg = entry.message;
-          if ("role" in msg && msg.role === "assistant") {
-            if (msg.stopReason !== "stop") {
-              ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
-              return;
-            }
-            const textParts = msg.content
-              .filter((c): c is { type: "text"; text: string } => c.type === "text")
-              .map((c) => c.text);
-            if (textParts.length > 0) {
-              lastAssistantText = textParts.join("\n");
-              break;
-            }
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry.type === "message") {
+        const msg = entry.message;
+        if ("role" in msg && msg.role === "assistant") {
+          if (msg.stopReason !== "stop") {
+            ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
+            return;
+          }
+          const textParts = msg.content
+            .filter((c): c is { type: "text"; text: string } => c.type === "text")
+            .map((c) => c.text);
+          if (textParts.length > 0) {
+            lastAssistantText = textParts.join("\n");
+            break;
           }
         }
       }
+    }
 
-      if (!lastAssistantText) {
-        ctx.ui.notify("No assistant messages found", "error");
-        return;
-      }
+    if (!lastAssistantText) {
+      ctx.ui.notify("No assistant messages found", "error");
+      return;
+    }
 
-      // Select the best model for extraction (prefer a fast model in the current family).
-      const extractionSelection = await selectExtractionModel(ctx.model, ctx.modelRegistry);
-      if (!extractionSelection) {
-        ctx.ui.notify("No configured Pi model is available for question extraction", "error");
-        return;
-      }
+    // Select the best model for extraction (prefer a fast model in the current family).
+    const extractionSelection = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+    if (!extractionSelection) {
+      ctx.ui.notify("No configured Pi model is available for question extraction", "error");
+      return;
+    }
 
-      // Run extraction with loader UI
-      const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
-        const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionSelection.model.id}...`);
+    // Run extraction with loader UI
+    const extractionResult = await ctx.ui.custom<ExtractionResult | null>(
+      (tui, theme, _kb, done) => {
+        const loader = new BorderedLoader(
+          tui,
+          theme,
+          `Extracting questions using ${extractionSelection.model.id}...`,
+        );
         loader.onAbort = () => done(null);
 
         const doExtract = async () => {
@@ -525,7 +531,11 @@ export default function (pi: ExtensionAPI) {
           const response = await complete(
             extractionSelection.model,
             { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            { apiKey: extractionSelection.apiKey, headers: extractionSelection.headers, signal: loader.signal },
+            {
+              apiKey: extractionSelection.apiKey,
+              headers: extractionSelection.headers,
+              signal: loader.signal,
+            },
           );
 
           if (response.stopReason === "aborted") {
@@ -545,37 +555,38 @@ export default function (pi: ExtensionAPI) {
           .catch(() => done(null));
 
         return loader;
-      });
+      },
+    );
 
-      if (extractionResult === null) {
-        ctx.ui.notify("Cancelled", "info");
-        return;
-      }
+    if (extractionResult === null) {
+      ctx.ui.notify("Cancelled", "info");
+      return;
+    }
 
-      if (extractionResult.questions.length === 0) {
-        ctx.ui.notify("No questions found in the last message", "info");
-        return;
-      }
+    if (extractionResult.questions.length === 0) {
+      ctx.ui.notify("No questions found in the last message", "info");
+      return;
+    }
 
-      // Show the Q&A component
-      const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-        return new QnAComponent(extractionResult.questions, tui, done);
-      });
+    // Show the Q&A component
+    const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
+      return new QnAComponent(extractionResult.questions, tui, done);
+    });
 
-      if (answersResult === null) {
-        ctx.ui.notify("Cancelled", "info");
-        return;
-      }
+    if (answersResult === null) {
+      ctx.ui.notify("Cancelled", "info");
+      return;
+    }
 
-      // Send the answers directly as a message and trigger a turn
-      pi.sendMessage(
-        {
-          customType: "answers",
-          content: "Here are my answers to your questions:\n\n" + answersResult,
-          display: true,
-        },
-        { triggerTurn: true },
-      );
+    // Send the answers directly as a message and trigger a turn
+    pi.sendMessage(
+      {
+        customType: "answers",
+        content: "Here are my answers to your questions:\n\n" + answersResult,
+        display: true,
+      },
+      { triggerTurn: true },
+    );
   };
 
   pi.registerCommand("answer", {

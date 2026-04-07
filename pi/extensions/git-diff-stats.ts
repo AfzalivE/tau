@@ -1,4 +1,9 @@
-import { isEditToolResult, isWriteToolResult, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import {
+  isEditToolResult,
+  isWriteToolResult,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
@@ -132,11 +137,14 @@ async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
     });
 
     const [, headOid] = await Promise.all([addIntent, headOidPromise]);
-    const baseOid = headOid ?? (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], { stdin: "" }));
+    const baseOid =
+      headOid ?? (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], { stdin: "" }));
 
     const [workingTreeDiff, stagedDiff] = await Promise.all([
       gitText(cwd, ["diff", "--numstat", baseOid, "--"], { env: { GIT_INDEX_FILE: tempIndex } }),
-      gitText(cwd, ["diff", "--cached", "--numstat", baseOid, "--"], { env: { GIT_INDEX_FILE: tempIndex } }),
+      gitText(cwd, ["diff", "--cached", "--numstat", baseOid, "--"], {
+        env: { GIT_INDEX_FILE: tempIndex },
+      }),
     ]);
 
     const statsByPath = new Map<string, DiffStats>();
@@ -183,7 +191,10 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
     const activeCtx = ctx;
     if (!activeCtx?.hasUI) return;
 
-    activeCtx.ui.setStatus(STATUS_KEY, stats ? activeCtx.ui.theme.fg("dim", `+${stats.added} -${stats.removed}`) : undefined);
+    activeCtx.ui.setStatus(
+      STATUS_KEY,
+      stats ? activeCtx.ui.theme.fg("dim", `+${stats.added} -${stats.removed}`) : undefined,
+    );
   }
 
   function resetRefreshState(): void {

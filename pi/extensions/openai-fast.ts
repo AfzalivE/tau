@@ -4,7 +4,11 @@ import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 const STATUS_KEY = "openai-fast";
-const SUPPORTED_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
+const SUPPORTED_APIS = new Set([
+  "openai-responses",
+  "openai-codex-responses",
+  "azure-openai-responses",
+]);
 
 type FastMode = "fast";
 type FastSetting = FastMode | "auto";
@@ -100,11 +104,7 @@ function resolveFastMode(
   return {};
 }
 
-function setFastMode(
-  config: FastConfig,
-  key: string,
-  setting: FastSetting,
-): FastConfig {
+function setFastMode(config: FastConfig, key: string, setting: FastSetting): FastConfig {
   const models = { ...config.models };
 
   if (setting === "auto") delete models[key];
@@ -172,7 +172,8 @@ export default function openaiFastExtension(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "") {
-        const nextSetting: FastSetting = isSupportedModel(ctx.model) && resolveFastMode(config, ctx.model).mode ? "auto" : "fast";
+        const nextSetting: FastSetting =
+          isSupportedModel(ctx.model) && resolveFastMode(config, ctx.model).mode ? "auto" : "fast";
         await applySetting(nextSetting, ctx);
         return;
       }

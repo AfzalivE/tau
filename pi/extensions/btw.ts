@@ -188,7 +188,11 @@ export default function btwExtension(pi: ExtensionAPI): void {
   });
 }
 
-function buildSnapshot(ctx: ExtensionCommandContext, pi: ExtensionAPI, request: string): BtwSnapshot {
+function buildSnapshot(
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  request: string,
+): BtwSnapshot {
   return {
     request,
     cwd: ctx.cwd,
@@ -263,10 +267,7 @@ async function runBtwRequest(
   }
 }
 
-function seedSessionManager(
-  sessionManager: SessionManager,
-  messages: AgentMessage[],
-): void {
+function seedSessionManager(sessionManager: SessionManager, messages: AgentMessage[]): void {
   type SessionMessageInput = Parameters<SessionManager["appendMessage"]>[0];
 
   for (const message of messages) {
@@ -362,7 +363,10 @@ class BtwResultComponent implements Component {
   render(width: number): string[] {
     const boxWidth = this.getBoxWidth(width);
     const contentWidth = this.getContentWidth(boxWidth);
-    const questionLines = wrapTextWithAnsi(this.theme.fg("muted", this.result.question), contentWidth);
+    const questionLines = wrapTextWithAnsi(
+      this.theme.fg("muted", this.result.question),
+      contentWidth,
+    );
     const bodyLines = this.getBodyLines(contentWidth);
     const bodyHeight = this.getBodyHeight();
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);

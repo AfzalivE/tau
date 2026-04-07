@@ -78,7 +78,11 @@ function extractReviewSessionKey(data: unknown): string | undefined {
 function extractReviewOutcome(data: unknown): "success" | "failed" | "cancelled" | undefined {
   if (!data || typeof data !== "object") return undefined;
   const payload = data as { outcome?: unknown };
-  if (payload.outcome === "success" || payload.outcome === "failed" || payload.outcome === "cancelled") {
+  if (
+    payload.outcome === "success" ||
+    payload.outcome === "failed" ||
+    payload.outcome === "cancelled"
+  ) {
     return payload.outcome;
   }
   return undefined;

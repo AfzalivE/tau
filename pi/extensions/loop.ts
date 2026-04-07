@@ -8,7 +8,13 @@
 
 import { Type } from "@sinclair/typebox";
 import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
-import { compact, defineTool, DynamicBorder, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import {
+  compact,
+  defineTool,
+  DynamicBorder,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 
 const LOOP_PRESETS = [
@@ -113,9 +119,7 @@ function getConditionText(mode: LoopMode, condition?: string): string {
   }
 }
 
-async function selectSummaryModel(
-  ctx: ExtensionContext,
-): Promise<ModelRequestAuth | null> {
+async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelRequestAuth | null> {
   if (!ctx.model) return null;
 
   const family = detectModelFamily(ctx.model.provider);
@@ -192,9 +196,7 @@ function updateStatus(ctx: ExtensionContext, state: LoopStateData): void {
   const loopCount = state.loopCount ?? 0;
   const turnText = `(turn ${loopCount})`;
   const summary = state.summary?.trim();
-  const text = summary
-    ? `Loop active: ${summary} ${turnText}`
-    : `Loop active ${turnText}`;
+  const text = summary ? `Loop active: ${summary} ${turnText}` : `Loop active ${turnText}`;
   ctx.ui.setWidget("loop", [ctx.ui.theme.fg("accent", text)]);
 }
 
@@ -234,7 +236,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
     ctx.ui.notify("Loop ended", "info");
   }
 
-  function wasLastAssistantAborted(messages: Array<{ role?: string; stopReason?: string }>): boolean {
+  function wasLastAssistantAborted(
+    messages: Array<{ role?: string; stopReason?: string }>,
+  ): boolean {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message?.role === "assistant") {
@@ -254,14 +258,17 @@ export default function loopExtension(pi: ExtensionAPI): void {
     persistState(loopState);
     updateStatus(ctx, loopState);
 
-    pi.sendMessage({
-      customType: "loop",
-      content: prompt,
-      display: true,
-    }, {
-      deliverAs: "followUp",
-      triggerTurn: true,
-    });
+    pi.sendMessage(
+      {
+        customType: "loop",
+        content: prompt,
+        display: true,
+      },
+      {
+        deliverAs: "followUp",
+        triggerTurn: true,
+      },
+    );
   }
 
   async function showLoopSelector(ctx: ExtensionContext): Promise<LoopStateData | null> {
@@ -271,39 +278,41 @@ export default function loopExtension(pi: ExtensionAPI): void {
       description: preset.description,
     }));
 
-    const selection = await withPromptSignal(pi, () => ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-      const container = new Container();
-      container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-      container.addChild(new Text(theme.fg("accent", theme.bold("Select a loop preset"))));
+    const selection = await withPromptSignal(pi, () =>
+      ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+        const container = new Container();
+        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+        container.addChild(new Text(theme.fg("accent", theme.bold("Select a loop preset"))));
 
-      const selectList = new SelectList(items, Math.min(items.length, 10), {
-        selectedPrefix: (text) => theme.fg("accent", text),
-        selectedText: (text) => theme.fg("accent", text),
-        description: (text) => theme.fg("muted", text),
-        scrollInfo: (text) => theme.fg("dim", text),
-        noMatch: (text) => theme.fg("warning", text),
-      });
+        const selectList = new SelectList(items, Math.min(items.length, 10), {
+          selectedPrefix: (text) => theme.fg("accent", text),
+          selectedText: (text) => theme.fg("accent", text),
+          description: (text) => theme.fg("muted", text),
+          scrollInfo: (text) => theme.fg("dim", text),
+          noMatch: (text) => theme.fg("warning", text),
+        });
 
-      selectList.onSelect = (item) => done(item.value);
-      selectList.onCancel = () => done(null);
+        selectList.onSelect = (item) => done(item.value);
+        selectList.onCancel = () => done(null);
 
-      container.addChild(selectList);
-      container.addChild(new Text(theme.fg("dim", "Press enter to confirm or esc to cancel")));
-      container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+        container.addChild(selectList);
+        container.addChild(new Text(theme.fg("dim", "Press enter to confirm or esc to cancel")));
+        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
-      return {
-        render(width: number) {
-          return container.render(width);
-        },
-        invalidate() {
-          container.invalidate();
-        },
-        handleInput(data: string) {
-          selectList.handleInput(data);
-          tui.requestRender();
-        },
-      };
-    }));
+        return {
+          render(width: number) {
+            return container.render(width);
+          },
+          invalidate() {
+            container.invalidate();
+          },
+          handleInput(data: string) {
+            selectList.handleInput(data);
+            tui.requestRender();
+          },
+        };
+      }),
+    );
 
     if (!selection) return null;
 
@@ -354,32 +363,35 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   }
 
-  pi.registerTool(defineTool({
-    name: "signal_loop_success",
-    label: "Signal Loop Success",
-    description: "Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.",
-    promptSnippet: "Signal that the active /loop breakout condition has been satisfied",
-    promptGuidelines: [
-      "Call this tool only when the active loop's breakout condition is actually satisfied.",
-      "Do not call this tool unless a loop is currently active.",
-    ],
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      if (!loopState.active) {
+  pi.registerTool(
+    defineTool({
+      name: "signal_loop_success",
+      label: "Signal Loop Success",
+      description:
+        "Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.",
+      promptSnippet: "Signal that the active /loop breakout condition has been satisfied",
+      promptGuidelines: [
+        "Call this tool only when the active loop's breakout condition is actually satisfied.",
+        "Do not call this tool unless a loop is currently active.",
+      ],
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+        if (!loopState.active) {
+          return {
+            content: [{ type: "text", text: "No active loop is running." }],
+            details: { active: false },
+          };
+        }
+
+        clearLoopState(ctx);
+
         return {
-          content: [{ type: "text", text: "No active loop is running." }],
+          content: [{ type: "text", text: "Loop ended." }],
           details: { active: false },
         };
-      }
-
-      clearLoopState(ctx);
-
-      return {
-        content: [{ type: "text", text: "Loop ended." }],
-        details: { active: false },
-      };
-    },
-  }));
+      },
+    }),
+  );
 
   pi.registerCommand("loop", {
     description: "Start a follow-up loop until a breakout condition is met",
@@ -401,8 +413,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
       if (loopState.active) {
         const confirm = ctx.hasUI
           ? await withPromptSignal(pi, () =>
-            ctx.ui.confirm("Replace active loop?", "A loop is already active. Replace it?"),
-          )
+              ctx.ui.confirm("Replace active loop?", "A loop is already active. Replace it?"),
+            )
           : true;
         if (!confirm) {
           ctx.ui.notify("Loop unchanged", "info");
@@ -419,7 +431,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
       const condition = nextState.condition;
       void (async () => {
         const summary = await summarizeBreakoutCondition(ctx, mode, condition);
-        if (!loopState.active || loopState.mode !== mode || loopState.condition !== condition) return;
+        if (!loopState.active || loopState.mode !== mode || loopState.condition !== condition)
+          return;
         loopState = { ...loopState, summary };
         persistState(loopState);
         updateStatus(ctx, loopState);
@@ -448,7 +461,10 @@ export default function loopExtension(pi: ExtensionAPI): void {
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
     if (!auth.ok || !auth.apiKey) return;
 
-    const instructionParts = [event.customInstructions, getCompactionInstructions(loopState.mode, loopState.condition)]
+    const instructionParts = [
+      event.customInstructions,
+      getCompactionInstructions(loopState.mode, loopState.condition),
+    ]
       .filter(Boolean)
       .join("\n\n");
 
@@ -480,7 +496,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
       const condition = loopState.condition;
       void (async () => {
         const summary = await summarizeBreakoutCondition(ctx, mode, condition);
-        if (!loopState.active || loopState.mode !== mode || loopState.condition !== condition) return;
+        if (!loopState.active || loopState.mode !== mode || loopState.condition !== condition)
+          return;
         loopState = { ...loopState, summary };
         persistState(loopState);
         updateStatus(ctx, loopState);

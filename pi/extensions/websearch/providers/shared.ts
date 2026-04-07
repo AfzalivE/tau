@@ -1,5 +1,7 @@
 export function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
-  return signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+  return signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
 }
 
 export async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {

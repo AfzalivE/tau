@@ -462,7 +462,8 @@ class InsightsReportComponent implements Component {
 
 export default function insightsExtension(pi: ExtensionAPI): void {
   pi.registerCommand("insights", {
-    description: "Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions",
+    description:
+      "Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions",
     getArgumentCompletions: (prefix) => getScopeCompletions(prefix),
     handler: async (args, ctx) => {
       await runInsightsCommand(args, ctx);
@@ -470,7 +471,10 @@ export default function insightsExtension(pi: ExtensionAPI): void {
   });
 }
 
-async function runInsightsCommand(args: string | undefined, ctx: ExtensionCommandContext): Promise<void> {
+async function runInsightsCommand(
+  args: string | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
   const parsed = parseArgs(args);
   if ("error" in parsed) {
     ctx.ui.notify(parsed.error, "warning");
@@ -525,9 +529,15 @@ async function runInsightsCommand(args: string | undefined, ctx: ExtensionComman
     void (async () => {
       try {
         const selection = await selectionPromise;
-        const runResult = await runInsightsPipeline(parsed.scope, ctx, selection, loader.signal, (update) => {
-          Object.assign(progress, update);
-        });
+        const runResult = await runInsightsPipeline(
+          parsed.scope,
+          ctx,
+          selection,
+          loader.signal,
+          (update) => {
+            Object.assign(progress, update);
+          },
+        );
         stopTicker();
         if (!aborted) done(runResult);
       } catch (error) {
@@ -546,7 +556,8 @@ async function runInsightsCommand(args: string | undefined, ctx: ExtensionComman
       return;
     }
 
-    const message = caughtError instanceof Error ? caughtError.message : "Failed to analyze sessions";
+    const message =
+      caughtError instanceof Error ? caughtError.message : "Failed to analyze sessions";
     ctx.ui.notify(message, "error");
     return;
   }
@@ -579,7 +590,13 @@ async function runInsightsPipeline(
 
   for (let index = 0; index < targets.length; index++) {
     throwIfAborted(signal);
-    onProgress({ stage: "metadata", current: index + 1, total: targets.length, metaCacheHits, facetCacheHits });
+    onProgress({
+      stage: "metadata",
+      current: index + 1,
+      total: targets.length,
+      metaCacheHits,
+      facetCacheHits,
+    });
 
     const target = targets[index]!;
     try {
@@ -590,7 +607,13 @@ async function runInsightsPipeline(
 
       let facet: SessionFacet | undefined;
       facetAttempts++;
-      onProgress({ stage: "facets", current: index + 1, total: targets.length, metaCacheHits, facetCacheHits });
+      onProgress({
+        stage: "facets",
+        current: index + 1,
+        total: targets.length,
+        metaCacheHits,
+        facetCacheHits,
+      });
 
       try {
         const classified = await loadOrExtractFacet(
@@ -680,7 +703,9 @@ function parseArgs(args: string | undefined): { scope: InsightScope } | { error:
   return { error: "Usage: /insights [scope=current|project|all]" };
 }
 
-function getScopeCompletions(prefix: string): Array<{ value: string; label: string; description: string }> | null {
+function getScopeCompletions(
+  prefix: string,
+): Array<{ value: string; label: string; description: string }> | null {
   const trimmed = prefix.trimStart();
   const options: InsightScope[] = ["current", "project", "all"];
 
@@ -764,7 +789,9 @@ async function listProjectSessionFiles(
     .map((session) => session.path);
 }
 
-async function listAllSessionFiles(onProgress: (current: number, total: number) => void): Promise<string[]> {
+async function listAllSessionFiles(
+  onProgress: (current: number, total: number) => void,
+): Promise<string[]> {
   const sessions = await SessionManager.listAll(onProgress);
   return sessions.map((session) => session.path);
 }
@@ -772,7 +799,12 @@ async function listAllSessionFiles(onProgress: (current: number, total: number) 
 async function loadOrExtractMeta(
   target: SessionTarget,
   signal: AbortSignal,
-): Promise<{ meta: SessionMeta | null; cacheInfo: SessionCacheInfo; cacheHit: boolean; runtime?: SessionRuntime }> {
+): Promise<{
+  meta: SessionMeta | null;
+  cacheInfo: SessionCacheInfo;
+  cacheHit: boolean;
+  runtime?: SessionRuntime;
+}> {
   const cacheInfo = await getCacheInfo(target.path);
 
   if (cacheInfo.cacheKey && cacheInfo.fingerprint) {
@@ -819,7 +851,9 @@ async function loadOrExtractFacet(
 
   throwIfAborted(signal);
   const manager = runtime?.manager ?? (await openTargetSession(target));
-  const transcript = runtime?.transcript ?? buildNormalizedTranscript(manager.getEntries(), manager.getLeafId(), meta);
+  const transcript =
+    runtime?.transcript ??
+    buildNormalizedTranscript(manager.getEntries(), manager.getLeafId(), meta);
   const preparedTranscript = prepareTranscriptForFacet(transcript);
   const facet = await extractFacet(meta, preparedTranscript, selection, signal);
 
@@ -940,7 +974,8 @@ function extractSessionArtifacts(
     if (role === "assistant") {
       assistantMessages++;
       const usage = isRecord(message.usage) ? message.usage : undefined;
-      totalInputTokens += numberValue(usage?.input) + numberValue(usage?.cacheRead) + numberValue(usage?.cacheWrite);
+      totalInputTokens +=
+        numberValue(usage?.input) + numberValue(usage?.cacheRead) + numberValue(usage?.cacheWrite);
       totalOutputTokens += numberValue(usage?.output);
       totalCost += numberValue(isRecord(usage?.cost) ? usage?.cost.total : undefined);
 
@@ -961,7 +996,14 @@ function extractSessionArtifacts(
   }
 
   const resolvedFingerprint =
-    fingerprint ?? fallbackFingerprint(entries.length, manager.getSessionId(), leafId, lastTimestamp(branchEntries), target.path);
+    fingerprint ??
+    fallbackFingerprint(
+      entries.length,
+      manager.getSessionId(),
+      leafId,
+      lastTimestamp(branchEntries),
+      target.path,
+    );
 
   const baseMeta: Omit<SessionMeta, "transcriptCharLength" | "isTrivial"> = {
     schemaVersion: INSIGHTS_META_SCHEMA_VERSION,
@@ -976,7 +1018,8 @@ function extractSessionArtifacts(
     pathEntries: branchEntries.length,
     branchCount: countBranchPoints(entries),
     compactionCount: entries.filter((entry: SessionEntry) => entry.type === "compaction").length,
-    branchSummaryCount: entries.filter((entry: SessionEntry) => entry.type === "branch_summary").length,
+    branchSummaryCount: entries.filter((entry: SessionEntry) => entry.type === "branch_summary")
+      .length,
     meaningfulUserMessages,
     assistantMessages,
     toolResultMessages,
@@ -990,7 +1033,10 @@ function extractSessionArtifacts(
     firstUserPrompt,
   };
 
-  if (meaningfulUserMessages < MIN_MEANINGFUL_USER_MESSAGES || durationMinutes < MIN_DURATION_MINUTES) {
+  if (
+    meaningfulUserMessages < MIN_MEANINGFUL_USER_MESSAGES ||
+    durationMinutes < MIN_DURATION_MINUTES
+  ) {
     return {
       meta: {
         ...baseMeta,
@@ -1022,7 +1068,10 @@ function extractSessionArtifacts(
 function buildNormalizedTranscript(
   entries: SessionEntry[],
   leafId: string | null,
-  meta: Pick<SessionMeta, "sessionFile" | "sessionId" | "cwd" | "startedAt" | "durationMinutes" | "fingerprint">,
+  meta: Pick<
+    SessionMeta,
+    "sessionFile" | "sessionId" | "cwd" | "startedAt" | "durationMinutes" | "fingerprint"
+  >,
 ): NormalizedTranscript {
   const context = buildSessionContext(entries, leafId);
   const headerLines = [
@@ -1076,7 +1125,8 @@ function buildNormalizedTranscript(
     }
 
     if (role === "custom") {
-      const customType = typeof message.customType === "string" ? message.customType.trim() : "custom";
+      const customType =
+        typeof message.customType === "string" ? message.customType.trim() : "custom";
       const customText = extractMessageTextPreview(message.content, true, 4_000).trim();
       if (!customText) continue;
       pushBlock({ kind: "assistant", text: `[Custom ${customType}]\n${customText}` });
@@ -1087,7 +1137,8 @@ function buildNormalizedTranscript(
       if (message.excludeFromContext === true) continue;
       const command = typeof message.command === "string" ? message.command.trim() : "";
       if (!command) continue;
-      const output = typeof message.output === "string" ? summarizeBoundedFreeText(message.output, 220) : "";
+      const output =
+        typeof message.output === "string" ? summarizeBoundedFreeText(message.output, 220) : "";
       const exitCode = typeof message.exitCode === "number" ? message.exitCode : undefined;
       const parts = [`command: ${command}`];
       if (typeof exitCode === "number") parts.push(`exit: ${exitCode}`);
@@ -1099,7 +1150,11 @@ function buildNormalizedTranscript(
     if (role === "compactionSummary") {
       const summary = typeof message.summary === "string" ? message.summary.trim() : "";
       if (!summary) continue;
-      pushBlock({ kind: "compactionSummary", isSummary: true, text: `[CompactionSummary]\n${summary}` });
+      pushBlock({
+        kind: "compactionSummary",
+        isSummary: true,
+        text: `[CompactionSummary]\n${summary}`,
+      });
       continue;
     }
 
@@ -1113,7 +1168,10 @@ function buildNormalizedTranscript(
   const charLength = headerText.length + (blocks.length > 0 ? bodyCharLength + 2 : 0);
   const text =
     charLength <= FULL_TRANSCRIPT_MAX_CHARS
-      ? [headerText, blocks.map((block) => block.text).join("\n\n")].filter(Boolean).join("\n\n").trim()
+      ? [headerText, blocks.map((block) => block.text).join("\n\n")]
+          .filter(Boolean)
+          .join("\n\n")
+          .trim()
       : undefined;
 
   return {
@@ -1130,7 +1188,12 @@ function buildNormalizedTranscript(
 function prepareTranscriptForFacet(transcript: NormalizedTranscript): PreparedTranscript {
   if (transcript.charLength <= FULL_TRANSCRIPT_MAX_CHARS) {
     return {
-      text: transcript.text ?? [transcript.headerText, transcript.blocks.map((block) => block.text).join("\n\n")].filter(Boolean).join("\n\n").trim(),
+      text:
+        transcript.text ??
+        [transcript.headerText, transcript.blocks.map((block) => block.text).join("\n\n")]
+          .filter(Boolean)
+          .join("\n\n")
+          .trim(),
       fullCharLength: transcript.charLength,
       usedReducedTranscript: false,
     };
@@ -1180,7 +1243,12 @@ function prepareTranscriptForFacet(transcript: NormalizedTranscript): PreparedTr
       if (!appendedGap.didAppend) break;
     }
 
-    const appendedBlock = appendReducedBlock(reducedBlocks, transcript.blocks[index]!.text, maxBodyLength, bodyLength);
+    const appendedBlock = appendReducedBlock(
+      reducedBlocks,
+      transcript.blocks[index]!.text,
+      maxBodyLength,
+      bodyLength,
+    );
     bodyLength = appendedBlock.bodyLength;
     if (!appendedBlock.didAppend) break;
     previous = index;
@@ -1298,7 +1366,11 @@ async function extractFacet(
   return validateFacet(parsePossiblyWrappedJson(rawText), meta.fingerprint);
 }
 
-function buildAggregate(scope: InsightScope, sessionsConsidered: number, analyses: SessionAnalysis[]): InsightsAggregate {
+function buildAggregate(
+  scope: InsightScope,
+  sessionsConsidered: number,
+  analyses: SessionAnalysis[],
+): InsightsAggregate {
   const projects: Record<string, number> = {};
   const goalCategories: Record<string, number> = {};
   const frictionCategories: Record<string, number> = {};
@@ -1342,7 +1414,11 @@ function buildAggregate(scope: InsightScope, sessionsConsidered: number, analyse
     }
 
     const sessionRef = sessionRefForMeta(meta);
-    addRepeatedEvidence(repeatedInstructions, analysis.facet.explicitInstructionsToRemember, sessionRef);
+    addRepeatedEvidence(
+      repeatedInstructions,
+      analysis.facet.explicitInstructionsToRemember,
+      sessionRef,
+    );
     addRepeatedEvidence(repeatedWorkflows, analysis.facet.repeatedWorkflowHints, sessionRef);
 
     representativeSessions.push({
@@ -1476,11 +1552,17 @@ function buildDeterministicReport(aggregate: InsightsAggregate): string {
     lines.push("## Quick wins");
     if (aggregate.scope === "current") {
       lines.push("- `scope=current` only analyzes the active session.");
-      lines.push("- If you started a fresh Pi session just to test `/insights`, this result is expected.");
-      lines.push("- To test `current`, first `/resume` a substantial session or exchange a few real prompts, then run `/insights scope=current`.");
+      lines.push(
+        "- If you started a fresh Pi session just to test `/insights`, this result is expected.",
+      );
+      lines.push(
+        "- To test `current`, first `/resume` a substantial session or exchange a few real prompts, then run `/insights scope=current`.",
+      );
     } else {
       lines.push("- Try /insights again after a few longer sessions in this scope.");
-      lines.push("- The current filter skips sessions with fewer than 2 meaningful user messages or under 1 minute of activity.");
+      lines.push(
+        "- The current filter skips sessions with fewer than 2 meaningful user messages or under 1 minute of activity.",
+      );
     }
     return lines.join("\n");
   }
@@ -1488,7 +1570,9 @@ function buildDeterministicReport(aggregate: InsightsAggregate): string {
   lines.push(`- Sessions analyzed: ${formatCount(aggregate.sessionsAnalyzed)}`);
   lines.push(`- Sessions classified: ${formatCount(aggregate.sessionsWithFacets)}`);
   if (aggregate.dateRange.start || aggregate.dateRange.end) {
-    lines.push(`- Date range: ${formatDateRange(aggregate.dateRange.start, aggregate.dateRange.end)}`);
+    lines.push(
+      `- Date range: ${formatDateRange(aggregate.dateRange.start, aggregate.dateRange.end)}`,
+    );
   }
   lines.push(`- Input tokens: ${formatCount(aggregate.totalInputTokens)}`);
   lines.push(`- Output tokens: ${formatCount(aggregate.totalOutputTokens)}`);
@@ -1498,26 +1582,46 @@ function buildDeterministicReport(aggregate: InsightsAggregate): string {
   lines.push("");
 
   lines.push("## What you use Pi for");
-  lines.push(...formatTopRecordAsBullets(aggregate.goalCategories, 5, "No strong recurring goal categories yet."));
+  lines.push(
+    ...formatTopRecordAsBullets(
+      aggregate.goalCategories,
+      5,
+      "No strong recurring goal categories yet.",
+    ),
+  );
   lines.push("");
 
   lines.push("## How you tend to work with Pi");
   lines.push(...formatTopRecordAsBullets(aggregate.toolCounts, 6, "No strong tool pattern yet."));
-  lines.push(...formatTopRecordAsBullets(aggregate.languages, 6, "No strong language pattern yet."));
+  lines.push(
+    ...formatTopRecordAsBullets(aggregate.languages, 6, "No strong language pattern yet."),
+  );
   lines.push("");
 
   lines.push("## Repeated instructions worth moving into AGENTS.md");
-  lines.push(...formatRepeatedEvidence(aggregate.repeatedInstructions, "No repeated instruction-style guidance stood out yet."));
+  lines.push(
+    ...formatRepeatedEvidence(
+      aggregate.repeatedInstructions,
+      "No repeated instruction-style guidance stood out yet.",
+    ),
+  );
   lines.push("");
 
   lines.push("## Good prompt template candidates");
-  lines.push(...formatRepeatedEvidence(aggregate.repeatedWorkflows, "No repeated prompt-shaped workflow stood out yet."));
+  lines.push(
+    ...formatRepeatedEvidence(
+      aggregate.repeatedWorkflows,
+      "No repeated prompt-shaped workflow stood out yet.",
+    ),
+  );
   lines.push("");
 
   lines.push("## Good skill candidates");
   if (aggregate.repeatedWorkflows.length > 0) {
     for (const workflow of aggregate.repeatedWorkflows.slice(0, 5)) {
-      lines.push(`- ${workflow.text} — repeated in ${workflow.count} sessions. This looks procedural enough for a reusable skill.`);
+      lines.push(
+        `- ${workflow.text} — repeated in ${workflow.count} sessions. This looks procedural enough for a reusable skill.`,
+      );
     }
   } else {
     lines.push("- No strong multi-step workflow pattern yet.");
@@ -1535,7 +1639,13 @@ function buildDeterministicReport(aggregate: InsightsAggregate): string {
   lines.push("");
 
   lines.push("## Where things go wrong");
-  lines.push(...formatTopRecordAsBullets(aggregate.frictionCategories, 5, "No strong recurring friction category yet."));
+  lines.push(
+    ...formatTopRecordAsBullets(
+      aggregate.frictionCategories,
+      5,
+      "No strong recurring friction category yet.",
+    ),
+  );
   lines.push("");
 
   lines.push("## Quick wins");
@@ -1573,7 +1683,8 @@ function renderProgressMessage(progress: ProgressState, elapsedSeconds: string):
 }
 
 function setBorderedLoaderMessage(loader: BorderedLoader, message: string): void {
-  const inner = (loader as unknown as { loader?: { setMessage?: (message: string) => void } }).loader;
+  const inner = (loader as unknown as { loader?: { setMessage?: (message: string) => void } })
+    .loader;
   if (inner?.setMessage) {
     inner.setMessage(message);
   }
@@ -1608,11 +1719,18 @@ async function readMetaCache(cacheKey: string, fingerprint: string): Promise<Ses
   return raw as unknown as SessionMeta;
 }
 
-async function writeMetaCache(cacheKey: string, meta: SessionMeta, signal: AbortSignal): Promise<void> {
+async function writeMetaCache(
+  cacheKey: string,
+  meta: SessionMeta,
+  signal: AbortSignal,
+): Promise<void> {
   await writeJsonAtomic(path.join(META_CACHE_DIR, `${cacheKey}.json`), meta, signal);
 }
 
-async function readFacetCache(cacheKey: string | undefined, fingerprint: string): Promise<SessionFacet | null> {
+async function readFacetCache(
+  cacheKey: string | undefined,
+  fingerprint: string,
+): Promise<SessionFacet | null> {
   if (!cacheKey) return null;
   const raw = await readJsonFile(path.join(FACET_CACHE_DIR, `${cacheKey}.json`));
   if (!raw || !isRecord(raw)) return null;
@@ -1622,7 +1740,11 @@ async function readFacetCache(cacheKey: string | undefined, fingerprint: string)
   return raw as unknown as SessionFacet;
 }
 
-async function writeFacetCache(cacheKey: string, facet: SessionFacet, signal: AbortSignal): Promise<void> {
+async function writeFacetCache(
+  cacheKey: string,
+  facet: SessionFacet,
+  signal: AbortSignal,
+): Promise<void> {
   await writeJsonAtomic(path.join(FACET_CACHE_DIR, `${cacheKey}.json`), facet, signal);
 }
 
@@ -1635,7 +1757,11 @@ async function readJsonFile(filePath: string): Promise<unknown | null> {
   }
 }
 
-async function writeJsonAtomic(filePath: string, value: unknown, signal: AbortSignal): Promise<void> {
+async function writeJsonAtomic(
+  filePath: string,
+  value: unknown,
+  signal: AbortSignal,
+): Promise<void> {
   throwIfAborted(signal);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
@@ -1661,7 +1787,11 @@ function validateFacet(parsed: unknown, fingerprint: string): SessionFacet {
   const outcome = sanitizeOutcome(parsed.outcome);
   const frictionDetail = optionalCleanSentence(parsed.frictionDetail);
   const briefSummary = cleanSentence(parsed.briefSummary, underlyingGoal);
-  const explicitInstructionsToRemember = sanitizeStringArray(parsed.explicitInstructionsToRemember, 8, 220);
+  const explicitInstructionsToRemember = sanitizeStringArray(
+    parsed.explicitInstructionsToRemember,
+    8,
+    220,
+  );
   const repeatedWorkflowHints = sanitizeStringArray(parsed.repeatedWorkflowHints, 8, 220);
 
   return {
@@ -1752,7 +1882,9 @@ function extractAssistantText(content: unknown): string {
     .trim();
 }
 
-function extractToolCalls(content: unknown): Array<{ name: string; arguments: Record<string, unknown> }> {
+function extractToolCalls(
+  content: unknown,
+): Array<{ name: string; arguments: Record<string, unknown> }> {
   if (!Array.isArray(content)) return [];
 
   const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
@@ -1799,7 +1931,10 @@ function summarizeToolCall(name: string, args: Record<string, unknown>): string 
 
   if (!command && !targetPath) {
     const previewEntries = Object.entries(args)
-      .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+      .filter(
+        ([, value]) =>
+          typeof value === "string" || typeof value === "number" || typeof value === "boolean",
+      )
       .slice(0, 4)
       .map(([key, value]) => `${key}: ${String(value)}`);
     lines.push(...previewEntries);
@@ -1822,7 +1957,11 @@ function summarizeToolResult(message: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-function extractMessageTextPreview(content: unknown, includeImagePlaceholders: boolean, maxChars: number): string {
+function extractMessageTextPreview(
+  content: unknown,
+  includeImagePlaceholders: boolean,
+  maxChars: number,
+): string {
   if (typeof content === "string") {
     return summarizeBoundedFreeText(content, maxChars);
   }
@@ -1875,7 +2014,11 @@ function collectModifiedFilesFromEntry(entry: SessionEntry, modifiedFiles: Set<s
   }
 }
 
-function collectModifiedFilesFromToolCall(name: string, args: Record<string, unknown>, modifiedFiles: Set<string>): void {
+function collectModifiedFilesFromToolCall(
+  name: string,
+  args: Record<string, unknown>,
+  modifiedFiles: Set<string>,
+): void {
   if ((name === "write" || name === "edit") && typeof args.path === "string" && args.path.trim()) {
     modifiedFiles.add(args.path.trim());
   }
@@ -2064,14 +2207,21 @@ function normalizeEvidenceKey(text: string): string {
     .trim();
 }
 
-function topEntries(record: Record<string, number>, limit: number): Array<{ key: string; value: number }> {
+function topEntries(
+  record: Record<string, number>,
+  limit: number,
+): Array<{ key: string; value: number }> {
   return Object.entries(record)
     .map(([key, value]) => ({ key, value }))
     .sort((a, b) => b.value - a.value || a.key.localeCompare(b.key))
     .slice(0, limit);
 }
 
-function formatTopRecordAsBullets(record: Record<string, number>, limit: number, emptyMessage: string): string[] {
+function formatTopRecordAsBullets(
+  record: Record<string, number>,
+  limit: number,
+  emptyMessage: string,
+): string[] {
   const entries = topEntries(record, limit);
   if (entries.length === 0) return [`- ${emptyMessage}`];
   return entries.map((entry) => `- ${entry.key}: ${formatCount(entry.value)}`);

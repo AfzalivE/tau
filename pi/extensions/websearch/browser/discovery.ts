@@ -1,6 +1,12 @@
 import { discoverChromiumProfiles, loadChromiumCookies } from "./chromium.js";
 import { discoverFirefoxProfiles, loadFirefoxCookies } from "./firefox.js";
-import type { BrowserCookie, BrowserProfile, BrowserSession, WebsearchBrowserFamily, WebsearchConfig } from "../types.js";
+import type {
+  BrowserCookie,
+  BrowserProfile,
+  BrowserSession,
+  WebsearchBrowserFamily,
+  WebsearchConfig,
+} from "../types.js";
 
 const COOKIE_CACHE_TTL_MS = 30_000;
 const cookieCache = new Map<string, { cookies: BrowserCookie[]; expiresAt: number }>();
@@ -29,9 +35,8 @@ export function loadCookies(profile: BrowserProfile): BrowserCookie[] {
   if (cached && cached.expiresAt > Date.now()) return cached.cookies;
   if (cached) cookieCache.delete(cacheKey);
 
-  const cookies = profile.family === "firefox"
-    ? loadFirefoxCookies(profile)
-    : loadChromiumCookies(profile);
+  const cookies =
+    profile.family === "firefox" ? loadFirefoxCookies(profile) : loadChromiumCookies(profile);
 
   if (cookies.length > 0) {
     cookieCache.set(cacheKey, {
@@ -43,7 +48,10 @@ export function loadCookies(profile: BrowserProfile): BrowserCookie[] {
   return cookies;
 }
 
-export function createBrowserSession(profile: BrowserProfile, domains: string[]): BrowserSession | null {
+export function createBrowserSession(
+  profile: BrowserProfile,
+  domains: string[],
+): BrowserSession | null {
   const cookies = loadCookies(profile).filter((cookie) => {
     return domains.some((domain) => matchesBrowserDomain(domain, cookie.domain));
   });
@@ -59,7 +67,9 @@ function matchesBrowserDomain(requestedDomain: string, cookieDomain: string): bo
   const normalizedRequested = requestedDomain.toLowerCase().replace(/^\./, "");
   const normalizedCookie = cookieDomain.toLowerCase().replace(/^\./, "");
 
-  return normalizedCookie === normalizedRequested
-    || normalizedCookie.endsWith(`.${normalizedRequested}`)
-    || normalizedRequested.endsWith(`.${normalizedCookie}`);
+  return (
+    normalizedCookie === normalizedRequested ||
+    normalizedCookie.endsWith(`.${normalizedRequested}`) ||
+    normalizedRequested.endsWith(`.${normalizedCookie}`)
+  );
 }

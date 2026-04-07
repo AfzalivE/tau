@@ -18,7 +18,11 @@ interface ChatGptSessionPayload {
 export const browserOpenAICodex = {
   backend: "openai-codex" as const,
   domains: ["chatgpt.com"],
-  async search(session: BrowserSession, query: string, signal?: AbortSignal): Promise<WebsearchResult> {
+  async search(
+    session: BrowserSession,
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<WebsearchResult> {
     const cookieHeader = buildCookieHeader(SESSION_URL, session.cookies);
     if (!cookieHeader) {
       throw new Error("No ChatGPT session cookies found in browser profile.");

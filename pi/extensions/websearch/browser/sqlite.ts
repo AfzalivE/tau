@@ -2,7 +2,11 @@ import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export function withSqliteSnapshot<T>(sourceDbPath: string, tempPrefix: string, operation: (snapshotPath: string) => T): T {
+export function withSqliteSnapshot<T>(
+  sourceDbPath: string,
+  tempPrefix: string,
+  operation: (snapshotPath: string) => T,
+): T {
   const tempDir = path.join(os.tmpdir(), `${tempPrefix}-${process.pid}-${Date.now()}`);
   const snapshotPath = path.join(tempDir, path.basename(sourceDbPath));
 
@@ -25,9 +29,10 @@ export function copySidecar(sourceDbPath: string, targetDbPath: string, suffix: 
   try {
     copyFileSync(source, `${targetDbPath}${suffix}`);
   } catch (error) {
-    const code = error && typeof error === "object" && "code" in error
-      ? (error as { code?: string }).code
-      : undefined;
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
     if (code !== "ENOENT") throw error;
   }
 }

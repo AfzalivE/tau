@@ -1,4 +1,9 @@
-import { BorderedLoader, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import {
+  BorderedLoader,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type ExtensionCommandContext,
+} from "@mariozechner/pi-coding-agent";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -25,7 +30,14 @@ type DaemonToClientMessage =
   | { type: "abort" };
 
 type ClientToDaemonMessage =
-  | { type: "register"; windowId: string; cwd: string; sessionName?: string; busy: boolean; compacting: boolean }
+  | {
+      type: "register";
+      windowId: string;
+      cwd: string;
+      sessionName?: string;
+      busy: boolean;
+      compacting: boolean;
+    }
   | { type: "meta"; cwd: string; sessionName?: string; busy: boolean; compacting: boolean }
   | { type: "request_pin" }
   | { type: "shutdown" }
@@ -102,26 +114,28 @@ async function runWithLoader<T>(
     }
   }
 
-  const result = await ctx.ui.custom<{ cancelled: boolean; value?: T; error?: string }>((tui, theme, _kb, done) => {
-    const loader = new BorderedLoader(tui, theme, message);
-    let settled = false;
-    const finish = (value: { cancelled: boolean; value?: T; error?: string }) => {
-      if (settled) return;
-      settled = true;
-      done(value);
-    };
+  const result = await ctx.ui.custom<{ cancelled: boolean; value?: T; error?: string }>(
+    (tui, theme, _kb, done) => {
+      const loader = new BorderedLoader(tui, theme, message);
+      let settled = false;
+      const finish = (value: { cancelled: boolean; value?: T; error?: string }) => {
+        if (settled) return;
+        settled = true;
+        done(value);
+      };
 
-    loader.onAbort = () => finish({ cancelled: true });
+      loader.onAbort = () => finish({ cancelled: true });
 
-    task(loader.signal)
-      .then((value) => finish({ cancelled: false, value }))
-      .catch((error) => {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        finish({ cancelled: false, error: errorMessage });
-      });
+      task(loader.signal)
+        .then((value) => finish({ cancelled: false, value }))
+        .catch((error) => {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          finish({ cancelled: false, error: errorMessage });
+        });
 
-    return loader;
-  });
+      return loader;
+    },
+  );
 
   return result;
 }
@@ -547,7 +561,9 @@ export default function (pi: ExtensionAPI) {
     state.autoConnectTimer = null;
   }
 
-  async function requestPin(signal?: AbortSignal): Promise<{ code: string; expiresAt: number } | null> {
+  async function requestPin(
+    signal?: AbortSignal,
+  ): Promise<{ code: string; expiresAt: number } | null> {
     if (!state.socket || state.socket.destroyed) return null;
 
     return await new Promise((resolve) => {
@@ -679,7 +695,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_before_compact", async (event, ctx) => {
     applyCompactingState(true, ctx);
-    event.signal.addEventListener("abort", () => applyCompactingState(false, state.lastCtx ?? ctx), { once: true });
+    event.signal.addEventListener(
+      "abort",
+      () => applyCompactingState(false, state.lastCtx ?? ctx),
+      { once: true },
+    );
   });
 
   pi.on("session_compact", async (_event, ctx) => {
@@ -755,7 +775,10 @@ export default function (pi: ExtensionAPI) {
 
         disconnect();
 
-        notify("Unpaired Telegram and disconnected all sessions. Run /telegram pair to pair again.", "info");
+        notify(
+          "Unpaired Telegram and disconnected all sessions. Run /telegram pair to pair again.",
+          "info",
+        );
         return;
       }
 
@@ -766,7 +789,10 @@ export default function (pi: ExtensionAPI) {
             throw new Error(`Missing botToken. Create ${CONFIG_PATH} with {"botToken": "..."}.`);
           }
           const token = await withPromptSignal(pi, () =>
-            ctx.ui.input("Telegram bot token", "Paste the bot token (saved to ~/.pi/agent/telegram/config.json)"),
+            ctx.ui.input(
+              "Telegram bot token",
+              "Paste the bot token (saved to ~/.pi/agent/telegram/config.json)",
+            ),
           );
           if (!token) {
             notify("Cancelled.", "info");
@@ -775,8 +801,10 @@ export default function (pi: ExtensionAPI) {
           await saveConfig({ ...cfg, botToken: token.trim() });
         }
 
-        const connectResult = await runWithLoader(ctx, "Connecting to Telegram daemon...", (signal) =>
-          connectPersistent(ctx, { signal, ensureDaemon: true }),
+        const connectResult = await runWithLoader(
+          ctx,
+          "Connecting to Telegram daemon...",
+          (signal) => connectPersistent(ctx, { signal, ensureDaemon: true }),
         );
         if (connectResult.cancelled) {
           notify("Cancelled.", "info");
@@ -794,8 +822,10 @@ export default function (pi: ExtensionAPI) {
 
         const freshCfg = await loadConfig();
         if (!freshCfg.pairedChatId) {
-          const pinResult = await runWithLoader(ctx, "Requesting Telegram pairing PIN...", (signal) =>
-            requestPin(signal),
+          const pinResult = await runWithLoader(
+            ctx,
+            "Requesting Telegram pairing PIN...",
+            (signal) => requestPin(signal),
           );
           if (pinResult.cancelled) {
             notify("Cancelled.", "info");

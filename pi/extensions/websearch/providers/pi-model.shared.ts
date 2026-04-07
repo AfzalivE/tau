@@ -20,13 +20,14 @@ export async function selectFallbackPiModel(
   ctx: ExtensionContext,
   predicate: (model: Model<Api>) => boolean,
 ): Promise<PiModelSelection | null> {
-  const currentKey = ctx.model && predicate(ctx.model)
-    ? `${ctx.model.provider}:${ctx.model.id}`
-    : null;
-  const candidates = rankPiModels(ctx.modelRegistry.getAvailable().filter((model) => {
-    if (!predicate(model)) return false;
-    return `${model.provider}:${model.id}` !== currentKey;
-  }));
+  const currentKey =
+    ctx.model && predicate(ctx.model) ? `${ctx.model.provider}:${ctx.model.id}` : null;
+  const candidates = rankPiModels(
+    ctx.modelRegistry.getAvailable().filter((model) => {
+      if (!predicate(model)) return false;
+      return `${model.provider}:${model.id}` !== currentKey;
+    }),
+  );
 
   for (const model of candidates) {
     const selection = await resolvePiModelSelection(model, ctx);
@@ -58,18 +59,22 @@ function rankPiModels(models: Model<Api>[]): Model<Api>[] {
 }
 
 function comparePiModels(left: Model<Api>, right: Model<Api>): number {
-  return compareBoolean(Boolean(right.reasoning), Boolean(left.reasoning))
-    || compareNumber(right.contextWindow, left.contextWindow)
-    || compareNumber(right.maxTokens, left.maxTokens)
-    || compareNumber(modelCostScore(right), modelCostScore(left))
-    || right.id.localeCompare(left.id);
+  return (
+    compareBoolean(Boolean(right.reasoning), Boolean(left.reasoning)) ||
+    compareNumber(right.contextWindow, left.contextWindow) ||
+    compareNumber(right.maxTokens, left.maxTokens) ||
+    compareNumber(modelCostScore(right), modelCostScore(left)) ||
+    right.id.localeCompare(left.id)
+  );
 }
 
 function modelCostScore(model: Model<Api>): number {
-  return (model.cost?.input ?? 0)
-    + (model.cost?.output ?? 0)
-    + (model.cost?.cacheRead ?? 0)
-    + (model.cost?.cacheWrite ?? 0);
+  return (
+    (model.cost?.input ?? 0) +
+    (model.cost?.output ?? 0) +
+    (model.cost?.cacheRead ?? 0) +
+    (model.cost?.cacheWrite ?? 0)
+  );
 }
 
 function compareBoolean(left: boolean, right: boolean): number {

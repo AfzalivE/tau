@@ -32,7 +32,10 @@ export async function searchWithPiAnthropic(
   }
 
   const answer = (Array.isArray(parsed.content) ? parsed.content : [])
-    .filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "text")
+    .filter(
+      (item) =>
+        item && typeof item === "object" && (item as Record<string, unknown>).type === "text",
+    )
     .map((item) => (item as Record<string, unknown>).text)
     .filter((text): text is string => typeof text === "string")
     .join("\n\n")
@@ -57,9 +60,12 @@ function buildAnthropicHeaders(selection: PiModelSelection): Record<string, stri
   if (isAnthropicOAuthToken(credential)) {
     return {
       ...headers,
-      ...(hasHeader(headers, "authorization") || !credential ? {} : { authorization: `Bearer ${credential}` }),
+      ...(hasHeader(headers, "authorization") || !credential
+        ? {}
+        : { authorization: `Bearer ${credential}` }),
       "anthropic-version": "2023-06-01",
-      "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,web-search-2025-03-05",
+      "anthropic-beta":
+        "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,web-search-2025-03-05",
       "anthropic-dangerous-direct-browser-access": "true",
       "content-type": "application/json",
       accept: "application/json",
@@ -95,9 +101,11 @@ function buildAnthropicSystem(apiKey?: string): string | Array<{ type: "text"; t
 }
 
 function getAnthropicCredential(selection: PiModelSelection): string | undefined {
-  return selection.apiKey
-    ?? getBearerToken(selection.headers)
-    ?? getHeaderValue(selection.headers, "x-api-key");
+  return (
+    selection.apiKey ??
+    getBearerToken(selection.headers) ??
+    getHeaderValue(selection.headers, "x-api-key")
+  );
 }
 
 function getBearerToken(headers?: Record<string, string>): string | undefined {
@@ -111,9 +119,14 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
 }
 
-function getHeaderValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+function getHeaderValue(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string | undefined {
   if (!headers) return undefined;
-  const key = Object.keys(headers).find((headerName) => headerName.toLowerCase() === name.toLowerCase());
+  const key = Object.keys(headers).find(
+    (headerName) => headerName.toLowerCase() === name.toLowerCase(),
+  );
   return key ? headers[key] : undefined;
 }
 

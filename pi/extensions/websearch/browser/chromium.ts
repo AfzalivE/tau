@@ -23,7 +23,13 @@ const MACOS_BROWSER_CONFIGS: ChromiumBrowserConfig[] = [
   },
   {
     name: "Brave",
-    baseDir: path.join(os.homedir(), "Library", "Application Support", "BraveSoftware", "Brave-Browser"),
+    baseDir: path.join(
+      os.homedir(),
+      "Library",
+      "Application Support",
+      "BraveSoftware",
+      "Brave-Browser",
+    ),
     keychainService: "Brave Safe Storage",
     keychainAccount: "Brave",
   },
@@ -122,7 +128,10 @@ function browserPriority(browserName: string): number {
   return index === -1 ? order.length : index;
 }
 
-function isPreferredChromiumProfile(profile: BrowserProfile, preferredProfileName?: string): boolean {
+function isPreferredChromiumProfile(
+  profile: BrowserProfile,
+  preferredProfileName?: string,
+): boolean {
   if (!preferredProfileName) return false;
   return profile.profileName === preferredProfileName;
 }
@@ -139,13 +148,21 @@ function discoverProfileDirectories(baseDir: string): string[] {
 }
 
 export function loadChromiumCookies(profile: BrowserProfile): BrowserCookie[] {
-  const browserConfig = browserConfigs().find((config) => profile.profilePath.startsWith(config.baseDir));
+  const browserConfig = browserConfigs().find((config) =>
+    profile.profilePath.startsWith(config.baseDir),
+  );
   if (!browserConfig) return [];
 
   const password = readBrowserPassword(browserConfig);
   if (!password) return [];
 
-  const keyMaterial = pbkdf2Sync(password, "saltysalt", process.platform === "darwin" ? 1003 : 1, 16, "sha1");
+  const keyMaterial = pbkdf2Sync(
+    password,
+    "saltysalt",
+    process.platform === "darwin" ? 1003 : 1,
+    16,
+    "sha1",
+  );
   const cookiesPath = path.join(profile.profilePath, "Cookies");
   if (!existsSync(cookiesPath)) return [];
 
@@ -153,9 +170,11 @@ export function loadChromiumCookies(profile: BrowserProfile): BrowserCookie[] {
     return withSqliteSnapshot(cookiesPath, "websearch-chromium", (tempDbPath) => {
       const db = new DatabaseSync(tempDbPath, { readOnly: true });
       try {
-        const rows = db.prepare(
-          "SELECT host_key, name, value, encrypted_value, path, is_secure FROM cookies ORDER BY host_key ASC, path DESC, expires_utc DESC",
-        ).all() as Array<Record<string, unknown>>;
+        const rows = db
+          .prepare(
+            "SELECT host_key, name, value, encrypted_value, path, is_secure FROM cookies ORDER BY host_key ASC, path DESC, expires_utc DESC",
+          )
+          .all() as Array<Record<string, unknown>>;
 
         const cookies: BrowserCookie[] = [];
         const seen = new Set<string>();
@@ -170,7 +189,8 @@ export function loadChromiumCookies(profile: BrowserProfile): BrowserCookie[] {
           const key = `${name}\u0000${domain}\u0000${cookiePath}`;
           if (seen.has(key)) continue;
 
-          const plainValue = typeof row.value === "string" && row.value.length > 0 ? row.value : null;
+          const plainValue =
+            typeof row.value === "string" && row.value.length > 0 ? row.value : null;
           if (plainValue !== null) {
             seen.add(key);
             cookies.push({
@@ -215,7 +235,11 @@ export function loadChromiumCookies(profile: BrowserProfile): BrowserCookie[] {
   }
 }
 
-function decryptCookieValue(encrypted: Uint8Array, key: Buffer, hostKey: string | null): string | null {
+function decryptCookieValue(
+  encrypted: Uint8Array,
+  key: Buffer,
+  hostKey: string | null,
+): string | null {
   const buffer = Buffer.from(encrypted);
   if (buffer.length < 3) return null;
 
@@ -226,7 +250,9 @@ function decryptCookieValue(encrypted: Uint8Array, key: Buffer, hostKey: string 
     const iv = Buffer.alloc(16, 0x20);
     const decipher = createDecipheriv("aes-128-cbc", key, iv);
     decipher.setAutoPadding(false);
-    const decrypted = stripPkcs7Padding(Buffer.concat([decipher.update(buffer.subarray(3)), decipher.final()]));
+    const decrypted = stripPkcs7Padding(
+      Buffer.concat([decipher.update(buffer.subarray(3)), decipher.final()]),
+    );
     const normalized = stripHostKeyDigest(decrypted, hostKey);
     return normalized.toString("utf8").replace(/^\x00+/, "");
   } catch {
@@ -268,12 +294,18 @@ function readBrowserPassword(config: ChromiumBrowserConfig): string | null {
   return password;
 }
 
-function readMacKeychainPassword(browserName: string, account: string, service: string): string | null {
+function readMacKeychainPassword(
+  browserName: string,
+  account: string,
+  service: string,
+): string | null {
   try {
-    return execFileSync("security", ["find-generic-password", "-w", "-a", account, "-s", service], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || null;
+    return (
+      execFileSync("security", ["find-generic-password", "-w", "-a", account, "-s", service], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || null
+    );
   } catch {
     throw new Error(`Could not read ${browserName} cookie decryption password from Keychain.`);
   }
@@ -283,12 +315,13 @@ function readLinuxPassword(secretToolApp?: string): string | null {
   if (!secretToolApp) return "peanuts";
 
   try {
-    return execFileSync("secret-tool", ["lookup", "application", secretToolApp], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || "peanuts";
+    return (
+      execFileSync("secret-tool", ["lookup", "application", secretToolApp], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || "peanuts"
+    );
   } catch {
     return "peanuts";
   }
 }
-

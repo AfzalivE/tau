@@ -29,7 +29,10 @@ type PullRequestLookupResult =
   | { kind: "error" };
 
 function isBranchChangeCommand(command: string): boolean {
-  return GIT_BRANCH_CHANGE_COMMAND_PATTERN.test(command) || GH_BRANCH_CHANGE_COMMAND_PATTERN.test(command);
+  return (
+    GIT_BRANCH_CHANGE_COMMAND_PATTERN.test(command) ||
+    GH_BRANCH_CHANGE_COMMAND_PATTERN.test(command)
+  );
 }
 
 function isPullRequestStateCommand(command: string): boolean {
@@ -45,14 +48,21 @@ function isNoPullRequestError(stderr: string): boolean {
 }
 
 async function loadCurrentBranch(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
-  const result = await pi.exec("git", ["branch", "--show-current"], { cwd, timeout: BRANCH_CHECK_TIMEOUT_MS });
+  const result = await pi.exec("git", ["branch", "--show-current"], {
+    cwd,
+    timeout: BRANCH_CHECK_TIMEOUT_MS,
+  });
   if (result.killed || result.code !== 0) return undefined;
 
   const branch = result.stdout.trim();
   return branch || undefined;
 }
 
-async function loadPullRequestStatus(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<PullRequestLookupResult> {
+async function loadPullRequestStatus(
+  pi: ExtensionAPI,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<PullRequestLookupResult> {
   const result = await pi.exec("gh", ["pr", "view", "--json", "number,url,state"], {
     cwd,
     signal,
@@ -74,8 +84,10 @@ async function loadPullRequestStatus(pi: ExtensionAPI, cwd: string, signal?: Abo
       url?: unknown;
     };
 
-    if (parsed.state !== "OPEN" && parsed.state !== "CLOSED" && parsed.state !== "MERGED") return { kind: "error" };
-    if (typeof parsed.number !== "number" || !Number.isInteger(parsed.number) || parsed.number <= 0) return { kind: "error" };
+    if (parsed.state !== "OPEN" && parsed.state !== "CLOSED" && parsed.state !== "MERGED")
+      return { kind: "error" };
+    if (typeof parsed.number !== "number" || !Number.isInteger(parsed.number) || parsed.number <= 0)
+      return { kind: "error" };
     if (typeof parsed.url !== "string") return { kind: "error" };
 
     const url = parsed.url.trim();

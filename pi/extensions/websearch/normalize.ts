@@ -19,10 +19,12 @@ function cookiesForUrl(url: string, cookies: BrowserCookie[]): BrowserCookie[] {
 
   return [...cookies]
     .filter((cookie) => {
-      return cookie.value.length > 0
-        && matchesCookieDomain(target.hostname, cookie.domain)
-        && matchesCookiePath(requestPath, cookie.path)
-        && (!cookie.secure || target.protocol === "https:");
+      return (
+        cookie.value.length > 0 &&
+        matchesCookieDomain(target.hostname, cookie.domain) &&
+        matchesCookiePath(requestPath, cookie.path) &&
+        (!cookie.secure || target.protocol === "https:")
+      );
     })
     .sort((left, right) => right.path.length - left.path.length);
 }
@@ -58,14 +60,14 @@ export function browserHeaders(options: {
 }): Record<string, string> {
   const headers: Record<string, string> = {
     "User-Agent": DEFAULT_BROWSER_USER_AGENT,
-    "Accept": options.accept ?? "application/json,text/plain,*/*",
+    Accept: options.accept ?? "application/json,text/plain,*/*",
     "Accept-Language": "en-US,en;q=0.5",
-    "Referer": options.referer,
-    "Origin": options.origin,
+    Referer: options.referer,
+    Origin: options.origin,
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-origin",
-    "Pragma": "no-cache",
+    Pragma: "no-cache",
     "Cache-Control": "no-cache",
   };
 
@@ -138,7 +140,9 @@ export function renderSearchResultMarkdown(answer: string, sources: WebsearchSou
   const trimmedAnswer = answer.trim();
   if (sources.length === 0) return trimmedAnswer;
 
-  const embeddedSources = new Set(extractMarkdownSources(trimmedAnswer).map((source) => source.url));
+  const embeddedSources = new Set(
+    extractMarkdownSources(trimmedAnswer).map((source) => source.url),
+  );
   const extraSources = sources.filter((source) => !embeddedSources.has(source.url));
   if (extraSources.length === 0) return trimmedAnswer;
 

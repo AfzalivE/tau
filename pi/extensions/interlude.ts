@@ -93,12 +93,16 @@ export default function interludeExtension(pi: ExtensionAPI): void {
     armed = true;
     ctx.ui.setEditorText("");
     updateStatus(ctx);
-    ctx.ui.notify("Draft stashed. Send one message and your previous draft will come back.", "info");
+    ctx.ui.notify(
+      "Draft stashed. Send one message and your previous draft will come back.",
+      "info",
+    );
   }
 
   for (const shortcut of shortcuts) {
     pi.registerShortcut(shortcut as never, {
-      description: "Stash the current message draft, send one interlude message, then restore the draft",
+      description:
+        "Stash the current message draft, send one interlude message, then restore the draft",
       handler: async (ctx) => {
         stashOrRestore(ctx);
       },

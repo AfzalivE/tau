@@ -35,8 +35,9 @@ export async function searchWithPiOpenAICodex(
 function resolveApiKey(selection: PiModelSelection): string | undefined {
   if (selection.apiKey) return selection.apiKey;
 
-  const authorization = Object.entries(selection.headers ?? {})
-    .find(([name]) => name.toLowerCase() === "authorization")?.[1];
+  const authorization = Object.entries(selection.headers ?? {}).find(
+    ([name]) => name.toLowerCase() === "authorization",
+  )?.[1];
   if (!authorization) return undefined;
 
   const match = authorization.match(/^Bearer\s+(.+)$/i);

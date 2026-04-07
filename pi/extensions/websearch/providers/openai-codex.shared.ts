@@ -9,10 +9,13 @@ export function decodeJwtAccountId(jwt: string | undefined): string | undefined 
   try {
     const parts = jwt.split(".");
     if (parts.length !== 3) return undefined;
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<
+      string,
+      unknown
+    >;
     const auth = payload["https://api.openai.com/auth"];
     return auth && typeof auth === "object"
-      ? (auth as Record<string, unknown>).chatgpt_account_id as string | undefined
+      ? ((auth as Record<string, unknown>).chatgpt_account_id as string | undefined)
       : undefined;
   } catch {
     return undefined;
@@ -75,7 +78,12 @@ export async function runOpenAICodexSearch(options: {
         const item = event.item as Record<string, unknown> | undefined;
         const content = Array.isArray(item?.content) ? item.content : [];
         const fullText = content
-          .filter((part) => part && typeof part === "object" && (part as Record<string, unknown>).type === "output_text")
+          .filter(
+            (part) =>
+              part &&
+              typeof part === "object" &&
+              (part as Record<string, unknown>).type === "output_text",
+          )
           .map((part) => (part as Record<string, unknown>).text)
           .filter((text): text is string => typeof text === "string")
           .join("\n");
@@ -87,7 +95,11 @@ export async function runOpenAICodexSearch(options: {
         const eventMessage = typeof event.message === "string" ? event.message : undefined;
         if (failedResponse && typeof failedResponse === "object") {
           const error = (failedResponse as Record<string, unknown>).error;
-          if (error && typeof error === "object" && typeof (error as Record<string, unknown>).message === "string") {
+          if (
+            error &&
+            typeof error === "object" &&
+            typeof (error as Record<string, unknown>).message === "string"
+          ) {
             throw new Error((error as Record<string, unknown>).message as string);
           }
         }
@@ -109,4 +121,3 @@ export async function runOpenAICodexSearch(options: {
     sources: dedupeSources(extractMarkdownSources(finalAnswer)),
   };
 }
-

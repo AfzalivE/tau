@@ -33,7 +33,11 @@
  * - custom "<instructions>"
  */
 
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { matchesKey } from "@mariozechner/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -50,15 +54,27 @@ const REVIEW_UNTRACKED_HASH_DISABLED = "__disabled__";
 const REVIEW_CANCELLED_ERROR = "Review aborted";
 const REVIEW_STALE_SECTION_TITLE = "Repository changed";
 const REVIEW_STALE_REVIEW_WARNING = "Repository changed while this review was running.";
-const REVIEW_STALE_REVIEW_NEXT_STEP = "Results are shown anyway. Run /review again to refresh them.";
+const REVIEW_STALE_REVIEW_NEXT_STEP =
+  "Results are shown anyway. Run /review again to refresh them.";
 const REVIEW_STALE_FIX_WARNING = "Repository changed while /fix was gathering findings.";
-const REVIEW_STALE_FIX_NEXT_STEP = "No fixes were applied. Run /fix again to continue, or /review first to refresh.";
+const REVIEW_STALE_FIX_NEXT_STEP =
+  "No fixes were applied. Run /fix again to continue, or /review first to refresh.";
 const REVIEW_STALE_PAYLOAD_WARNING = "Repository changed since this review was generated.";
 const REVIEW_STALE_PAYLOAD_NEXT_STEP = "Run /review first to refresh it.";
-const REVIEW_STALE_REUSE_WARNING = "Last review is stale. Continuing with /fix. Run /review first to refresh it.";
+const REVIEW_STALE_REUSE_WARNING =
+  "Last review is stale. Continuing with /fix. Run /review first to refresh it.";
 const REVIEW_EVENT_START = "review:start";
 const REVIEW_EVENT_END = "review:end";
-const REVIEW_MODE_HINTS = ["help", "auto", "uncommitted", "branch", "commit", "pr", "folder", "custom"] as const;
+const REVIEW_MODE_HINTS = [
+  "help",
+  "auto",
+  "uncommitted",
+  "branch",
+  "commit",
+  "pr",
+  "folder",
+  "custom",
+] as const;
 
 const STATUS_KEY = "0-review";
 const STATUS_SPINNER_INTERVAL_MS = 80;
@@ -202,7 +218,6 @@ Important:
 
 {ADDITIONAL_CONTEXT_SECTION}{PROJECT_GUIDELINES_SECTION}
 {OUTPUT_CONTRACT}`;
-
 
 const FIX_PROMPT = `You are an expert software engineer applying fixes and improvements from a completed code review.
 
@@ -496,9 +511,7 @@ type ReviewMessageDetails = {
   findings: ReviewReportFinding[];
 };
 
-type ReviewRunResult =
-  | { ok: false; error: string }
-  | { ok: true; details: ReviewMessageDetails };
+type ReviewRunResult = { ok: false; error: string } | { ok: true; details: ReviewMessageDetails };
 
 type ResolvedScope =
   | {
@@ -536,7 +549,13 @@ type ReviewExecutionControl = {
   registerProcess: (proc: ChildProcess) => () => void;
 };
 
-type PiJsonTaskStatus = "ok" | "cancelled" | "timeout" | "spawn_error" | "non_zero_exit" | "assistant_error";
+type PiJsonTaskStatus =
+  | "ok"
+  | "cancelled"
+  | "timeout"
+  | "spawn_error"
+  | "non_zero_exit"
+  | "assistant_error";
 
 type PiJsonTaskResult = {
   status: PiJsonTaskStatus;
@@ -618,9 +637,7 @@ type TriageMessageDetails = {
   items: TriageMessageItem[];
 };
 
-type TriageRunResult =
-  | { ok: false; error: string }
-  | { ok: true; details: TriageMessageDetails };
+type TriageRunResult = { ok: false; error: string } | { ok: true; details: TriageMessageDetails };
 
 type TriagePrContext = {
   prNumber: number;
@@ -644,7 +661,11 @@ const runtimeState = {
   activePromptCount: 0,
 };
 
-function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") {
+function notify(
+  ctx: ExtensionContext,
+  message: string,
+  type: "info" | "warning" | "error" = "info",
+) {
   if (!ctx.hasUI) return;
   ctx.ui.notify(message, type);
 }
@@ -680,7 +701,6 @@ async function withSpinner<T>(
   }
 }
 
-
 function priorityRank(priority: Priority): number {
   return priority.charCodeAt(1) - 48; // '0' = 48
 }
@@ -692,7 +712,7 @@ function hashString(value: string): string {
 function withJitter(baseMs: number): number {
   const range = Math.max(0, Math.floor(baseMs * REVIEW_STARTUP_RETRY_JITTER_RATIO));
   if (range === 0) return baseMs;
-  const offset = Math.floor((Math.random() * (range * 2 + 1)) - range);
+  const offset = Math.floor(Math.random() * (range * 2 + 1) - range);
   return Math.max(0, baseMs + offset);
 }
 
@@ -705,7 +725,9 @@ function isHelpRequest(args: string | undefined): boolean {
   return first === "help";
 }
 
-function getReviewArgumentCompletions(prefix: string): Array<{ value: string; label: string }> | null {
+function getReviewArgumentCompletions(
+  prefix: string,
+): Array<{ value: string; label: string }> | null {
   const trimmed = prefix.trim().toLowerCase();
   if (trimmed.includes(" ")) return null;
 
@@ -777,7 +799,10 @@ function unquoteToken(token: string): string {
   return quoted[2] ?? "";
 }
 
-function parseKeyValueOption(token: string, key: "models" | "model" | "context"): string | undefined {
+function parseKeyValueOption(
+  token: string,
+  key: "models" | "model" | "context",
+): string | undefined {
   const pattern = new RegExp(`^${key}=(?:\"([\\s\\S]*)\"|'([\\s\\S]*)'|(\\S+))$`);
   const match = token.match(pattern);
   if (!match) return undefined;
@@ -817,17 +842,28 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
   }
 
   const models = Array.from(new Set(rawModels));
-  const additionalContextJoined = rawContext.map((c) => c.trim()).filter(Boolean).join("\n\n");
-  const additionalContext = additionalContextJoined.length > 0 ? additionalContextJoined : undefined;
+  const additionalContextJoined = rawContext
+    .map((c) => c.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const additionalContext =
+    additionalContextJoined.length > 0 ? additionalContextJoined : undefined;
   const toMode = (target: ReviewTarget): ReviewRequestMode => {
     switch (target.type) {
-      case "auto": return "auto";
-      case "uncommitted": return "uncommitted";
-      case "branch": return `branch:${target.branch}`;
-      case "commit": return `commit:${target.sha}`;
-      case "pr": return `pr:${target.ref}`;
-      case "folder": return `folder:${target.paths.join(",")}`;
-      case "custom": return "custom";
+      case "auto":
+        return "auto";
+      case "uncommitted":
+        return "uncommitted";
+      case "branch":
+        return `branch:${target.branch}`;
+      case "commit":
+        return `commit:${target.sha}`;
+      case "pr":
+        return `pr:${target.ref}`;
+      case "folder":
+        return `folder:${target.paths.join(",")}`;
+      case "custom":
+        return "custom";
     }
   };
   const withMeta = (target: ReviewTarget): ParsedRequest => ({
@@ -846,19 +882,27 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
   const rest = modeTokens.slice(1);
 
   if (mode === "auto" || mode === "uncommitted") {
-    if (rest.length > 0) throw new Error(`${mode} mode does not accept positional args. Use models=... and/or context=...`);
+    if (rest.length > 0)
+      throw new Error(
+        `${mode} mode does not accept positional args. Use models=... and/or context=...`,
+      );
     return withMeta({ type: mode });
   }
 
   if (mode === "branch" || mode === "commit" || mode === "pr") {
     if (!rest[0]) {
-      if (mode === "branch") throw new Error("branch mode requires a branch name (e.g. /review branch main)");
-      if (mode === "commit") throw new Error("commit mode requires a commit SHA (e.g. /review commit abc1234)");
+      if (mode === "branch")
+        throw new Error("branch mode requires a branch name (e.g. /review branch main)");
+      if (mode === "commit")
+        throw new Error("commit mode requires a commit SHA (e.g. /review commit abc1234)");
       throw new Error("pr mode requires a PR number or URL (e.g. /review pr 123)");
     }
     if (rest.length > 1) {
-      const valueLabel = mode === "branch" ? "branch name" : mode === "commit" ? "SHA" : "reference";
-      throw new Error(`${mode} mode accepts one ${valueLabel}. Use models=... and/or context=... for options.`);
+      const valueLabel =
+        mode === "branch" ? "branch name" : mode === "commit" ? "SHA" : "reference";
+      throw new Error(
+        `${mode} mode accepts one ${valueLabel}. Use models=... and/or context=... for options.`,
+      );
     }
 
     if (mode === "branch") return withMeta({ type: "branch", branch: rest[0] });
@@ -866,12 +910,14 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
     return withMeta({ type: "pr", ref: rest[0] });
   }
   if (mode === "folder") {
-    if (rest.length === 0) throw new Error("folder mode requires at least one path (e.g. /review folder src docs)");
+    if (rest.length === 0)
+      throw new Error("folder mode requires at least one path (e.g. /review folder src docs)");
     return withMeta({ type: "folder", paths: rest.map((p) => p.trim()).filter(Boolean) });
   }
   if (mode === "custom") {
     const instructions = rest.join(" ").trim();
-    if (!instructions) throw new Error("custom mode requires instructions (e.g. /review custom \"focus on auth\")");
+    if (!instructions)
+      throw new Error('custom mode requires instructions (e.g. /review custom "focus on auth")');
     return withMeta({ type: "custom", instructions });
   }
 
@@ -884,7 +930,10 @@ function buildRequestSignature(request: ParsedRequest): string {
   const additionalContext = request.additionalContext?.trim();
   const target =
     request.target.type === "folder"
-      ? { type: "folder", paths: Array.from(new Set(request.target.paths)).sort((a, b) => a.localeCompare(b)) }
+      ? {
+          type: "folder",
+          paths: Array.from(new Set(request.target.paths)).sort((a, b) => a.localeCompare(b)),
+        }
       : request.target.type === "custom"
         ? { type: "custom", instructions: request.target.instructions.trim() }
         : request.target.type === "pr"
@@ -908,7 +957,10 @@ function reviewMatchesRequest(details: ReviewMessageDetails, request: ParsedRequ
 
 // --- Git & fingerprinting ---
 
-async function runGit(pi: ExtensionAPI, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+async function runGit(
+  pi: ExtensionAPI,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
   const { stdout, stderr, code } = await pi.exec("git", args);
   return { stdout, stderr, code };
 }
@@ -1015,15 +1067,21 @@ function parsePrReference(ref: string): number | null {
   return Number.parseInt(urlMatch[1], 10);
 }
 
-async function getPrInfo(pi: ExtensionAPI, prNumber: number): Promise<{ baseBranch: string; headBranch: string } | null> {
-  const { stdout, code } = await pi.exec("gh", ["pr", "view", String(prNumber), "--json", "baseRefName,headRefName"]);
+async function getPrInfo(
+  pi: ExtensionAPI,
+  prNumber: number,
+): Promise<{ baseBranch: string; headBranch: string } | null> {
+  const { stdout, code } = await pi.exec("gh", [
+    "pr",
+    "view",
+    String(prNumber),
+    "--json",
+    "baseRefName,headRefName",
+  ]);
   if (code !== 0) return null;
   try {
     const data = JSON.parse(stdout);
-    if (
-      typeof data?.baseRefName === "string" &&
-      typeof data?.headRefName === "string"
-    ) {
+    if (typeof data?.baseRefName === "string" && typeof data?.headRefName === "string") {
       return {
         baseBranch: data.baseRefName,
         headBranch: data.headRefName,
@@ -1035,7 +1093,10 @@ async function getPrInfo(pi: ExtensionAPI, prNumber: number): Promise<{ baseBran
   }
 }
 
-async function checkoutPr(pi: ExtensionAPI, prNumber: number): Promise<{ ok: boolean; error?: string }> {
+async function checkoutPr(
+  pi: ExtensionAPI,
+  prNumber: number,
+): Promise<{ ok: boolean; error?: string }> {
   const { stdout, stderr, code } = await pi.exec("gh", ["pr", "checkout", String(prNumber)]);
   if (code !== 0) {
     return { ok: false, error: (stderr || stdout || "Failed to checkout PR").trim() };
@@ -1044,7 +1105,7 @@ async function checkoutPr(pi: ExtensionAPI, prNumber: number): Promise<{ ok: boo
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
 function getConnectionNodes(value: unknown): unknown[] {
@@ -1083,7 +1144,10 @@ function getAuthorLogin(value: unknown): string {
   return typeof author?.login === "string" ? author.login : "unknown";
 }
 
-async function fetchPrTriageMetadata(pi: ExtensionAPI, prNumber: number): Promise<{
+async function fetchPrTriageMetadata(
+  pi: ExtensionAPI,
+  prNumber: number,
+): Promise<{
   prNumber: number;
   prUrl: string;
   title: string;
@@ -1191,7 +1255,9 @@ function formatThreadLocation(options: {
 }
 
 function pickThreadAuthor(comments: TriageFeedbackComment[], prAuthor: string): string {
-  const externalComment = comments.find((comment) => comment.author !== prAuthor && comment.author !== "unknown");
+  const externalComment = comments.find(
+    (comment) => comment.author !== prAuthor && comment.author !== "unknown",
+  );
   if (externalComment) return externalComment.author;
   return comments[0]?.author ?? "unknown";
 }
@@ -1223,7 +1289,9 @@ async function fetchPrReviewThreads(
 
     const items: TriageFeedbackItem[] = [];
     for (const page of pages) {
-      const threads = getConnectionNodes(getNestedRecord(page, "data", "repository", "pullRequest", "reviewThreads"));
+      const threads = getConnectionNodes(
+        getNestedRecord(page, "data", "repository", "pullRequest", "reviewThreads"),
+      );
       for (const thread of threads) {
         const record = asRecord(thread);
         if (!record) continue;
@@ -1319,8 +1387,8 @@ async function computeUntrackedContentHash(
   cwd: string,
   precomputedUntrackedFiles?: string[],
 ): Promise<string> {
-  const untrackedFiles = [...(precomputedUntrackedFiles ?? (await getUntrackedFiles(pi)))].sort((a, b) =>
-    a.localeCompare(b),
+  const untrackedFiles = [...(precomputedUntrackedFiles ?? (await getUntrackedFiles(pi)))].sort(
+    (a, b) => a.localeCompare(b),
   );
   if (untrackedFiles.length === 0) return hashString("");
 
@@ -1336,12 +1404,16 @@ function hashObjectBatch(cwd: string, files: string[]): Promise<string[]> {
       stdio: ["pipe", "pipe", "ignore"],
     });
     let stdout = "";
-    proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
     proc.on("error", () => resolve([]));
     proc.on("close", (code) => {
       resolve(code === 0 ? stdout.trim().split("\n") : []);
     });
-    proc.stdin.on("error", () => { /* ignore broken pipe */ });
+    proc.stdin.on("error", () => {
+      /* ignore broken pipe */
+    });
     proc.stdin.end(files.join("\n"));
   });
 }
@@ -1408,7 +1480,11 @@ async function resolveBranchDiffScope(
   };
 }
 
-async function resolveScope(pi: ExtensionAPI, ctx: ExtensionContext, target: ReviewTarget): Promise<{ scope?: ResolvedScope; error?: string }> {
+async function resolveScope(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  target: ReviewTarget,
+): Promise<{ scope?: ResolvedScope; error?: string }> {
   switch (target.type) {
     case "auto":
     case "uncommitted": {
@@ -1473,7 +1549,9 @@ async function resolveScope(pi: ExtensionAPI, ctx: ExtensionContext, target: Rev
       notify(ctx, `Fetching PR #${prNumber} information...`, "info");
       const prInfo = await getPrInfo(pi, prNumber);
       if (!prInfo) {
-        return { error: `Could not load PR #${prNumber}. Ensure gh is authenticated and PR exists.` };
+        return {
+          error: `Could not load PR #${prNumber}. Ensure gh is authenticated and PR exists.`,
+        };
       }
 
       if (await hasPendingTrackedChanges(pi)) {
@@ -1483,13 +1561,16 @@ async function resolveScope(pi: ExtensionAPI, ctx: ExtensionContext, target: Rev
       notify(ctx, `Checking out PR #${prNumber}...`, "info");
       const checkout = await checkoutPr(pi, prNumber);
       if (!checkout.ok) {
-        return { error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}` };
+        return {
+          error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}`,
+        };
       }
       notify(ctx, `Checked out PR #${prNumber} (${prInfo.headBranch}).`, "info");
 
       return resolveBranchDiffScope(pi, {
         baseBranch: prInfo.baseBranch,
-        description: (diffFileCount) => `PR #${prNumber} diff vs ${prInfo.baseBranch} (${diffFileCount} files)`,
+        description: (diffFileCount) =>
+          `PR #${prNumber} diff vs ${prInfo.baseBranch} (${diffFileCount} files)`,
         mergeBaseError: `Could not determine merge-base against PR base branch ${prInfo.baseBranch}.`,
         emptyDiffError: `No differences found for PR #${prNumber} against ${prInfo.baseBranch}.`,
       });
@@ -1557,16 +1638,20 @@ function buildFocusPrompt(
   additionalContext: string | undefined,
 ): string {
   const additionalContextSection = additionalContext?.trim()
-    ? REVIEW_ADDITIONAL_CONTEXT_SECTION_PROMPT.replace("{ADDITIONAL_CONTEXT}", () => additionalContext.trim())
+    ? REVIEW_ADDITIONAL_CONTEXT_SECTION_PROMPT.replace("{ADDITIONAL_CONTEXT}", () =>
+        additionalContext.trim(),
+      )
     : "";
   const projectGuidelinesSection = projectGuidelines
-    ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace("{PROJECT_GUIDELINES}", () => projectGuidelines)
+    ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace(
+        "{PROJECT_GUIDELINES}",
+        () => projectGuidelines,
+      )
     : "";
 
   const def = REVIEW_FOCUSES[focus];
 
-  return REVIEW_FOCUS_PROMPT
-    .replace("{FOCUS_SUFFIX}", () => def.suffix)
+  return REVIEW_FOCUS_PROMPT.replace("{FOCUS_SUFFIX}", () => def.suffix)
     .replace("{FOCUS_QUALIFIER}", () => def.qualifier)
     .replace("{SCOPE_INSTRUCTIONS}", () => scopeInstructions)
     .replace("{FOCUS_CONTEXT}", () => def.context)
@@ -1575,12 +1660,12 @@ function buildFocusPrompt(
     .replace("{OUTPUT_CONTRACT}", () => REVIEW_JSON_OUTPUT_CONTRACT_PROMPT);
 }
 
-function buildTriagePrompt(
-  context: TriagePrContext,
-  projectGuidelines: string | null,
-): string {
+function buildTriagePrompt(context: TriagePrContext, projectGuidelines: string | null): string {
   const projectGuidelinesSection = projectGuidelines
-    ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace("{PROJECT_GUIDELINES}", () => projectGuidelines)
+    ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace(
+        "{PROJECT_GUIDELINES}",
+        () => projectGuidelines,
+      )
     : "";
   const triageInput = JSON.stringify(
     {
@@ -1599,17 +1684,15 @@ function buildTriagePrompt(
     2,
   );
 
-  return TRIAGE_PROMPT
-    .replace("{SCOPE_INSTRUCTIONS}", () => buildScopeInstructions(context.scope))
+  return TRIAGE_PROMPT.replace("{SCOPE_INSTRUCTIONS}", () => buildScopeInstructions(context.scope))
     .replace("{PROJECT_GUIDELINES_SECTION}", () => projectGuidelinesSection)
     .replace("{TRIAGE_INPUT_JSON}", () => triageInput);
 }
 
 function buildReviewDedupPrompt(findings: ReviewReportFinding[]): string {
   const findingsWithIds = findings.map((finding, index) => ({ id: index + 1, ...finding }));
-  return REVIEW_DEDUP_PROMPT.replace(
-    "{REVIEW_FINDINGS_JSON}",
-    () => JSON.stringify({ findings: findingsWithIds }, null, 2),
+  return REVIEW_DEDUP_PROMPT.replace("{REVIEW_FINDINGS_JSON}", () =>
+    JSON.stringify({ findings: findingsWithIds }, null, 2),
   );
 }
 
@@ -1681,7 +1764,10 @@ function validateFocusOutput(parsed: unknown): FocusFinding[] {
   for (const finding of parsed.findings) {
     if (typeof finding !== "object" || finding === null) continue;
     const rec = finding as Record<string, unknown>;
-    const priority = String(rec.priority ?? "").toUpperCase().match(/^P[0-3]$/)?.[0] ?? "";
+    const priority =
+      String(rec.priority ?? "")
+        .toUpperCase()
+        .match(/^P[0-3]$/)?.[0] ?? "";
     const location = String(rec.location ?? "").trim();
     const findingText = String(rec.finding ?? "").trim();
     const suggestion = String(rec.suggestion ?? "").trim();
@@ -1696,7 +1782,12 @@ function validateFocusOutput(parsed: unknown): FocusFinding[] {
 }
 
 function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewDedupGroup[] | null {
-  if (!parsed || typeof parsed !== "object" || !("groups" in parsed) || !Array.isArray(parsed.groups)) {
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !("groups" in parsed) ||
+    !Array.isArray(parsed.groups)
+  ) {
     return null;
   }
 
@@ -1704,7 +1795,12 @@ function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewD
   const seenIds = new Set<number>();
 
   for (const group of parsed.groups) {
-    if (typeof group !== "object" || group === null || !("ids" in group) || !Array.isArray(group.ids)) {
+    if (
+      typeof group !== "object" ||
+      group === null ||
+      !("ids" in group) ||
+      !Array.isArray(group.ids)
+    ) {
       return null;
     }
 
@@ -1748,7 +1844,12 @@ function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem
     const rationale = String(record.rationale ?? "").trim();
     const action = String(record.action ?? "").trim();
     if (!id || !knownIds.has(id)) continue;
-    if (decision !== "address" && decision !== "push_back" && decision !== "research" && decision !== "ignore") {
+    if (
+      decision !== "address" &&
+      decision !== "push_back" &&
+      decision !== "research" &&
+      decision !== "ignore"
+    ) {
       continue;
     }
     if (!summary || !rationale || !action) continue;
@@ -1768,11 +1869,15 @@ function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem
     throw new Error("All triage items are malformed.");
   }
 
-  const missingIds = feedbackItems.filter((item) => !triageById.has(item.id)).map((item) => item.id);
+  const missingIds = feedbackItems
+    .filter((item) => !triageById.has(item.id))
+    .map((item) => item.id);
   if (missingIds.length > 0) {
     const preview = missingIds.slice(0, 5).join(", ");
     const suffix = missingIds.length > 5 ? ", ..." : "";
-    throw new Error(`Triage output is missing ${missingIds.length} feedback item(s): ${preview}${suffix}`);
+    throw new Error(
+      `Triage output is missing ${missingIds.length} feedback item(s): ${preview}${suffix}`,
+    );
   }
 
   return feedbackItems.map((item) => triageById.get(item.id) as TriageItem);
@@ -1780,7 +1885,10 @@ function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem
 
 // These classifiers intentionally rely on current pi CLI/provider wording.
 // If upstream wording changes, retry behavior and friendly error messages may need updates.
-function classifyFocusError(errorText: string): { errorKind: FocusTaskErrorKind; missingApiProvider?: string } {
+function classifyFocusError(errorText: string): {
+  errorKind: FocusTaskErrorKind;
+  missingApiProvider?: string;
+} {
   if (/Lock file is already being held/i.test(errorText)) {
     return { errorKind: "lock_contention" };
   }
@@ -1811,7 +1919,6 @@ function createCancelledFocusResult(task: FocusTask): FocusTaskResult {
     errorKind: "other",
   };
 }
-
 
 async function runPiJsonTask({
   args,
@@ -1865,7 +1972,9 @@ async function runPiJsonTask({
           const text = extractTextContent(message.content);
           if (text) latestAssistantOutput = text;
           latestAssistantError =
-            message.stopReason === "error" && typeof message.errorMessage === "string" ? message.errorMessage : "";
+            message.stopReason === "error" && typeof message.errorMessage === "string"
+              ? message.errorMessage
+              : "";
         }
       } catch {
         // Ignore non-JSON lines.
@@ -1957,7 +2066,11 @@ async function runPiJsonTask({
   });
 }
 
-async function runFocusTaskAttempt(task: FocusTask, cwd: string, control?: ReviewExecutionControl): Promise<FocusTaskResult> {
+async function runFocusTaskAttempt(
+  task: FocusTask,
+  cwd: string,
+  control?: ReviewExecutionControl,
+): Promise<FocusTaskResult> {
   const args = [
     "--mode",
     "json",
@@ -2067,8 +2180,11 @@ async function runFocusTaskAttempt(task: FocusTask, cwd: string, control?: Revie
   }
 }
 
-
-async function runFocusTask(task: FocusTask, cwd: string, control?: ReviewExecutionControl): Promise<FocusTaskResult> {
+async function runFocusTask(
+  task: FocusTask,
+  cwd: string,
+  control?: ReviewExecutionControl,
+): Promise<FocusTaskResult> {
   if (control?.isCancelled()) {
     return createCancelledFocusResult(task);
   }
@@ -2077,7 +2193,8 @@ async function runFocusTask(task: FocusTask, cwd: string, control?: ReviewExecut
     const result = await runFocusTaskAttempt(task, cwd, control);
     if (result.ok || attempt >= REVIEW_STARTUP_RETRY_DELAYS_MS.length) return result;
 
-    const retryable = result.errorKind === "lock_contention" || result.errorKind === "missing_api_key";
+    const retryable =
+      result.errorKind === "lock_contention" || result.errorKind === "missing_api_key";
     if (!retryable) return result;
     if (control?.isCancelled()) return createCancelledFocusResult(task);
 
@@ -2104,25 +2221,26 @@ async function runReviewDedupTask(options: {
   const taskResult = await withSpinner(
     ctx,
     () => `deduplicating ${findings.length} review findings`,
-    () => runPiJsonTask({
-      args: [
-        "--mode",
-        "json",
-        "-p",
-        "--no-session",
-        "--no-tools",
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--model",
-        model.modelArg,
-      ],
-      prompt: buildReviewDedupPrompt(findings),
-      cwd,
-      timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-      control,
-    }),
+    () =>
+      runPiJsonTask({
+        args: [
+          "--mode",
+          "json",
+          "-p",
+          "--no-session",
+          "--no-tools",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--model",
+          model.modelArg,
+        ],
+        prompt: buildReviewDedupPrompt(findings),
+        cwd,
+        timeoutMs: REVIEW_TASK_TIMEOUT_MS,
+        control,
+      }),
   );
 
   if (taskResult.status !== "ok") {
@@ -2130,7 +2248,10 @@ async function runReviewDedupTask(options: {
   }
 
   try {
-    return parseReviewDedupOutput(parsePossiblyWrappedJson(taskResult.assistantOutput), findings.length);
+    return parseReviewDedupOutput(
+      parsePossiblyWrappedJson(taskResult.assistantOutput),
+      findings.length,
+    );
   } catch {
     return null;
   }
@@ -2169,13 +2290,14 @@ async function runTriageTask(options: {
     const taskResult = await withSpinner(
       ctx,
       () => `triaging PR feedback (${feedbackItems.length} items)`,
-      () => runPiJsonTask({
-        args,
-        prompt,
-        cwd,
-        timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-        control,
-      }),
+      () =>
+        runPiJsonTask({
+          args,
+          prompt,
+          cwd,
+          timeoutMs: REVIEW_TASK_TIMEOUT_MS,
+          control,
+        }),
     );
 
     if (taskResult.status === "cancelled") {
@@ -2185,7 +2307,10 @@ async function runTriageTask(options: {
       return { ok: false, error: "PR triage timed out after 30 minutes." };
     }
     if (taskResult.status === "spawn_error") {
-      return { ok: false, error: `Failed to start triage process: ${taskResult.error ?? "unknown error"}` };
+      return {
+        ok: false,
+        error: `Failed to start triage process: ${taskResult.error ?? "unknown error"}`,
+      };
     }
     if (taskResult.status === "non_zero_exit") {
       const stderr = taskResult.stderr.trim();
@@ -2197,7 +2322,10 @@ async function runTriageTask(options: {
           error: `Missing API key for provider '${classification.missingApiProvider ?? "unknown"}'. Use /login or configure credentials for that provider.`,
         };
       }
-      if (classification.errorKind === "lock_contention" && attempt < REVIEW_STARTUP_RETRY_DELAYS_MS.length) {
+      if (
+        classification.errorKind === "lock_contention" &&
+        attempt < REVIEW_STARTUP_RETRY_DELAYS_MS.length
+      ) {
         const baseDelayMs =
           REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
           REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
@@ -2215,7 +2343,10 @@ async function runTriageTask(options: {
         };
       }
       if (classification.errorKind === "rate_limit") {
-        return { ok: false, error: "Triage failed due to rate limiting. Try again later or switch models." };
+        return {
+          ok: false,
+          error: "Triage failed due to rate limiting. Try again later or switch models.",
+        };
       }
       return { ok: false, error: "Triage failed due to a provider error." };
     }
@@ -2246,9 +2377,7 @@ function detectModelFamily(provider: string): ModelFamily | null {
   return null;
 }
 
-function selectReviewDedupModel(
-  ctx: ExtensionContext,
-): { modelArg: string } | null {
+function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | null {
   if (!ctx.model) return null;
 
   const family = detectModelFamily(ctx.model.provider);
@@ -2280,11 +2409,15 @@ function pickPreferredModelCandidate<T extends { id: string; provider: string }>
   currentProvider: string | undefined,
 ): T {
   const preferredProviderCandidates = currentProvider
-    ? candidates.filter((candidate) => candidate.provider.toLowerCase() === currentProvider.toLowerCase())
+    ? candidates.filter(
+        (candidate) => candidate.provider.toLowerCase() === currentProvider.toLowerCase(),
+      )
     : [];
   const pool = preferredProviderCandidates.length > 0 ? preferredProviderCandidates : candidates;
 
-  const aliases = pool.filter((candidate) => candidate.id.endsWith("-latest") || !/-\d{8}$/.test(candidate.id));
+  const aliases = pool.filter(
+    (candidate) => candidate.id.endsWith("-latest") || !/-\d{8}$/.test(candidate.id),
+  );
   const ranked = (aliases.length > 0 ? aliases : pool).slice();
   ranked.sort((a, b) => b.id.localeCompare(a.id));
   return ranked[0];
@@ -2296,15 +2429,17 @@ function resolveUnqualifiedModelPattern(
   currentProvider: string | undefined,
 ): { modelArg: string; modelLabel: string } | undefined {
   const normalizedPattern = modelPattern.toLowerCase();
-  const exactMatches = availableModels.filter((model) => model.id.toLowerCase() === normalizedPattern);
+  const exactMatches = availableModels.filter(
+    (model) => model.id.toLowerCase() === normalizedPattern,
+  );
   const candidates =
     exactMatches.length > 0
       ? exactMatches
       : availableModels.filter((model) => {
-        const byId = model.id.toLowerCase().includes(normalizedPattern);
-        const byName = model.name?.toLowerCase().includes(normalizedPattern) ?? false;
-        return byId || byName;
-      });
+          const byId = model.id.toLowerCase().includes(normalizedPattern);
+          const byName = model.name?.toLowerCase().includes(normalizedPattern) ?? false;
+          return byId || byName;
+        });
   if (candidates.length === 0) return undefined;
 
   const preferred = pickPreferredModelCandidate(candidates, currentProvider);
@@ -2322,16 +2457,23 @@ async function resolveModels(
   const currentModelId = ctx.model?.id;
   const availableModels = ctx.modelRegistry.getAvailable();
 
-  const resolveRequestedModel = (modelPattern: string): { modelArg: string; modelLabel: string } => {
+  const resolveRequestedModel = (
+    modelPattern: string,
+  ): { modelArg: string; modelLabel: string } => {
     const slash = modelPattern.indexOf("/");
     const explicitProvider = slash > 0 ? modelPattern.slice(0, slash).trim() : "";
     if (explicitProvider) {
       return { modelArg: modelPattern, modelLabel: modelPattern };
     }
 
-    const hasWildcard = modelPattern.includes("*") || modelPattern.includes("?") || modelPattern.includes("[");
+    const hasWildcard =
+      modelPattern.includes("*") || modelPattern.includes("?") || modelPattern.includes("[");
     if (!hasWildcard) {
-      const resolved = resolveUnqualifiedModelPattern(modelPattern, availableModels, currentProvider);
+      const resolved = resolveUnqualifiedModelPattern(
+        modelPattern,
+        availableModels,
+        currentProvider,
+      );
       if (resolved) return resolved;
     }
 
@@ -2346,11 +2488,12 @@ async function resolveModels(
   }
 
   const modelArg = currentModelId
-    ? currentProvider ? `${currentProvider}/${currentModelId}` : currentModelId
+    ? currentProvider
+      ? `${currentProvider}/${currentModelId}`
+      : currentModelId
     : undefined;
   return [{ modelArg, modelLabel: currentModelId ?? "default" }];
 }
-
 
 function escapeCell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
@@ -2386,7 +2529,11 @@ function buildTriagedPrLine(context: TriagePrContext, durationMs: number): strin
   return `Triaged PR #${context.prNumber} (${context.title}) in ${formatDuration(durationMs)}.`;
 }
 
-function buildTriageMarkdown(context: TriagePrContext, items: TriageMessageItem[], durationMs: number): string {
+function buildTriageMarkdown(
+  context: TriagePrContext,
+  items: TriageMessageItem[],
+  durationMs: number,
+): string {
   const header = buildTriagedPrLine(context, durationMs);
   if (items.length === 0) {
     return `${header}\n\nNo PR feedback items found.`;
@@ -2462,7 +2609,9 @@ const REQUEST_MODE_PREFIXES = ["branch:", "commit:", "pr:", "folder:"];
 function isReviewRequestMode(value: unknown): value is ReviewRequestMode {
   if (typeof value !== "string") return false;
   if (value === "auto" || value === "uncommitted" || value === "custom") return true;
-  return REQUEST_MODE_PREFIXES.some((prefix) => value.startsWith(prefix) && value.length > prefix.length);
+  return REQUEST_MODE_PREFIXES.some(
+    (prefix) => value.startsWith(prefix) && value.length > prefix.length,
+  );
 }
 
 function parseReviewStaleness(value: unknown): ReviewStaleness | undefined | null {
@@ -2613,7 +2762,10 @@ async function prepareTriageContext(
     return { ok: false, error: "Not a git repository." };
   }
   if (await hasPendingTrackedChanges(pi)) {
-    return { ok: false, error: "Cannot checkout PR with pending tracked changes. Commit or stash first." };
+    return {
+      ok: false,
+      error: "Cannot checkout PR with pending tracked changes. Commit or stash first.",
+    };
   }
 
   const prNumber = parsePrReference(prRef);
@@ -2624,23 +2776,33 @@ async function prepareTriageContext(
   notify(ctx, `Fetching PR #${prNumber} feedback...`, "info");
   const metadata = await fetchPrTriageMetadata(pi, prNumber);
   if (!metadata) {
-    return { ok: false, error: `Could not load PR #${prNumber}. Ensure gh is authenticated and PR exists.` };
+    return {
+      ok: false,
+      error: `Could not load PR #${prNumber}. Ensure gh is authenticated and PR exists.`,
+    };
   }
 
   if (await hasPendingTrackedChanges(pi)) {
-    return { ok: false, error: "Cannot checkout PR with pending tracked changes. Commit or stash first." };
+    return {
+      ok: false,
+      error: "Cannot checkout PR with pending tracked changes. Commit or stash first.",
+    };
   }
 
   notify(ctx, `Checking out PR #${prNumber}...`, "info");
   const checkout = await checkoutPr(pi, prNumber);
   if (!checkout.ok) {
-    return { ok: false, error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}` };
+    return {
+      ok: false,
+      error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}`,
+    };
   }
   notify(ctx, `Checked out PR #${prNumber} (${metadata.headBranch}).`, "info");
 
   const resolvedScope = await resolveBranchDiffScope(pi, {
     baseBranch: metadata.baseBranch,
-    description: (diffFileCount) => `PR #${prNumber} diff vs ${metadata.baseBranch} (${diffFileCount} files)`,
+    description: (diffFileCount) =>
+      `PR #${prNumber} diff vs ${metadata.baseBranch} (${diffFileCount} files)`,
     mergeBaseError: `Could not determine merge-base against PR base branch ${metadata.baseBranch}.`,
     emptyDiffError: `No differences found for PR #${prNumber} against ${metadata.baseBranch}.`,
   });
@@ -2650,7 +2812,10 @@ async function prepareTriageContext(
 
   const threads = await fetchPrReviewThreads(pi, prNumber, metadata.author);
   if (!threads) {
-    return { ok: false, error: `Could not load review threads for PR #${prNumber}. Ensure gh is authenticated and GraphQL access is available.` };
+    return {
+      ok: false,
+      error: `Could not load review threads for PR #${prNumber}. Ensure gh is authenticated and GraphQL access is available.`,
+    };
   }
 
   const feedbackItems = buildTriageFeedbackItems({
@@ -2688,14 +2853,17 @@ async function runFocusTasks(
   return withSpinner(
     ctx,
     () => `reviewing (completed ${completed}/${tasks.length})`,
-    () => Promise.all(tasks.map(async (task) => {
-      try {
-        if (control.isCancelled()) return createCancelledFocusResult(task);
-        return await runFocusTask(task, cwd, control);
-      } finally {
-        completed = Math.min(tasks.length, completed + 1);
-      }
-    })),
+    () =>
+      Promise.all(
+        tasks.map(async (task) => {
+          try {
+            if (control.isCancelled()) return createCancelledFocusResult(task);
+            return await runFocusTask(task, cwd, control);
+          } finally {
+            completed = Math.min(tasks.length, completed + 1);
+          }
+        }),
+      ),
   );
 }
 
@@ -2777,7 +2945,6 @@ async function buildReviewFindings(
   return dedupGroups ? applyReviewDedupGroups(findings, dedupGroups) : findings;
 }
 
-
 async function runReviewPipeline(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -2830,20 +2997,23 @@ async function runReviewPipeline(
     pi.events.emit(REVIEW_EVENT_START, { sessionKey, source });
     reviewStarted = true;
     runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
-    unsubscribeInterrupt =
-      ctx.hasUI
-        ? ctx.ui.onTerminalInput((data) => {
+    unsubscribeInterrupt = ctx.hasUI
+      ? ctx.ui.onTerminalInput((data) => {
           if (!matchesKey(data, "escape")) return undefined;
           if (runtimeState.activePromptCount > 0) return undefined;
           requestCancellation();
           return { consume: true };
         })
-        : undefined;
+      : undefined;
 
     const { scope, includeUntracked, baselineFingerprint, models, tasks } = prepared.data;
     if (source === "review") {
       const modelsText = models.map((model) => model.modelArg ?? model.modelLabel).join(", ");
-      notify(ctx, `Review focus: ${REVIEW_FOCUS_NAMES.join(", ")} · models: ${modelsText}.`, "info");
+      notify(
+        ctx,
+        `Review focus: ${REVIEW_FOCUS_NAMES.join(", ")} · models: ${modelsText}.`,
+        "info",
+      );
     }
 
     const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, executionControl);
@@ -2856,8 +3026,9 @@ async function runReviewPipeline(
     const failedCount = failedFocuses.length;
     const totalReviews = focusResults.length;
     const completedReviews = totalReviews - failedCount;
-    const successfulFocuses = focusResults.filter((result): result is FocusTaskResult & { output: FocusOutput } =>
-      Boolean(result.ok && result.output),
+    const successfulFocuses = focusResults.filter(
+      (result): result is FocusTaskResult & { output: FocusOutput } =>
+        Boolean(result.ok && result.output),
     );
     if (successfulFocuses.length === 0) {
       if (failedCount > 0) {
@@ -2883,7 +3054,8 @@ async function runReviewPipeline(
         };
       }
 
-      const sampleError = focusResults.find((focus) => focus.error)?.error ?? "Unknown focus failure";
+      const sampleError =
+        focusResults.find((focus) => focus.error)?.error ?? "Unknown focus failure";
       return {
         ok: false,
         error: `All reviews failed. ${sampleError}`,
@@ -2960,13 +3132,25 @@ async function runReviewPipeline(
     if (reviewStaleness) {
       if (failedCount > 0) {
         const failedLabel = `review${failedCount === 1 ? "" : "s"}`;
-        notify(ctx, `Review completed with stale partial results: ${failedCount} ${failedLabel} failed.`, "warning");
+        notify(
+          ctx,
+          `Review completed with stale partial results: ${failedCount} ${failedLabel} failed.`,
+          "warning",
+        );
       } else {
-        notify(ctx, `Review completed with stale results: ${findings.length} finding(s).`, "warning");
+        notify(
+          ctx,
+          `Review completed with stale results: ${findings.length} finding(s).`,
+          "warning",
+        );
       }
     } else if (failedCount > 0) {
       const failedLabel = `review${failedCount === 1 ? "" : "s"}`;
-      notify(ctx, `Review completed with partial results: ${failedCount} ${failedLabel} failed.`, "warning");
+      notify(
+        ctx,
+        `Review completed with partial results: ${failedCount} ${failedLabel} failed.`,
+        "warning",
+      );
     } else {
       notify(ctx, `Review completed: ${findings.length} finding(s).`, "info");
     }
@@ -3037,15 +3221,14 @@ async function runTriagePipeline(
     pi.events.emit(REVIEW_EVENT_START, { sessionKey, source: "triage" });
     reviewStarted = true;
     runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
-    unsubscribeInterrupt =
-      ctx.hasUI
-        ? ctx.ui.onTerminalInput((data) => {
+    unsubscribeInterrupt = ctx.hasUI
+      ? ctx.ui.onTerminalInput((data) => {
           if (!matchesKey(data, "escape")) return undefined;
           if (runtimeState.activePromptCount > 0) return undefined;
           requestCancellation();
           return { consume: true };
         })
-        : undefined;
+      : undefined;
 
     if (context.feedbackItems.length === 0) {
       const details: TriageMessageDetails = {
@@ -3084,7 +3267,11 @@ async function runTriagePipeline(
       resolveModels(ctx, []),
     ]);
     const model = models[0];
-    notify(ctx, `Triaging ${context.feedbackItems.length} feedback item(s) with ${model.modelArg ?? model.modelLabel}.`, "info");
+    notify(
+      ctx,
+      `Triaging ${context.feedbackItems.length} feedback item(s) with ${model.modelArg ?? model.modelLabel}.`,
+      "info",
+    );
 
     const triageResult = await runTriageTask({
       ctx,
@@ -3172,13 +3359,15 @@ function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
     {
       scope: reviewMessageDetails.scope,
       ...(reviewMessageDetails.staleness ? { staleness: reviewMessageDetails.staleness } : {}),
-      findings: reviewMessageDetails.findings.map(({ priority, location, finding, suggestion, focus }) => ({
-        priority,
-        location,
-        finding,
-        suggestion,
-        focus,
-      })),
+      findings: reviewMessageDetails.findings.map(
+        ({ priority, location, finding, suggestion, focus }) => ({
+          priority,
+          location,
+          finding,
+          suggestion,
+          focus,
+        }),
+      ),
     },
     null,
     2,
@@ -3187,7 +3376,11 @@ function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
   return FIX_PROMPT.replace("{REVIEW_FINDINGS_JSON}", () => worklistPayload);
 }
 
-function parseTriagePrRef(pi: ExtensionAPI, args: string | undefined, ctx: ExtensionCommandContext): string | null {
+function parseTriagePrRef(
+  pi: ExtensionAPI,
+  args: string | undefined,
+  ctx: ExtensionCommandContext,
+): string | null {
   const raw = args?.trim() ?? "";
   if (!raw) {
     notify(ctx, "Usage: /triage <pr-number|url>", "error");
@@ -3210,7 +3403,11 @@ function parseTriagePrRef(pi: ExtensionAPI, args: string | undefined, ctx: Exten
   return tokens[0];
 }
 
-function parseCommandRequest(pi: ExtensionAPI, args: string | undefined, ctx: ExtensionCommandContext): ParsedRequest | null {
+function parseCommandRequest(
+  pi: ExtensionAPI,
+  args: string | undefined,
+  ctx: ExtensionCommandContext,
+): ParsedRequest | null {
   if (isHelpRequest(args)) {
     showReviewHelp(pi);
     return null;
@@ -3272,7 +3469,10 @@ export default function reviewExtension(pi: ExtensionAPI) {
       const request = parseCommandRequest(pi, args, ctx);
       if (!request) return;
 
-      const sessionKey = acquireReviewRunLock(ctx, "A /review run is already active in this session.");
+      const sessionKey = acquireReviewRunLock(
+        ctx,
+        "A /review run is already active in this session.",
+      );
       if (!sessionKey) return;
 
       notify(ctx, "Starting review in background...", "info");
@@ -3283,7 +3483,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
             notify(ctx, result.error, "error");
           }
         } catch (error) {
-          notify(ctx, `Review run failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          notify(
+            ctx,
+            `Review run failed: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
         } finally {
           releaseReviewRunLock(sessionKey);
         }
@@ -3312,7 +3516,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
             notify(ctx, result.error, "error");
           }
         } catch (error) {
-          notify(ctx, `PR triage failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          notify(
+            ctx,
+            `PR triage failed: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
         } finally {
           releaseReviewRunLock(sessionKey);
         }
@@ -3336,7 +3544,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
       try {
         let reviewDetails = getLastMessageReviewDetails(ctx);
-        const lastReviewMatchesRequest = !request.rawArgs || (reviewDetails ? reviewMatchesRequest(reviewDetails, request) : false);
+        const lastReviewMatchesRequest =
+          !request.rawArgs ||
+          (reviewDetails ? reviewMatchesRequest(reviewDetails, request) : false);
         const shouldRunFreshReview = !reviewDetails || !lastReviewMatchesRequest;
 
         if (reviewDetails && !shouldRunFreshReview) {

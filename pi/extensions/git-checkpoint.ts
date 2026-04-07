@@ -52,7 +52,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     const choice = await withPromptSignal(pi, () =>
-      ctx.ui.select("Restore code state?", ["Yes, restore code to that point", "No, keep current code"]),
+      ctx.ui.select("Restore code state?", [
+        "Yes, restore code to that point",
+        "No, keep current code",
+      ]),
     );
 
     if (choice?.startsWith("Yes")) {
