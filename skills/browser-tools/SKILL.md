@@ -16,6 +16,8 @@ cd "$HOME/.agents/skills/browser-tools"
 npm install
 ```
 
+Requires Node.js 20.19+.
+
 ## Start Chromium / Chrome
 
 ```bash
