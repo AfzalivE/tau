@@ -1715,6 +1715,15 @@ function notifySandboxConfigParseErrors(ctx: ExtensionContext, paths: SandboxCon
   notify(ctx, `Could not parse sandbox config: ${details}`, "warning");
 }
 
+function requestShutdownWithError(ctx: ExtensionContext, message: string): void {
+  // Validate during session_start so we can use Pi's registered flag values and shutdown path.
+  // This briefly renders startup UI, but Pi exits through its normal cleanup path instead of
+  // leaving the terminal in a broken state.
+  notify(ctx, message, "error");
+  process.exitCode = 1;
+  ctx.shutdown();
+}
+
 function loadSandboxConfigForContext(
   ctx: ExtensionContext,
   cwd: string,
@@ -1728,8 +1737,11 @@ function loadSandboxConfigForContext(
   } catch (error) {
     if (!(error instanceof SandboxConfigLoadError)) throw error;
 
-    notify(ctx, error.message, "error");
-    if (exitOnError) process.exit(1);
+    if (exitOnError) {
+      requestShutdownWithError(ctx, error.message);
+    } else {
+      notify(ctx, error.message, "error");
+    }
     return null;
   }
 }
