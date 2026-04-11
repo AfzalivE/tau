@@ -363,6 +363,23 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function getLoopArgumentCompletions(
+    prefix: string,
+  ): Array<{ value: string; label: string }> | null {
+    const trimmed = prefix.trim().toLowerCase();
+    if (trimmed.includes(" ")) return null;
+
+    const options = [
+      { value: "tests", label: "tests" },
+      { value: "self", label: "self" },
+      { value: "custom ", label: "custom" },
+    ];
+    const matches = options.filter((option) => option.label.startsWith(trimmed));
+    if (!matches.length) return null;
+
+    return matches;
+  }
+
   pi.registerTool(
     defineTool({
       name: "signal_loop_success",
@@ -395,6 +412,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("loop", {
     description: "Start a follow-up loop until a breakout condition is met",
+    getArgumentCompletions: getLoopArgumentCompletions,
     handler: async (args, ctx) => {
       let nextState = parseArgs(args);
       if (!nextState) {
