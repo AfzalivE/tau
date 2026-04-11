@@ -300,6 +300,195 @@ function normalizeSubcommand(token?: string): string | undefined {
   }
 }
 
+type CommandCompletionOption = {
+  value: string;
+  label?: string;
+  description?: string;
+};
+
+const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
+  { value: "enable", label: "enable" },
+  { value: "on", label: "on" },
+  { value: "disable", label: "disable" },
+  { value: "off", label: "off" },
+  { value: "show", label: "show" },
+  { value: "doctor", label: "doctor" },
+  { value: "mode ", label: "mode" },
+  { value: "network ", label: "network" },
+  { value: "filesystem ", label: "filesystem" },
+  { value: "help", label: "help" },
+];
+
+const SANDBOX_MODE_COMPLETIONS: CommandCompletionOption[] = [
+  { value: "interactive", label: "interactive" },
+  { value: "non-interactive", label: "non-interactive" },
+];
+
+const SANDBOX_NETWORK_LIST_COMPLETIONS: CommandCompletionOption[] = [
+  { value: "allow ", label: "allow" },
+  { value: "deny ", label: "deny" },
+];
+
+const SANDBOX_FILESYSTEM_LIST_COMPLETIONS: CommandCompletionOption[] = [
+  { value: "deny-read ", label: "deny-read" },
+  { value: "allow-write ", label: "allow-write" },
+  { value: "deny-write ", label: "deny-write" },
+];
+
+const SANDBOX_LIST_OPERATION_COMPLETIONS: CommandCompletionOption[] = [
+  { value: "add ", label: "add" },
+  { value: "remove ", label: "remove" },
+];
+
+function normalizeCompletionFilter(value: string): string {
+  return value.trim().replace(/^['"]/, "").toLowerCase();
+}
+
+function getCommandCompletions(
+  base: string,
+  partial: string,
+  options: CommandCompletionOption[],
+): Array<{ value: string; label: string; description?: string }> | null {
+  const normalizedPartial = normalizeCompletionFilter(partial);
+  const matches = options.filter((option) => {
+    const label = option.label ?? option.value.trimEnd();
+    return label.toLowerCase().startsWith(normalizedPartial);
+  });
+  if (matches.length === 0) return null;
+
+  return matches.map((option) => ({
+    value: `${base}${option.value}`,
+    label: option.label ?? option.value.trimEnd(),
+    ...(option.description ? { description: option.description } : {}),
+  }));
+}
+
+function getStringValueCompletions(
+  base: string,
+  partial: string,
+  values: string[],
+): Array<{ value: string; label: string }> | null {
+  const normalizedPartial = normalizeCompletionFilter(partial);
+  const matches = Array.from(new Set(values)).filter((value) =>
+    value.toLowerCase().startsWith(normalizedPartial),
+  );
+  if (matches.length === 0) return null;
+
+  return matches.map((value) => ({
+    value: `${base}${escapeSlashCommandArg(value)}`,
+    label: value,
+  }));
+}
+
+function getSandboxArgumentCompletions(
+  prefix: string,
+  runtimeConfig: SandboxRuntimeConfig | null,
+): Array<{ value: string; label: string; description?: string }> | null {
+  const endsWithSpace = /\s$/.test(prefix);
+  const tokens = parseCommandArgs(prefix);
+
+  if (tokens.length === 0) {
+    return getCommandCompletions("", "", SANDBOX_TOP_LEVEL_COMPLETIONS);
+  }
+
+  if (tokens.length === 1 && !endsWithSpace) {
+    return getCommandCompletions("", tokens[0] ?? "", SANDBOX_TOP_LEVEL_COMPLETIONS);
+  }
+
+  const subcommand = normalizeSubcommand(tokens[0]);
+  if (!subcommand) return null;
+
+  if (subcommand === "mode") {
+    if (tokens.length === 1 && endsWithSpace) {
+      return getCommandCompletions("mode ", "", SANDBOX_MODE_COMPLETIONS);
+    }
+    if (tokens.length === 2 && !endsWithSpace) {
+      return getCommandCompletions("mode ", tokens[1] ?? "", SANDBOX_MODE_COMPLETIONS);
+    }
+    return null;
+  }
+
+  if (subcommand === "network") {
+    if (tokens.length === 1 && endsWithSpace) {
+      return getCommandCompletions("network ", "", SANDBOX_NETWORK_LIST_COMPLETIONS);
+    }
+    if (tokens.length === 2 && !endsWithSpace) {
+      return getCommandCompletions("network ", tokens[1] ?? "", SANDBOX_NETWORK_LIST_COMPLETIONS);
+    }
+
+    const list = tokens[1]?.toLowerCase();
+    if (list !== "allow" && list !== "deny") return null;
+
+    const listBase = `network ${list} `;
+    if (tokens.length === 2 && endsWithSpace) {
+      return getCommandCompletions(listBase, "", SANDBOX_LIST_OPERATION_COMPLETIONS);
+    }
+    if (tokens.length === 3 && !endsWithSpace) {
+      return getCommandCompletions(listBase, tokens[2] ?? "", SANDBOX_LIST_OPERATION_COMPLETIONS);
+    }
+
+    if (tokens[2]?.toLowerCase() !== "remove") return null;
+
+    const values =
+      list === "allow"
+        ? (runtimeConfig?.network.allowedDomains ?? [])
+        : (runtimeConfig?.network.deniedDomains ?? []);
+    const valueBase = `${listBase}remove `;
+    if (tokens.length === 3 && endsWithSpace) {
+      return getStringValueCompletions(valueBase, "", values);
+    }
+    if (tokens.length === 4 && !endsWithSpace) {
+      return getStringValueCompletions(valueBase, tokens[3] ?? "", values);
+    }
+    return null;
+  }
+
+  if (subcommand === "filesystem") {
+    if (tokens.length === 1 && endsWithSpace) {
+      return getCommandCompletions("filesystem ", "", SANDBOX_FILESYSTEM_LIST_COMPLETIONS);
+    }
+    if (tokens.length === 2 && !endsWithSpace) {
+      return getCommandCompletions(
+        "filesystem ",
+        tokens[1] ?? "",
+        SANDBOX_FILESYSTEM_LIST_COMPLETIONS,
+      );
+    }
+
+    const list = tokens[1]?.toLowerCase() as FilesystemList | undefined;
+    if (list !== "deny-read" && list !== "allow-write" && list !== "deny-write") {
+      return null;
+    }
+
+    const listBase = `filesystem ${list} `;
+    if (tokens.length === 2 && endsWithSpace) {
+      return getCommandCompletions(listBase, "", SANDBOX_LIST_OPERATION_COMPLETIONS);
+    }
+    if (tokens.length === 3 && !endsWithSpace) {
+      return getCommandCompletions(listBase, tokens[2] ?? "", SANDBOX_LIST_OPERATION_COMPLETIONS);
+    }
+
+    if (tokens[2]?.toLowerCase() !== "remove") return null;
+
+    const values =
+      list === "deny-read"
+        ? (runtimeConfig?.filesystem.denyRead ?? [])
+        : list === "allow-write"
+          ? (runtimeConfig?.filesystem.allowWrite ?? [])
+          : (runtimeConfig?.filesystem.denyWrite ?? []);
+    const valueBase = `${listBase}remove `;
+    if (tokens.length === 3 && endsWithSpace) {
+      return getStringValueCompletions(valueBase, "", values);
+    }
+    if (tokens.length === 4 && !endsWithSpace) {
+      return getStringValueCompletions(valueBase, tokens[3] ?? "", values);
+    }
+    return null;
+  }
+
+  return null;
+}
+
 function getStringFlag(pi: ExtensionAPI, name: string): string | undefined {
   const value = pi.getFlag(name);
   if (typeof value !== "string") return undefined;
@@ -309,7 +498,8 @@ function getStringFlag(pi: ExtensionAPI, name: string): string | undefined {
 }
 
 function expandPath(value: string, cwd?: string): string {
-  const expanded = value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+  const expanded =
+    value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
   return cwd && !expanded.startsWith("/") ? resolve(cwd, expanded) : expanded;
 }
 
@@ -1762,7 +1952,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerFlag("sandbox-config", {
-    description: "Use a custom sandbox config file for this session (replaces global/project sandbox.json files)",
+    description:
+      "Use a custom sandbox config file for this session (replaces global/project sandbox.json files)",
     type: "string",
   });
 
@@ -2089,6 +2280,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("sandbox", {
     description: "Manage sandbox runtime overrides",
+    getArgumentCompletions: (prefix) =>
+      getSandboxArgumentCompletions(prefix, getStateRuntimeConfig(sandboxState)),
     handler: async (args, ctx) => {
       const tokens = parseCommandArgs(args);
       const subcommand = normalizeSubcommand(tokens[0]);
