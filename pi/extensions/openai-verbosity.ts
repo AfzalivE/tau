@@ -43,6 +43,19 @@ function parseVerbositySetting(value: string): VerbositySetting | undefined {
   return normalizeVerbosity(normalized);
 }
 
+function getVerbosityArgumentCompletions(
+  prefix: string,
+): Array<{ value: string; label: string }> | null {
+  const trimmed = prefix.trim().toLowerCase();
+  if (trimmed.includes(" ")) return null;
+
+  const options = ["low", "medium", "high", "auto"];
+  const matches = options.filter((option) => option.startsWith(trimmed));
+  if (!matches.length) return null;
+
+  return matches.map((option) => ({ value: option, label: option }));
+}
+
 function parseConfig(value: unknown): VerbosityConfig {
   if (!isObject(value) || !isObject(value.models)) return emptyConfig();
 
@@ -132,6 +145,7 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("verbosity", {
     description: "Set OpenAI response verbosity for the current model",
+    getArgumentCompletions: getVerbosityArgumentCompletions,
     handler: async (args, ctx) => {
       const verbosity = parseVerbositySetting(args);
       if (!verbosity) {
