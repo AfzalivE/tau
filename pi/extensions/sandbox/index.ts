@@ -26,7 +26,8 @@
  *   "filesystem": {
  *     "denyRead": ["~/.ssh", "~/.aws"],
  *     "allowWrite": [".", "/tmp"],
- *     "denyWrite": [".env"]
+ *     "denyWrite": [".env"],
+ *     "allowGitCommonDir": true
  *   }
  * }
  * ```
@@ -91,13 +92,14 @@ const DEFAULT_CONFIG: SandboxConfig = {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
     allowWrite: [".", "/tmp"],
     denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+    allowGitCommonDir: false,
   },
 };
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
 const METADATA_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
-const GIT_METADATA_DIR_CACHE = new Map<string, string | null>();
+const GIT_FILESYSTEM_PATHS_CACHE = new Map<string, GitFilesystemPaths | null>();
 
 // --- Types ---
 
@@ -115,10 +117,13 @@ type SandboxState =
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
 
-interface SandboxConfig extends SandboxRuntimeConfig {
+type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   enabled?: boolean;
   mode?: PromptMode;
-}
+  filesystem: SandboxRuntimeConfig["filesystem"] & {
+    allowGitCommonDir?: boolean;
+  };
+};
 
 type SandboxEventKind = "filesystem" | "network" | "init" | "runtime";
 type SandboxEventReason =
@@ -168,6 +173,11 @@ interface SandboxConfigPath {
 interface LoadedSandboxConfig {
   config: SandboxConfig;
   paths: SandboxConfigPath[];
+}
+
+interface GitFilesystemPaths {
+  gitDir: string;
+  gitCommonDir: string;
 }
 
 type SandboxConfigLoadErrorKind = "not-found" | "read-failed" | "parse-error";
@@ -573,6 +583,10 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         DEFAULT_CONFIG.filesystem.denyWrite,
         "filesystem.denyWrite",
       ),
+      allowGitCommonDir:
+        typeof config.filesystem?.allowGitCommonDir === "boolean"
+          ? config.filesystem.allowGitCommonDir
+          : DEFAULT_CONFIG.filesystem.allowGitCommonDir,
     },
   };
 }
@@ -676,7 +690,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   if (isPlainObject(overrides.filesystem)) {
     result.filesystem = {
       ...base.filesystem,
-      ...(overrides.filesystem as Partial<SandboxRuntimeConfig["filesystem"]>),
+      ...(overrides.filesystem as Partial<SandboxConfig["filesystem"]>),
     };
   }
   if (overrides.ignoreViolations !== undefined) {
@@ -693,9 +707,11 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
 }
 
 function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
+  const { allowGitCommonDir: _allowGitCommonDir, ...filesystem } = config.filesystem;
+
   return {
     network: config.network,
-    filesystem: config.filesystem,
+    filesystem,
     ignoreViolations: config.ignoreViolations,
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
@@ -741,26 +757,52 @@ function isSandboxWritablePath(
   return inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, cwd) === null;
 }
 
-function resolveGitMetadataDir(cwd: string): string | null {
-  if (GIT_METADATA_DIR_CACHE.has(cwd)) {
-    return GIT_METADATA_DIR_CACHE.get(cwd) ?? null;
+function resolveGitFilesystemPaths(cwd: string): GitFilesystemPaths | null {
+  if (GIT_FILESYSTEM_PATHS_CACHE.has(cwd)) {
+    return GIT_FILESYSTEM_PATHS_CACHE.get(cwd) ?? null;
   }
 
-  const result = spawnSync("git", ["rev-parse", "--git-dir"], {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
+  const result = spawnSync(
+    "git",
+    ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+    {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    },
+  );
 
   if (result.status !== 0) {
-    GIT_METADATA_DIR_CACHE.set(cwd, null);
+    GIT_FILESYSTEM_PATHS_CACHE.set(cwd, null);
     return null;
   }
 
-  const gitDir = result.stdout.trim();
-  const resolvedGitDir = gitDir ? resolve(cwd, gitDir) : null;
-  GIT_METADATA_DIR_CACHE.set(cwd, resolvedGitDir);
-  return resolvedGitDir;
+  const [gitDir, gitCommonDir] = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!gitDir || !gitCommonDir) {
+    GIT_FILESYSTEM_PATHS_CACHE.set(cwd, null);
+    return null;
+  }
+
+  const gitPaths = { gitDir, gitCommonDir };
+  GIT_FILESYSTEM_PATHS_CACHE.set(cwd, gitPaths);
+  return gitPaths;
+}
+
+function maybeAddGitMetadataWritePath(
+  runtimeConfig: SandboxRuntimeConfig,
+  path: string,
+  cwd?: string,
+): SandboxRuntimeConfig | null {
+  if (isSandboxWritablePath(runtimeConfig, path, cwd)) return null;
+  if (inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, cwd)) return null;
+
+  const nextConfig = cloneRuntimeConfig(runtimeConfig);
+  if (!mutateStringList(nextConfig.filesystem.allowWrite, "add", path)) return null;
+  return nextConfig;
 }
 
 function extractSandboxViolationLines(output: string): string[] {
@@ -1287,6 +1329,7 @@ async function handleFilesystemViolation(options: {
 interface SandboxedBashOpsOptions {
   pi: ExtensionAPI;
   getContext: () => ExtensionContext | null;
+  getSandboxConfig: () => SandboxConfig | null;
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
   getPromptMode: () => PromptMode;
   applyRuntimeConfigForSession: (
@@ -1342,23 +1385,27 @@ function maybeAllowGitMetadataWriteForSession(options: {
   ctx: ExtensionContext | null;
   cwd: string;
   runtimeConfig: SandboxRuntimeConfig | null;
+  allowGitCommonDir: boolean;
   applyRuntimeConfigForSession: (
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
   ) => void;
 }): void {
-  const { ctx, cwd, runtimeConfig, applyRuntimeConfigForSession } = options;
+  const { ctx, cwd, runtimeConfig, allowGitCommonDir, applyRuntimeConfigForSession } = options;
   if (!ctx || !runtimeConfig) return;
   if (!isSandboxWritablePath(runtimeConfig, cwd, cwd)) return;
 
-  const gitDir = resolveGitMetadataDir(cwd);
-  if (!gitDir) return;
-  if (isSandboxWritablePath(runtimeConfig, gitDir, cwd)) return;
-  if (inferSandboxRuleMatch(gitDir, runtimeConfig.filesystem.denyWrite, cwd)) return;
+  const gitPaths = resolveGitFilesystemPaths(cwd);
+  if (!gitPaths) return;
 
-  const nextConfig = cloneRuntimeConfig(runtimeConfig);
-  if (!mutateStringList(nextConfig.filesystem.allowWrite, "add", gitDir)) return;
+  let nextConfig = maybeAddGitMetadataWritePath(runtimeConfig, gitPaths.gitDir, cwd);
+  if (allowGitCommonDir && gitPaths.gitCommonDir !== gitPaths.gitDir) {
+    nextConfig =
+      maybeAddGitMetadataWritePath(nextConfig ?? runtimeConfig, gitPaths.gitCommonDir, cwd) ??
+      nextConfig;
+  }
 
+  if (!nextConfig) return;
   applyRuntimeConfigForSession(ctx, nextConfig);
 }
 
@@ -1366,6 +1413,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
   const {
     pi,
     getContext,
+    getSandboxConfig,
     getRuntimeConfig,
     getPromptMode,
     applyRuntimeConfigForSession,
@@ -1539,6 +1587,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       ctx: getContext(),
       cwd,
       runtimeConfig: getRuntimeConfig(),
+      allowGitCommonDir: getSandboxConfig()?.filesystem.allowGitCommonDir === true,
       applyRuntimeConfigForSession,
     });
 
@@ -1959,6 +2008,7 @@ export default function (pi: ExtensionAPI) {
 
   let sessionCwd = process.cwd();
   let sandboxState: SandboxState = { status: "pending" };
+  let sandboxConfig: SandboxConfig | null = null;
   let promptMode: PromptMode = DEFAULT_PROMPT_MODE;
   let sessionContext: ExtensionContext | null = null;
   let sandboxConfigPaths: SandboxConfigPath[] = [];
@@ -2154,6 +2204,7 @@ export default function (pi: ExtensionAPI) {
   const sandboxedOps = createSandboxedBashOps({
     pi,
     getContext: () => sessionContext,
+    getSandboxConfig: () => sandboxConfig,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     getPromptMode: () => promptMode,
     applyRuntimeConfigForSession,
@@ -2171,6 +2222,7 @@ export default function (pi: ExtensionAPI) {
 
   const resetRuntimeState = (): void => {
     sandboxState = { status: "pending" };
+    sandboxConfig = null;
     promptMode = DEFAULT_PROMPT_MODE;
     sandboxConfigPaths = [];
     sandboxEvents = [];
@@ -2238,6 +2290,7 @@ export default function (pi: ExtensionAPI) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
     }
     const config = loadedConfig.config;
+    sandboxConfig = config;
 
     if (!config.enabled) {
       sandboxState = { status: "bypassed", reason: "config-disabled" };
@@ -2347,6 +2400,7 @@ export default function (pi: ExtensionAPI) {
           if (parseErrors.length > 0) {
             notifySandboxConfigParseErrors(ctx, parseErrors);
           }
+          sandboxConfig = loadedConfig.config;
           runtimeConfig = await initializeSandboxRuntime(ctx, loadedConfig.config);
           if (!runtimeConfig) return;
           initializedNow = true;
@@ -2407,6 +2461,7 @@ export default function (pi: ExtensionAPI) {
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
           `    Allow Write: ${runtimeConfig.filesystem.allowWrite.join(", ") || "(none)"}`,
           `    Deny Write: ${runtimeConfig.filesystem.denyWrite.join(", ") || "(none)"}`,
+          `    allowGitCommonDir: ${sandboxConfig?.filesystem.allowGitCommonDir ? "true" : "false"}`,
           "",
           "  Advanced:",
           `    ignoreViolations: ${runtimeConfig.ignoreViolations ? "configured" : "(none)"}`,

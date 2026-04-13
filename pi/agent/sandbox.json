@@ -58,6 +58,7 @@
       "*.key",
       "~/.ssh"
     ],
+    "allowGitCommonDir": true,
     "allowWrite": [
       ".",
       "/tmp",
