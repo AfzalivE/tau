@@ -48,7 +48,6 @@ By default it sets up all agents. Pass `--codex`, `--claude`, and/or `--pi` to l
 | `git-clean-history` | Reimplement a branch on a fresh branch off `main` with a clean commit history |
 | `git-commit` | Tidy, focused commits with clear rationale in messages |
 | `homeassistant-ops` | Operate a Home Assistant instance via REST/WebSocket APIs |
-| `memory` | Project-local memory with core blocks, wiki, and sleep-based consolidation |
 | `openscad` | Create and render OpenSCAD 3D models, export STL |
 | `oracle` | Second opinion from another LLM for debugging, refactors, design, or code reviews |
 | `sentry` | Fetch and analyze Sentry issues, events, and logs |
@@ -69,7 +68,7 @@ By default it sets up all agents. Pass `--codex`, `--claude`, and/or `--pi` to l
 | insights | `/insights` | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions |
 | interlude | `ctrl+x` <small>(configurable)</small> | Stash the current message draft, send one interlude message, then restore the draft |
 | loop | `/loop` | Repeat a prompt until the agent signals success |
-| memory | `/memory` | In-repo memory system with session-start injection and manual sleep consolidation |
+| memory | `/memory` | Pi-only repo memory with core blocks, research abstracts, raw collaboration media, append-only logs, and automatic/manual dream consolidation |
 | notify |  | Terminal notification when the agent is waiting for input |
 | openai-verbosity | `/verbosity` | Set verbosity for supported OpenAI models |
 | review | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes |
