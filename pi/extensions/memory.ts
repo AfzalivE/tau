@@ -272,7 +272,7 @@ async function maybeScheduleAutoDream(
   }
 
   const noUndreamedLogs =
-    !stateFile.lastLogAt || stateFile.lastLogAt === stateFile.lastDreamedLogAt;
+    stateFile.lastLogAt !== null && stateFile.lastLogAt === stateFile.lastDreamedLogAt;
   if (noUndreamedLogs) {
     return shouldAutoDream(quickStatus, trigger) ? startAutoDream(quickStatus) : true;
   }
