@@ -795,8 +795,17 @@ async function writeStateUnsafe(cwd: string, state: MemoryState): Promise<void> 
     last_dreamed_log_at: state.lastDreamedLogAt,
     pending_compactions: state.pendingCompactions,
   };
+  const payload = `${JSON.stringify(stateFile, null, 2)}\n`;
+  const tempPath = `${paths.stateFile}.${process.pid}.${Date.now()}.tmp`;
+
   await ensureDir(path.dirname(paths.stateFile));
-  await fs.writeFile(paths.stateFile, `${JSON.stringify(stateFile, null, 2)}\n`, "utf8");
+  try {
+    await fs.writeFile(tempPath, payload, "utf8");
+    await fs.rename(tempPath, paths.stateFile);
+  } catch (error) {
+    void fs.rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function writeCompactionSummary(cwd: string, compaction: PendingCompaction): Promise<void> {
