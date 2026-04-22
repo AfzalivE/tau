@@ -19,6 +19,9 @@
  * {
  *   "enabled": true,
  *   "mode": "interactive",
+ *   "commands": {
+ *     "blocked": ["npx"]
+ *   },
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
  *     "deniedDomains": []
@@ -64,6 +67,7 @@ import {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { type BashOperations, createBashTool } from "@mariozechner/pi-coding-agent";
+import { findBlockedCommand } from "./command-policy.js";
 
 // --- Constants ---
 
@@ -72,6 +76,9 @@ const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
 const DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
+  commands: {
+    blocked: [],
+  },
   network: {
     allowedDomains: [
       "npmjs.org",
@@ -116,15 +123,20 @@ type SandboxState =
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
 
+type SandboxCommandConfig = {
+  blocked: string[];
+};
+
 type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   enabled?: boolean;
   mode?: PromptMode;
+  commands: SandboxCommandConfig;
   filesystem: SandboxRuntimeConfig["filesystem"] & {
     allowGitCommonDir?: boolean;
   };
 };
 
-type SandboxEventKind = "filesystem" | "network" | "init" | "runtime";
+type SandboxEventKind = "command" | "filesystem" | "network" | "init" | "runtime";
 type SandboxEventReason =
   | "explicit-deny-read"
   | "explicit-deny-write"
@@ -135,6 +147,7 @@ type SandboxEventReason =
   | "unsupported-platform"
   | "init-failed"
   | "already-approved-still-failed"
+  | "blocked-command"
   | "unknown";
 type SandboxEventOutcome = "blocked" | "allowed";
 type SandboxConfigPathStatus = "loaded" | "parse-error";
@@ -552,6 +565,13 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
+    commands: {
+      blocked: coerceStringArray(
+        config.commands?.blocked,
+        DEFAULT_CONFIG.commands.blocked,
+        "commands.blocked",
+      ),
+    },
     network: {
       ...config.network,
       allowedDomains: coerceStringArray(
@@ -683,6 +703,12 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
   if (overrides.mode !== undefined) {
     result.mode = normalizePromptMode(overrides.mode);
+  }
+  if (isPlainObject(overrides.commands)) {
+    result.commands = {
+      ...base.commands,
+      ...(overrides.commands as Partial<SandboxCommandConfig>),
+    };
   }
   if (isPlainObject(overrides.network)) {
     result.network = {
@@ -2060,6 +2086,27 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  function getBlockedCommands(): string[] {
+    return sandboxConfig?.commands.blocked ?? DEFAULT_CONFIG.commands.blocked;
+  }
+
+  function formatBlockedCommandReason(executable: string, blocked: string): string {
+    return `Sandbox blocked executable \`${executable}\` (matched commands.blocked entry \`${blocked}\`).`;
+  }
+
+  function recordBlockedCommandEvent(command: string, blocked: string, executable: string): void {
+    recordSandboxEvent({
+      timestamp: Date.now(),
+      kind: "command",
+      outcome: "blocked",
+      reason: "blocked-command",
+      target: executable,
+      command,
+      cwd: sessionCwd,
+      summary: `command matched commands.blocked entry \`${blocked}\``,
+    });
+  }
+
   function applyRuntimeConfigForSession(
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
@@ -2268,6 +2315,37 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on("tool_call", (event) => {
+    if (event.toolName !== "bash") return undefined;
+
+    const command = typeof event.input.command === "string" ? event.input.command.trim() : "";
+    if (!command) return undefined;
+
+    const match = findBlockedCommand(command, getBlockedCommands());
+    if (!match) return undefined;
+
+    recordBlockedCommandEvent(command, match.blocked, match.executable);
+    return { block: true, reason: formatBlockedCommandReason(match.rawExecutable, match.blocked) };
+  });
+
+  pi.on("user_bash", (event) => {
+    const command = event.command.trim();
+    if (!command) return undefined;
+
+    const match = findBlockedCommand(command, getBlockedCommands());
+    if (!match) return undefined;
+
+    recordBlockedCommandEvent(command, match.blocked, match.executable);
+    return {
+      result: {
+        output: `${formatBlockedCommandReason(match.rawExecutable, match.blocked)}\n`,
+        exitCode: 126,
+        cancelled: false,
+        truncated: false,
+      },
+    };
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     setSandboxStatus(ctx, false);
     sessionContext = ctx;
@@ -2465,6 +2543,9 @@ export default function (pi: ExtensionAPI) {
           `    Allow Write: ${runtimeConfig.filesystem.allowWrite.join(", ") || "(none)"}`,
           `    Deny Write: ${runtimeConfig.filesystem.denyWrite.join(", ") || "(none)"}`,
           `    allowGitCommonDir: ${sandboxConfig?.filesystem.allowGitCommonDir ? "true" : "false"}`,
+          "",
+          "  Commands:",
+          `    Blocked: ${sandboxConfig?.commands.blocked.join(", ") || "(none)"}`,
           "",
           "  Advanced:",
           `    ignoreViolations: ${runtimeConfig.ignoreViolations ? "configured" : "(none)"}`,
