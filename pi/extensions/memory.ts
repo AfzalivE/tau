@@ -1689,91 +1689,109 @@ function parsePossiblyWrappedJson(raw: string): unknown {
 export default function memoryExtension(pi: ExtensionAPI): void {
   const autoDreamState: AutoDreamState = { promise: null };
   let pendingStartupDreamCheck = false;
+  let memoryToolsRegistered = false;
 
-  pi.registerTool(
-    defineTool({
-      name: "memory_update_block",
-      label: "Memory Update Block",
-      description: `Update one .agents/memory/core block while enforcing the shared ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character caps`,
-      promptSnippet: `Update one core memory block in .agents/memory/core with ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character cap enforcement`,
-      promptGuidelines: [
-        "Use this tool when updating .agents/memory/core/directives.md, context.md, focus.md, or pending.md.",
-        `If a write would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, run memory_dream or remove content first.`,
-      ],
-      parameters: MEMORY_UPDATE_BLOCK_PARAMS,
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const result = await updateCoreBlock(ctx.cwd, params.name, params.content);
+  const registerMemoryTools = (): void => {
+    if (memoryToolsRegistered) {
+      return;
+    }
+    memoryToolsRegistered = true;
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Updated .agents/memory/core/${params.name}.md (${result.totalLines}/${CORE_LINE_CAP} lines, ${result.totalChars}/${CORE_CHAR_CAP} chars).`,
+    pi.registerTool(
+      defineTool({
+        name: "memory_update_block",
+        label: "Memory Update Block",
+        description: `Update one .agents/memory/core block while enforcing the shared ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character caps`,
+        promptSnippet: `Update one core memory block in .agents/memory/core with ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character cap enforcement`,
+        promptGuidelines: [
+          "Use this tool when updating .agents/memory/core/directives.md, context.md, focus.md, or pending.md.",
+          `If a write would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, run memory_dream or remove content first.`,
+        ],
+        parameters: MEMORY_UPDATE_BLOCK_PARAMS,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const result = await updateCoreBlock(ctx.cwd, params.name, params.content);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Updated .agents/memory/core/${params.name}.md (${result.totalLines}/${CORE_LINE_CAP} lines, ${result.totalChars}/${CORE_CHAR_CAP} chars).`,
+              },
+            ],
+            details: {
+              block: params.name,
+              total_lines: result.totalLines,
+              total_chars: result.totalChars,
             },
-          ],
-          details: {
-            block: params.name,
-            total_lines: result.totalLines,
-            total_chars: result.totalChars,
-          },
-        };
-      },
-    }),
-  );
+          };
+        },
+      }),
+    );
 
-  pi.registerTool(
-    defineTool({
-      name: "memory_append_log",
-      label: "Memory Append Log",
-      description: "Append an entry to .agents/memory/log.md using the repo memory log format",
-      promptSnippet: "Append an entry to the repo memory log at .agents/memory/log.md",
-      promptGuidelines: [
-        "Use this tool for important decisions, discoveries, plans, experiments, prompt ingests, and attachment additions worth remembering.",
-        "Use importance labels high, medium, or low.",
-        "If this entry replaces or corrects prior memory, set supersedes and/or invalidates links explicitly.",
-        "The memory log is append-only. Do not rewrite or truncate older entries.",
-      ],
-      parameters: MEMORY_APPEND_LOG_PARAMS,
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const entry = await appendMemoryLog(ctx.cwd, {
-          type: params.type,
-          title: params.title,
-          body: params.body,
-          importance: params.importance,
-          supersedes: params.supersedes,
-          invalidates: params.invalidates,
-        });
+    pi.registerTool(
+      defineTool({
+        name: "memory_append_log",
+        label: "Memory Append Log",
+        description: "Append an entry to .agents/memory/log.md using the repo memory log format",
+        promptSnippet: "Append an entry to the repo memory log at .agents/memory/log.md",
+        promptGuidelines: [
+          "Use this tool for important decisions, discoveries, plans, experiments, prompt ingests, and attachment additions worth remembering.",
+          "Use importance labels high, medium, or low.",
+          "If this entry replaces or corrects prior memory, set supersedes and/or invalidates links explicitly.",
+          "The memory log is append-only. Do not rewrite or truncate older entries.",
+        ],
+        parameters: MEMORY_APPEND_LOG_PARAMS,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const entry = await appendMemoryLog(ctx.cwd, {
+            type: params.type,
+            title: params.title,
+            body: params.body,
+            importance: params.importance,
+            supersedes: params.supersedes,
+            invalidates: params.invalidates,
+          });
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Appended .agents/memory/log.md entry: ${entry.title}.`,
-            },
-          ],
-          details: entry,
-        };
-      },
-    }),
-  );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Appended .agents/memory/log.md entry: ${entry.title}.`,
+              },
+            ],
+            details: entry,
+          };
+        },
+      }),
+    );
 
-  pi.registerTool(
-    defineTool({
-      name: "memory_dream",
-      label: "Memory Dream",
-      description:
-        "Consolidate repo memory into .agents/memory/core from newer log entries and compaction context",
-      promptSnippet: "Consolidate repo memory with dream-based core compression",
-      promptGuidelines: [
-        "Dream is the only consolidation mechanism for .agents/memory/core.",
-        "Use this tool when logs have accumulated, core needs compression, or recent compaction context should be folded into memory.",
-      ],
-      parameters: MEMORY_DREAM_PARAMS,
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        return toolDream(ctx.cwd, ctx, params.reason);
-      },
-    }),
-  );
+    pi.registerTool(
+      defineTool({
+        name: "memory_dream",
+        label: "Memory Dream",
+        description:
+          "Consolidate repo memory into .agents/memory/core from newer log entries and compaction context",
+        promptSnippet: "Consolidate repo memory with dream-based core compression",
+        promptGuidelines: [
+          "Dream is the only consolidation mechanism for .agents/memory/core.",
+          "Use this tool when logs have accumulated, core needs compression, or recent compaction context should be folded into memory.",
+        ],
+        parameters: MEMORY_DREAM_PARAMS,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          return toolDream(ctx.cwd, ctx, params.reason);
+        },
+      }),
+    );
+  };
+
+  const maybeRegisterMemoryTools = async (cwd: string): Promise<void> => {
+    if (memoryToolsRegistered) {
+      return;
+    }
+
+    if (await pathExists(getMemoryPaths(cwd).memoryRoot)) {
+      registerMemoryTools();
+    }
+  };
 
   pi.registerCommand("memory", {
     description: "Manage project-local memory in .agents/memory/",
@@ -1788,6 +1806,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
       switch (parsed.command) {
         case "init": {
           const result = await initMemory(ctx.cwd);
+          registerMemoryTools();
           notify(ctx, formatInitResult(result), "info");
           return;
         }
@@ -1828,6 +1847,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    await maybeRegisterMemoryTools(ctx.cwd);
     pendingStartupDreamCheck = !(await maybeScheduleAutoDream(
       ctx.cwd,
       ctx,
