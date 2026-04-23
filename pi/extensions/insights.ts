@@ -770,7 +770,7 @@ async function listTargets(
 
   const sessionFiles =
     scope === "project"
-      ? await listProjectSessionFiles(ctx.sessionManager.getSessionDir(), progress)
+      ? await listProjectSessionFiles(ctx.cwd, ctx.sessionManager.getSessionDir(), progress)
       : await listAllSessionFiles(progress);
 
   throwIfAborted(signal);
@@ -778,10 +778,11 @@ async function listTargets(
 }
 
 async function listProjectSessionFiles(
+  cwd: string,
   sessionDir: string,
   onProgress: (current: number, total: number) => void,
 ): Promise<string[]> {
-  const currentCwd = path.resolve(process.cwd());
+  const currentCwd = path.resolve(cwd);
   const sessions = await SessionManager.list(currentCwd, sessionDir, onProgress);
   return sessions
     .filter((session) => path.resolve(session.cwd || currentCwd) === currentCwd)
