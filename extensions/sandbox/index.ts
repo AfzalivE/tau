@@ -21,7 +21,8 @@
  *   "mode": "interactive",
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
- *     "deniedDomains": []
+ *     "deniedDomains": [],
+ *     "allowMachLookup": []
  *   },
  *   "filesystem": {
  *     "denyRead": ["~/.ssh", "~/.aws"],
@@ -71,6 +72,14 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  getMachErrorFallback,
+  getMachLookupArgumentCompletions,
+  handleMachLookupViolation,
+  isValidMachLookupRule,
+  mutateMachLookupAllowList,
+  type MachViolationResolution,
+} from "./mach-violation.js";
 import type {
   ListOp,
   PromptMode,
@@ -162,6 +171,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
     deniedDomains: [],
     allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
+    allowMachLookup: [],
   },
   filesystem: {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
@@ -242,13 +252,14 @@ type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   };
 };
 
-type SandboxEventKind = "filesystem" | "network" | "init" | "runtime";
+type SandboxEventKind = "filesystem" | "network" | "mach" | "init" | "runtime";
 type SandboxEventReason =
   | "explicit-deny-read"
   | "explicit-deny-write"
   | "explicit-deny-domain"
   | "missing-allow-write"
   | "missing-allowed-domain"
+  | "missing-mach-lookup"
   | "missing-dependencies"
   | "unsupported-platform"
   | "init-failed"
@@ -369,6 +380,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox doctor",
     "  /sandbox mode <interactive|non-interactive>",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
+    "  /sandbox mach-lookup <add|remove> <service>",
     "  /sandbox filesystem <deny-read|allow-write|deny-write> <add|remove> <path>",
     "",
     "Startup flags:",
@@ -424,6 +436,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "doctor", label: "doctor" },
   { value: "mode ", label: "mode" },
   { value: "network ", label: "network" },
+  { value: "mach-lookup ", label: "mach-lookup" },
   { value: "filesystem ", label: "filesystem" },
   { value: "help", label: "help" },
 ];
@@ -550,6 +563,17 @@ function getSandboxArgumentCompletions(
       return getStringValueCompletions(valueBase, tokens[3] ?? "", values);
     }
     return null;
+  }
+
+  if (subcommand === "mach-lookup") {
+    return getMachLookupArgumentCompletions({
+      tokens,
+      endsWithSpace,
+      runtimeConfig,
+      operationOptions: SANDBOX_LIST_OPERATION_COMPLETIONS,
+      getCommandCompletions,
+      getStringValueCompletions,
+    });
   }
 
   if (subcommand === "filesystem") {
@@ -682,6 +706,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         config.network?.deniedDomains,
         DEFAULT_CONFIG.network.deniedDomains,
         "network.deniedDomains",
+      ),
+      allowMachLookup: coerceStringArray(
+        config.network?.allowMachLookup,
+        DEFAULT_CONFIG.network.allowMachLookup ?? [],
+        "network.allowMachLookup",
       ),
       allowUnixSockets: coerceOptionalStringArray(
         config.network?.allowUnixSockets,
@@ -1476,10 +1505,7 @@ const FILESYSTEM_ALLOW_RETRY_OPTION = "Allow and retry now";
 const FILESYSTEM_ALLOW_ADAPT_OPTION = "Allow but adapt for side-effects";
 const FILESYSTEM_DENY_OPTION = "Deny";
 
-function getFilesystemPromptOptions(
-  _violation: FilesystemViolation,
-  autoRetryAvailable: boolean,
-): string[] {
+function getViolationPromptOptions(autoRetryAvailable: boolean): string[] {
   if (!autoRetryAvailable) {
     return [FILESYSTEM_ALLOW_ADAPT_OPTION, FILESYSTEM_DENY_OPTION];
   }
@@ -1647,7 +1673,7 @@ async function handleFilesystemViolation(options: {
       const selection = await withPromptSignal(pi, () =>
         ctx.ui.select(
           `Sandbox blocked filesystem ${target}`,
-          getFilesystemPromptOptions(violation, autoRetryAvailable),
+          getViolationPromptOptions(autoRetryAvailable),
         ),
       );
       const decision = parseFilesystemPromptSelection(selection, autoRetryAvailable);
@@ -1792,6 +1818,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     recordEvent,
   } = options;
   const pendingFilesystemPrompts = new Map<string, Promise<FilesystemViolationResolution | null>>();
+  const pendingMachLookupPrompts = new Map<string, Promise<MachViolationResolution | null>>();
 
   let executionQueue: Promise<void> = Promise.resolve();
 
@@ -2118,6 +2145,42 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         autoRetryAvailable,
         runtimeProtectedWriteViolations,
       });
+
+      if (!resolution) {
+        resolution = await handleMachLookupViolation({
+          ctx: getContext(),
+          promptMode: getPromptMode(),
+          runtimeConfig,
+          output: annotatedOutput,
+          command,
+          cwd,
+          pendingPrompts: pendingMachLookupPrompts,
+          applyRuntimeConfigForSession,
+          existingViolationCount,
+          recordEvent,
+          autoRetryAvailable,
+          withPromptSignal: (run) => withPromptSignal(pi, run),
+          getPromptOptions: getViolationPromptOptions,
+          parsePromptSelection: parseFilesystemPromptSelection,
+          escapeSlashCommandArg,
+        });
+      }
+
+      const machErrorFallback =
+        !resolution &&
+        getMachErrorFallback({
+          output: attempt.combinedOutput,
+          command,
+          cwd,
+        });
+      if (machErrorFallback) {
+        recordEvent?.(machErrorFallback.event);
+        postamble = appendOutputPostamble(
+          postamble,
+          machErrorFallback.message,
+          attempt.combinedOutput,
+        );
+      }
 
       if (resolution) {
         postamble = appendOutputPostamble(postamble, resolution.message, attempt.combinedOutput);
@@ -2956,6 +3019,9 @@ export default function (pi: ExtensionAPI) {
           `    allowAllUnixSockets: ${runtimeConfig.network.allowAllUnixSockets ? "true" : "false"}`,
           `    allowUnixSockets: ${runtimeConfig.network.allowUnixSockets?.join(", ") || "(none)"}`,
           "",
+          "  Mach lookup:",
+          `    Allowed: ${runtimeConfig.network.allowMachLookup?.join(", ") || "(none)"}`,
+          "",
           "  Filesystem:",
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
           `    Allow Read: ${runtimeConfig.filesystem.allowRead?.join(", ") || "(none)"}`,
@@ -3030,6 +3096,37 @@ export default function (pi: ExtensionAPI) {
 
         applyRuntimeConfigForSession(ctx, nextConfig);
         notify(ctx, `Updated network ${list} list (${op}: ${domain})`, "info");
+        return;
+      }
+
+      if (subcommand === "mach-lookup") {
+        const runtimeConfig = requireRuntimeConfig(ctx, sandboxState);
+        if (!runtimeConfig) return;
+
+        const op = tokens[1]?.toLowerCase() as ListOp | undefined;
+        const service = tokens[2]?.trim() ?? "";
+
+        if (
+          (op !== "add" && op !== "remove") ||
+          tokens.length !== 3 ||
+          !isValidMachLookupRule(service)
+        ) {
+          notify(ctx, "Usage: /sandbox mach-lookup <add|remove> <service>", "warning");
+          return;
+        }
+
+        const nextConfig = cloneRuntimeConfig(runtimeConfig);
+        const changed = mutateMachLookupAllowList(nextConfig, op, service);
+        if (!changed) {
+          notify(
+            ctx,
+            `No change: mach-lookup allow list already ${op === "add" ? "contains" : "omits"} ${service}`,
+          );
+          return;
+        }
+
+        applyRuntimeConfigForSession(ctx, nextConfig);
+        notify(ctx, `Updated mach-lookup allow list (${op}: ${service})`, "info");
         return;
       }
 
