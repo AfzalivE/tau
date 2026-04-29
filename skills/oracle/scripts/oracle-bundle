@@ -130,10 +130,31 @@ done
 
 include_patterns=()
 exclude_patterns=()
+explicit_files=()
+
+add_pattern() {
+  local is_exclude="$1"
+  local pattern="$2"
+  if [[ "$is_exclude" -eq 1 ]]; then
+    exclude_patterns+=("$pattern")
+  else
+    include_patterns+=("$pattern")
+  fi
+}
+
+add_exact_file() {
+  local is_exclude="$1"
+  local file="$2"
+  if [[ "$is_exclude" -eq 1 ]]; then
+    exclude_patterns+=("$file")
+  else
+    explicit_files+=("$file")
+  fi
+}
 
 for sel in "${selectors[@]}"; do
   is_exclude=0
-  if [[ "$sel" == !* ]]; then
+  if [[ "${sel:0:1}" == "!" ]]; then
     is_exclude=1
     sel="${sel:1}"
   fi
@@ -148,69 +169,96 @@ for sel in "${selectors[@]}"; do
     if [[ "$sel" == "${ROOT_DIR}/"* ]]; then
       sel="${sel#"${ROOT_DIR}/"}"
     else
-      echo "error: absolute paths must be under repo root: ${sel}" >&2
-      exit 2
+      if [[ "$is_exclude" -eq 1 ]]; then
+        add_pattern "$is_exclude" "$sel"
+        continue
+      fi
+      if [[ ! -f "$sel" ]]; then
+        echo "error: absolute paths outside repo must name an existing file: ${sel}" >&2
+        exit 2
+      fi
+      add_exact_file "$is_exclude" "$sel"
+      continue
     fi
   fi
 
-  if [[ -e "$sel" && -d "$sel" ]] && ! has_glob_chars "$sel"; then
+  sel="${sel#./}"
+
+  if [[ -f "$sel" ]]; then
+    add_exact_file "$is_exclude" "$sel"
+    continue
+  fi
+
+  if [[ -d "$sel" ]] && ! has_glob_chars "$sel"; then
     sel="${sel}/**"
   fi
 
-  if [[ $is_exclude -eq 1 ]]; then
-    exclude_patterns+=("$sel")
-  else
-    include_patterns+=("$sel")
-  fi
+  add_pattern "$is_exclude" "$sel"
 done
 
-if [[ "${#include_patterns[@]}" -eq 0 ]]; then
+if [[ "${#include_patterns[@]}" -eq 0 && "${#explicit_files[@]}" -eq 0 ]]; then
   echo "error: no include patterns provided (need at least one non-! --file)" >&2
   exit 2
 fi
 
 all_files=()
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  while IFS= read -r f; do
-    [[ -n "$f" ]] && all_files+=("$f")
-  done < <(git ls-files -co --exclude-standard)
-else
-  while IFS= read -r f; do
-    f="${f#./}"
-    [[ -n "$f" ]] && all_files+=("$f")
-  done < <(find . -type f -print)
+if [[ "${#include_patterns[@]}" -gt 0 ]]; then
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && all_files+=("$f")
+    done < <(git ls-files -co --exclude-standard)
+  else
+    while IFS= read -r f; do
+      f="${f#./}"
+      [[ -n "$f" ]] && all_files+=("$f")
+    done < <(find . -type f -print)
+  fi
 fi
 
 selected=()
 skipped=()
 
+select_file() {
+  local file="$1"
+  local size=""
+
+  [[ -z "$file" ]] && return 0
+
+  if [[ "${#exclude_patterns[@]}" -gt 0 ]] && matches_any_pattern "$file" "${exclude_patterns[@]}"; then
+    return 0
+  fi
+
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+
+  size="$(file_size_bytes "$file")"
+  if [[ "$size" -gt "$MAX_BYTES" ]]; then
+    skipped+=("${file} (too large: ${size} bytes)")
+    return 0
+  fi
+
+  selected+=("$file")
+}
+
+for file in "${explicit_files[@]}"; do
+  select_file "$file"
+done
+
 for rel in "${all_files[@]}"; do
   [[ -z "$rel" ]] && continue
+
   path_has_ignored_dir "$rel" && continue
 
   if ! matches_any_pattern "$rel" "${include_patterns[@]}"; then
     continue
   fi
 
-  if [[ "${#exclude_patterns[@]}" -gt 0 ]] && matches_any_pattern "$rel" "${exclude_patterns[@]}"; then
-    continue
-  fi
-
-  if [[ ! -f "$rel" ]]; then
-    continue
-  fi
-
-  size="$(file_size_bytes "$rel")"
-  if [[ "$size" -gt "$MAX_BYTES" ]]; then
-    skipped+=("${rel} (too large: ${size} bytes)")
-    continue
-  fi
-
-  selected+=("$rel")
+  select_file "$rel"
 done
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  printf '%s\n' "${selected[@]}" | LC_ALL=C sort
+  printf '%s\n' "${selected[@]}" | LC_ALL=C sort -u
   if [[ "${#skipped[@]}" -gt 0 ]]; then
     printf '\nSkipped:\n' >&2
     printf '%s\n' "${skipped[@]}" >&2
@@ -219,7 +267,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 printf '# Task\n\n%s\n\n# Files\n' "$(trim "$PROMPT")"
-printf '%s\n' "${selected[@]}" | LC_ALL=C sort | while IFS= read -r rel; do
+printf '%s\n' "${selected[@]}" | LC_ALL=C sort -u | while IFS= read -r rel; do
   [[ -z "$rel" ]] && continue
   printf '\n## %s\n\n```\n' "$rel"
   cat "$rel"
