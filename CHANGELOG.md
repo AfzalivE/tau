@@ -1,0 +1,25 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Added the `tau-dark` Pi theme.
+
+### Changed
+
+- Allowed Oracle reviews to include scratch diff files such as `/tmp/review.diff`.
+
+### Removed
+
+- Removed the `answer` extension keyboard shortcut; use `/answer` instead.
+
+## [0.1.0] - 2026-04-29
+
+### Added
+
+- Published the initial Tau package snapshot, based on `goncalossilva/.agents` as of 2026-04-29.
