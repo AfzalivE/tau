@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-29
+
+### Changed
+
+- Improved npm package READMEs with feature summaries and command descriptions.
+
 ## [0.1.1] - 2026-04-29
 
 ### Added
