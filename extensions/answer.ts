@@ -11,7 +11,7 @@
  */
 
 import { complete, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { BorderedLoader } from "@mariozechner/pi-coding-agent";
 import {
   type Component,
@@ -464,138 +464,131 @@ class QnAComponent implements Component {
 }
 
 export default function (pi: ExtensionAPI) {
-  const answerHandler = async (ctx: ExtensionContext) => {
-    if (!ctx.hasUI) {
-      ctx.ui.notify("answer requires interactive mode", "error");
-      return;
-    }
+  pi.registerCommand("answer", {
+    description: "Extract questions from last assistant message into interactive Q&A",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify("answer requires interactive mode", "error");
+        return;
+      }
 
-    if (!ctx.model) {
-      ctx.ui.notify("No model selected", "error");
-      return;
-    }
+      if (!ctx.model) {
+        ctx.ui.notify("No model selected", "error");
+        return;
+      }
 
-    // Find the last assistant message on the current branch
-    const branch = ctx.sessionManager.getBranch();
-    let lastAssistantText: string | undefined;
+      // Find the last assistant message on the current branch
+      const branch = ctx.sessionManager.getBranch();
+      let lastAssistantText: string | undefined;
 
-    for (let i = branch.length - 1; i >= 0; i--) {
-      const entry = branch[i];
-      if (entry.type === "message") {
-        const msg = entry.message;
-        if ("role" in msg && msg.role === "assistant") {
-          if (msg.stopReason !== "stop") {
-            ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
-            return;
-          }
-          const textParts = msg.content
-            .filter((c): c is { type: "text"; text: string } => c.type === "text")
-            .map((c) => c.text);
-          if (textParts.length > 0) {
-            lastAssistantText = textParts.join("\n");
-            break;
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const entry = branch[i];
+        if (entry.type === "message") {
+          const msg = entry.message;
+          if ("role" in msg && msg.role === "assistant") {
+            if (msg.stopReason !== "stop") {
+              ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
+              return;
+            }
+            const textParts = msg.content
+              .filter((c): c is { type: "text"; text: string } => c.type === "text")
+              .map((c) => c.text);
+            if (textParts.length > 0) {
+              lastAssistantText = textParts.join("\n");
+              break;
+            }
           }
         }
       }
-    }
 
-    if (!lastAssistantText) {
-      ctx.ui.notify("No assistant messages found", "error");
-      return;
-    }
+      if (!lastAssistantText) {
+        ctx.ui.notify("No assistant messages found", "error");
+        return;
+      }
 
-    // Select the best model for extraction (prefer a fast model in the current family).
-    const extractionSelection = await selectExtractionModel(ctx.model, ctx.modelRegistry);
-    if (!extractionSelection) {
-      ctx.ui.notify("No configured Pi model is available for question extraction", "error");
-      return;
-    }
+      // Select the best model for extraction (prefer a fast model in the current family).
+      const extractionSelection = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+      if (!extractionSelection) {
+        ctx.ui.notify("No configured Pi model is available for question extraction", "error");
+        return;
+      }
 
-    // Run extraction with loader UI
-    const extractionResult = await ctx.ui.custom<ExtractionResult | null>(
-      (tui, theme, _kb, done) => {
-        const loader = new BorderedLoader(
-          tui,
-          theme,
-          `Extracting questions using ${extractionSelection.model.id}...`,
-        );
-        loader.onAbort = () => done(null);
+      // Run extraction with loader UI
+      const extractionResult = await ctx.ui.custom<ExtractionResult | null>(
+        (tui, theme, _kb, done) => {
+          const loader = new BorderedLoader(
+            tui,
+            theme,
+            `Extracting questions using ${extractionSelection.model.id}...`,
+          );
+          loader.onAbort = () => done(null);
 
-        const doExtract = async () => {
-          const userMessage: UserMessage = {
-            role: "user",
-            content: [{ type: "text", text: lastAssistantText! }],
-            timestamp: Date.now(),
+          const doExtract = async () => {
+            const userMessage: UserMessage = {
+              role: "user",
+              content: [{ type: "text", text: lastAssistantText! }],
+              timestamp: Date.now(),
+            };
+
+            const response = await complete(
+              extractionSelection.model,
+              { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+              {
+                apiKey: extractionSelection.apiKey,
+                headers: extractionSelection.headers,
+                signal: loader.signal,
+              },
+            );
+
+            if (response.stopReason === "aborted") {
+              return null;
+            }
+
+            const responseText = response.content
+              .filter((c): c is { type: "text"; text: string } => c.type === "text")
+              .map((c) => c.text)
+              .join("\n");
+
+            return parseExtractionResult(responseText);
           };
 
-          const response = await complete(
-            extractionSelection.model,
-            { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            {
-              apiKey: extractionSelection.apiKey,
-              headers: extractionSelection.headers,
-              signal: loader.signal,
-            },
-          );
+          doExtract()
+            .then(done)
+            .catch(() => done(null));
 
-          if (response.stopReason === "aborted") {
-            return null;
-          }
+          return loader;
+        },
+      );
 
-          const responseText = response.content
-            .filter((c): c is { type: "text"; text: string } => c.type === "text")
-            .map((c) => c.text)
-            .join("\n");
+      if (extractionResult === null) {
+        ctx.ui.notify("Cancelled", "info");
+        return;
+      }
 
-          return parseExtractionResult(responseText);
-        };
+      if (extractionResult.questions.length === 0) {
+        ctx.ui.notify("No questions found in the last message", "info");
+        return;
+      }
 
-        doExtract()
-          .then(done)
-          .catch(() => done(null));
+      // Show the Q&A component
+      const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
+        return new QnAComponent(extractionResult.questions, tui, done);
+      });
 
-        return loader;
-      },
-    );
+      if (answersResult === null) {
+        ctx.ui.notify("Cancelled", "info");
+        return;
+      }
 
-    if (extractionResult === null) {
-      ctx.ui.notify("Cancelled", "info");
-      return;
-    }
-
-    if (extractionResult.questions.length === 0) {
-      ctx.ui.notify("No questions found in the last message", "info");
-      return;
-    }
-
-    // Show the Q&A component
-    const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-      return new QnAComponent(extractionResult.questions, tui, done);
-    });
-
-    if (answersResult === null) {
-      ctx.ui.notify("Cancelled", "info");
-      return;
-    }
-
-    // Send the answers directly as a message and trigger a turn
-    pi.sendMessage(
-      {
-        customType: "answers",
-        content: "Here are my answers to your questions:\n\n" + answersResult,
-        display: true,
-      },
-      { triggerTurn: true },
-    );
-  };
-
-  pi.registerCommand("answer", {
-    description: "Extract questions from last assistant message into interactive Q&A",
-    handler: (_args, ctx) => answerHandler(ctx),
-  });
-
-  pi.registerShortcut("ctrl+.", {
-    description: "Extract and answer questions",
-    handler: answerHandler,
+      // Send the answers directly as a message and trigger a turn
+      pi.sendMessage(
+        {
+          customType: "answers",
+          content: "Here are my answers to your questions:\n\n" + answersResult,
+          display: true,
+        },
+        { triggerTurn: true },
+      );
+    },
   });
 }
