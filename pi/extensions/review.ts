@@ -1215,10 +1215,18 @@ async function checkoutPr(
   pi: ExtensionAPI,
   prNumber: number,
 ): Promise<{ ok: boolean; error?: string }> {
-  const { stdout, stderr, code } = await pi.exec("gh", ["pr", "checkout", String(prNumber)]);
-  if (code !== 0) {
-    return { ok: false, error: (stderr || stdout || "Failed to checkout PR").trim() };
+  const fetch = await runGit(pi, ["fetch", "origin", `refs/pull/${prNumber}/head`]);
+  if (fetch.code !== 0) {
+    const error = (fetch.stderr || fetch.stdout || "Failed to fetch PR").trim();
+    return { ok: false, error };
   }
+
+  const checkout = await runGit(pi, ["switch", "--detach", "FETCH_HEAD"]);
+  if (checkout.code !== 0) {
+    const error = (checkout.stderr || checkout.stdout || "Failed to checkout PR").trim();
+    return { ok: false, error };
+  }
+
   return { ok: true };
 }
 
