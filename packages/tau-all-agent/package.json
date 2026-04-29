@@ -2,12 +2,27 @@
   "name": "tau-all-agent",
   "version": "0.1.2",
   "private": true,
-  "description": "Full Tau distribution for Pi",
+  "description": "Full Tau package for Pi with coding workflows, web search, sandboxing, memory, Telegram, Home Assistant, OpenSCAD, skills, and a theme",
   "keywords": [
+    "agent-tools",
+    "code-review",
+    "coding-agent",
+    "home-assistant",
+    "memory",
+    "openscad",
+    "pi",
     "pi-extension",
     "pi-package",
-    "pi-skill"
+    "pi-skill",
+    "pi-theme",
+    "sandbox",
+    "telegram",
+    "websearch"
   ],
+  "homepage": "https://github.com/goncalossilva/tau#readme",
+  "bugs": {
+    "url": "https://github.com/goncalossilva/tau/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

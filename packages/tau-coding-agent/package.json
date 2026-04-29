@@ -2,12 +2,24 @@
   "name": "tau-coding-agent",
   "version": "0.1.2",
   "private": true,
-  "description": "Coding-focused Tau distribution for Pi",
+  "description": "Opinionated Pi package with web search, review workflows, sandboxing, memory, usage reporting, skills, and a theme",
   "keywords": [
+    "agent-tools",
+    "code-review",
+    "coding-agent",
+    "memory",
+    "pi",
     "pi-extension",
     "pi-package",
-    "pi-skill"
+    "pi-skill",
+    "pi-theme",
+    "sandbox",
+    "websearch"
   ],
+  "homepage": "https://github.com/goncalossilva/tau#readme",
+  "bugs": {
+    "url": "https://github.com/goncalossilva/tau/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
