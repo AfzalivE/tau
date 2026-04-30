@@ -1,6 +1,7 @@
 ---
 name: homeassistant-ops
 description: "Operate a Home Assistant instance via the official REST/WebSocket APIs and backups, with safe plan/apply workflows for bulk, reviewable changes."
+disable-model-invocation: true
 ---
 
 # Home Assistant Ops
