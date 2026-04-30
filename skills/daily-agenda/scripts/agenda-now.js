@@ -4,8 +4,16 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const brainRoot = path.join(os.homedir(), ".agents", "agent-brain");
+const brainRoot = resolveBrainRoot();
 const agendaMocPath = path.join(brainRoot, "Agenda MOC.md");
+
+function resolveBrainRoot() {
+  if (process.env.AGENT_BRAIN_DIR) {
+    return path.resolve(process.env.AGENT_BRAIN_DIR);
+  }
+
+  return path.join(os.homedir(), ".agents", "agent-brain");
+}
 
 function pad(value) {
   return String(value).padStart(2, "0");

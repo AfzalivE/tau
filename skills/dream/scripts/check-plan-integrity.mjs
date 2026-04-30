@@ -5,7 +5,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const DEFAULT_VAULT_DIR = path.join(process.env.HOME ?? "", ".agents", "agent-brain");
+const DEFAULT_VAULT_DIR = process.env.AGENT_BRAIN_DIR
+  ? path.resolve(process.env.AGENT_BRAIN_DIR)
+  : path.join(process.env.HOME ?? "", ".agents", "agent-brain");
 const MIN_SHRINK_RATIO = 0.85;
 const MIN_RETENTION_RATIO = 0.93;
 const MAX_ABSOLUTE_LINE_CHANGES = 2;

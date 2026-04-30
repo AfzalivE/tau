@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SKILL_DIR="$HOME/.agents/skills/ms-openapi-explorer"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CACHE_DIR="$SKILL_DIR/cache"
 DOMAINS_DIR="$CACHE_DIR/domains"
 FULL_SPEC="$CACHE_DIR/graph-v1.0-openapi.yaml"

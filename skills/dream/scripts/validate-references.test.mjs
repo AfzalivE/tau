@@ -4,10 +4,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
-const SCRIPT = "/Users/afzal/.agents/skills/dream/scripts/validate-references.mjs";
+const SCRIPT = fileURLToPath(new URL("./validate-references.mjs", import.meta.url));
 
 test("reports broken wikilinks with a likely suggestion", async () => {
   const vaultDir = await createVault({

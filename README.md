@@ -29,7 +29,44 @@ pi install -l npm:tau-coding-agent
 
 Tau does not include agent configuration; those files are highly personal.
 
-Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
+Check out [AfzalivE/.agents](https://github.com/AfzalivE/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
+
+## Extensions in this fork
+
+| Extension         | Command      | Description                                                              |
+| ----------------- | ------------ | ------------------------------------------------------------------------ |
+| `command-preview` | `ctrl+o`     | Tri-state tool output cycle: standard, expanded, and collapsed.          |
+| `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
+| `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
+
+## Skills in this fork
+
+| Skill                           | Description                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `diagnose`                      | Disciplined diagnosis loop for hard bugs and performance regressions.                       |
+| `grill-me`                      | Interview the user relentlessly about a plan or design until reaching shared understanding. |
+| `grill-with-docs`               | Stress-test a plan against the project's domain model, terminology, and ADRs.               |
+| `improve-codebase-architecture` | Find deepening opportunities informed by `CONTEXT.md` and `docs/adr/`.                      |
+| `setup-matt-pocock-skills`      | Scaffold repo config for issue tracker, triage labels, and domain doc layout.               |
+| `tdd`                           | Test-driven development with a red-green-refactor loop.                                     |
+| `to-issues`                     | Break a plan, spec, or PRD into independently grabbable issues.                             |
+| `to-prd`                        | Turn the current conversation context into a PRD and publish it to the issue tracker.       |
+| `triage`                        | Triage issues through a state machine driven by triage roles.                               |
+| `write-a-skill`                 | Create new agent skills with proper structure and bundled resources.                         |
+| `zoom-out`                      | Give broader codebase context and a higher-level perspective for unfamiliar areas.           |
+| `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
+| `daily-agenda`                  | Retrieve the active daily agenda against the current local time.                             |
+| `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |
+| `gh`                            | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                             |
+| `git-rebase-check`              | Verify that a rebased branch preserved the same cumulative patch.                            |
+| `git-worktree`                  | Manage git worktrees for multiple branches in separate directories.                          |
+| `ms-openapi-explorer`           | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                            |
+| `qmd`                           | Local semantic search engine for markdown knowledge bases.                                   |
+| `review-breaker`                | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.     |
+| `td`                            | Todoist CLI for task and project management.                                                 |
+| `tw`                            | Twist CLI for team messaging, threads, DMs, and search.                                     |
+
+See each `skills/*/SKILL.md` for the exact behavior and usage contract.
 
 ## Extensions
 
@@ -104,9 +141,12 @@ Published packages are self-contained copies of their selected Tau resources.
 
 Some extensions and skills were inspired by prior work from other agent setups and Pi users:
 
+- [@goncalossilva](https://github.com/goncalossilva) for the original [Tau](https://github.com/goncalossilva/tau) this fork builds on
 - @mitsuhiko for `answer`, `btw`, `loop`, `openscad`, `sentry`, `update-changelog`, and `web-design`
 - @badlogic for `sandbox` and `browser-tools`
 - @mjakl for `interlude`
+- [@mattpocock](https://github.com/mattpocock) for `diagnose`, `grill-me`, `grill-with-docs`, `improve-codebase-architecture`, `setup-matt-pocock-skills`, `tdd`, `to-issues`, `to-prd`, `triage`, `write-a-skill`, and `zoom-out`
+- [@enricenrich](https://github.com/enricenrich) for [calendar-cli](https://github.com/enricenrich/calendar-cli), which `cald` depends on
 
 ## License
 

@@ -9,7 +9,7 @@ Use the active daily agenda as the execution source of truth for the current day
 
 ## Behavior
 
-1. Run `node "$HOME/.agents/skills/daily-agenda/scripts/agenda-now.js"` first.
+1. Run `node scripts/agenda-now.js` first.
 2. Use the script output as the default source of truth for:
    - current local time
    - active daily note path
@@ -27,7 +27,7 @@ Use the active daily agenda as the execution source of truth for the current day
 
 ## Fallback
 
-- If the script cannot find today's note, read `~/.agents/agent-brain/Agenda MOC.md` and the active `Daily/YYYY-MM-DD.md` note directly.
+- If the script cannot find today's note, read `Agenda MOC.md` and the active `Daily/YYYY-MM-DD.md` note directly from the configured agent-brain root. Set `AGENT_BRAIN_DIR` if the default location is wrong.
 - If no active agenda exists, then fall back to the normal morning-triage or day-planning workflow.
 
 ## Gotchas
