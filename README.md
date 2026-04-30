@@ -4,10 +4,11 @@ Tau is a batteries-included distribution for [Pi](https://pi.dev), a brilliant c
 
 It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding a `websearch` tool to complement the four default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
 
-| Package            | Purpose         |
-| ------------------ | --------------- |
-| `tau-coding-agent` | Coding package. |
-| `tau-all-agent`    | Full package.   |
+| Package               | Purpose                                                |
+| --------------------- | ------------------------------------------------------ |
+| `tau-coding-agent`    | Coding package.                                                     |
+| `tau-all-agent`       | Full package.                                                       |
+| `afzal-tau-all-agent` | Everything in this repo except the `memory` extension.              |
 
 ## Install
 
@@ -17,7 +18,11 @@ It takes Pi's minimal core and turns it into an opinionated, complete, polished 
 pi install npm:tau-coding-agent
 # or
 pi install npm:tau-all-agent
+# or
+pi install npm:afzal-tau-all-agent
 ```
+
+Need one package with almost everything in this repo? `afzal-tau-all-agent` bundles the base Tau package contents plus the fork-specific extensions and skills listed below, but intentionally excludes the `memory` extension.
 
 Project-local install allows you to pin Tau for everyone working on the project:
 
@@ -33,13 +38,18 @@ Check out [AfzalivE/.agents](https://github.com/AfzalivE/.agents) for my `AGENTS
 
 ## Extensions in this fork
 
+Bundled in `afzal-tau-all-agent`.
+
 | Extension         | Command      | Description                                                              |
 | ----------------- | ------------ | ------------------------------------------------------------------------ |
 | `command-preview` | `ctrl+o`     | Tri-state tool output cycle: standard, expanded, and collapsed.          |
 | `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
 | `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
+| `todoist`         | `/todoist`   | Todoist-backed tasks with offline outbox sync for single or multi-session work. |
 
 ## Skills in this fork
+
+Bundled in `afzal-tau-all-agent`.
 
 | Skill                           | Description                                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -122,6 +132,7 @@ npm run check
 
 pi -e ./packages/tau-coding-agent
 pi -e ./packages/tau-all-agent
+pi -e ./packages/afzal-tau-all-agent
 ```
 
 The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`.
@@ -134,6 +145,7 @@ The GitHub Actions publish workflow stages packages under `dist/` and publishes 
 
 1. `tau-coding-agent`
 2. `tau-all-agent`
+3. `afzal-tau-all-agent`
 
 Published packages are self-contained copies of their selected Tau resources.
 

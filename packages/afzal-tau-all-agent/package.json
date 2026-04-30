@@ -1,0 +1,117 @@
+{
+  "name": "afzal-tau-all-agent",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Full fork-specific Tau package for Pi with every extension except memory, every skill in this repo, and the Tau theme",
+  "keywords": [
+    "agent-tools",
+    "code-review",
+    "coding-agent",
+    "home-assistant",
+    "memory",
+    "openscad",
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "pi-skill",
+    "pi-theme",
+    "planning",
+    "productivity",
+    "sandbox",
+    "telegram",
+    "todoist",
+    "websearch"
+  ],
+  "homepage": "https://github.com/AfzalivE/tau#readme",
+  "bugs": {
+    "url": "https://github.com/AfzalivE/tau/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AfzalivE/tau.git",
+    "directory": "packages/afzal-tau-all-agent"
+  },
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.49",
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^29.0.2",
+    "node-telegram-bot-api": "^0.67.0",
+    "puppeteer-core": "^24.40.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "../../extensions/answer.ts",
+      "../../extensions/branch-term.ts",
+      "../../extensions/btw.ts",
+      "../../extensions/command-preview.ts",
+      "../../extensions/converge.ts",
+      "../../extensions/ghostty.ts",
+      "../../extensions/git-diff-stats.ts",
+      "../../extensions/git-pr-status.ts",
+      "../../extensions/insights.ts",
+      "../../extensions/interlude.ts",
+      "../../extensions/loop.ts",
+      "../../extensions/notify.ts",
+      "../../extensions/openai-fast.ts",
+      "../../extensions/openai-verbosity.ts",
+      "../../extensions/review.ts",
+      "../../extensions/sandbox/index.ts",
+      "../../extensions/spotlight/index.ts",
+      "../../extensions/telegram/index.ts",
+      "../../extensions/todoist.ts",
+      "../../extensions/usage/index.ts",
+      "../../extensions/websearch/index.ts",
+      "../../extensions/worktree.ts"
+    ],
+    "skills": [
+      "../../skills/browser-tools",
+      "../../skills/git-clean-history",
+      "../../skills/git-commit",
+      "../../skills/oracle",
+      "../../skills/sentry",
+      "../../skills/update-changelog",
+      "../../skills/web-design",
+      "../../skills/homeassistant-ops",
+      "../../skills/openscad",
+      "../../skills/diagnose",
+      "../../skills/grill-me",
+      "../../skills/grill-with-docs",
+      "../../skills/improve-codebase-architecture",
+      "../../skills/setup-matt-pocock-skills",
+      "../../skills/tdd",
+      "../../skills/to-issues",
+      "../../skills/to-prd",
+      "../../skills/triage",
+      "../../skills/write-a-skill",
+      "../../skills/zoom-out",
+      "../../skills/cald",
+      "../../skills/daily-agenda",
+      "../../skills/dream",
+      "../../skills/gh",
+      "../../skills/git-rebase-check",
+      "../../skills/git-worktree",
+      "../../skills/ms-openapi-explorer",
+      "../../skills/qmd",
+      "../../skills/review-breaker",
+      "../../skills/td",
+      "../../skills/tw"
+    ],
+    "themes": [
+      "../../themes/tau-dark.json"
+    ]
+  }
+}

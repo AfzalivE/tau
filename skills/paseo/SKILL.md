@@ -1,6 +1,7 @@
 ---
 name: paseo
 description: Paseo CLI reference for managing agents. Load this skill whenever you need to use paseo commands.
+disable-model-invocation: true
 ---
 
 ## Agent Commands

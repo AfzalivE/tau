@@ -1,6 +1,7 @@
 ---
 name: ms-openapi-explorer
 description: Explore Microsoft Graph API v1.0 OpenAPI specs. Use yq to query cached YAML files for endpoint discovery, schemas, and permissions.
+disable-model-invocation: true
 ---
 
 # Microsoft OpenAPI Explorer
