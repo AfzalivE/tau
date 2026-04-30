@@ -171,7 +171,7 @@ run_pi_maintenance() {
 
   if [[ ! -d "$PI_SANDBOX_EXTENSION" ]]; then
     echo "error: Pi sandbox extension not found at $PI_SANDBOX_EXTENSION" >&2
-    echo "Run ~/.agents/bin/sync first so the repo-managed sandbox extension is available to Pi." >&2
+    echo "Run your agent sync/export step first so the repo-managed sandbox extension is available to Pi." >&2
     exit 1
   fi
 

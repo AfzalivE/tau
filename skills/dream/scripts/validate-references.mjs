@@ -4,7 +4,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const DEFAULT_VAULT_DIR = path.join(process.env.HOME ?? "", ".agents", "agent-brain");
+const DEFAULT_VAULT_DIR = process.env.AGENT_BRAIN_DIR
+  ? path.resolve(process.env.AGENT_BRAIN_DIR)
+  : path.join(process.env.HOME ?? "", ".agents", "agent-brain");
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -81,7 +83,7 @@ Scans the agent-brain vault for broken wikilinks and markdown note links.
 Options:
   --apply         Apply high-confidence fixes in-place, then re-scan
   --label <name>  Include a label in the report header
-  --vault <path>  Vault root (default: ~/.agents/agent-brain)
+  --vault <path>  Vault root (default: AGENT_BRAIN_DIR or the standard local agent-brain path)
 `);
 }
 

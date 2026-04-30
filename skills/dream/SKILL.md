@@ -5,7 +5,7 @@ description: Nightly vault maintenance — consolidate, reorganize, and weaken s
 
 # Dream — Vault Maintenance
 
-You are running autonomous nightly maintenance on the agent-brain vault at `~/.agents/agent-brain/`.
+You are running autonomous nightly maintenance on the configured agent-brain vault. Set `AGENT_BRAIN_DIR` when it is not on the default path.
 
 The bash wrapper has already run a pre-audit and appended it to your system prompt as `DREAM_AUDIT`. Use it to decide which files need attention. The audit includes a reference-integrity report; treat unresolved broken references as blocking work, not advisory noise. Reference integrity is broader than link syntax: outdated referential prose is part of the same problem.
 
