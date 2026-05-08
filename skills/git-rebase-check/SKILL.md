@@ -29,10 +29,11 @@ This is a tree-diff check. It does not verify commit hashes, commit order, or co
 
 These defaults are tuned for: "I rebased my feature branch onto the current `origin/main`; compare it to the pre-rebase remote branch."
 
-Aliases:
+Aliases and flags:
 
 - `--branch` = `--local-ref`
 - `--remote-branch` = `--remote-ref`
+- `-w` passes `-w` to `git diff` to ignore whitespace changes.
 
 ## Workflow
 
@@ -71,6 +72,12 @@ scripts/git-rebase-check \
 
 - Exit `0`: no diff; the rebased ref is patch-equivalent to the comparison ref.
 - Exit `1`: differences found, invalid args, or no upstream when `--remote-ref` was omitted.
+
+Use `-w` when whitespace-only patch drift should be ignored:
+
+```bash
+scripts/git-rebase-check -w
+```
 
 On success it prints the local ref/base and remote ref/base it actually used.
 

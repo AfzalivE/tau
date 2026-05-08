@@ -22,6 +22,7 @@ Options:
                                Default: merge-base of origin/main and the remote ref.
   --local-base <ref>           Local merge-base override.
                                Default: origin/main.
+  -w                           Pass -w to git diff to ignore whitespace changes.
   -h, --help                   Show this help text.
 
 Exit codes:
@@ -82,6 +83,7 @@ branch="$(git branch --show-current)"
 remote_branch=""
 remote_base=""
 local_base="origin/main"
+ignore_whitespace=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -116,6 +118,10 @@ while [ "$#" -gt 0 ]; do
             fi
             local_base="$2"
             shift 2
+            ;;
+        -w)
+            ignore_whitespace=1
+            shift
             ;;
         -h|--help)
             show_help
@@ -154,7 +160,12 @@ fi
 local_branch_sha="$(git rev-parse --short "$branch")"
 remote_branch_sha="$(git rev-parse --short "$remote_branch")"
 
-result="$(diff <(git diff "$local_base".."$branch") <(git diff "$remote_base".."$remote_branch"))" || true
+git_diff_args=()
+if [ "$ignore_whitespace" = "1" ]; then
+    git_diff_args=(-w)
+fi
+
+result="$(diff <(git diff "${git_diff_args[@]}" "$local_base".."$branch") <(git diff "${git_diff_args[@]}" "$remote_base".."$remote_branch"))" || true
 
 if [ -z "$result" ]; then
     echo "Local ref:     $(format_branch_ref "$branch")"
