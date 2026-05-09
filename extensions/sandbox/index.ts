@@ -25,8 +25,9 @@
  *   },
  *   "filesystem": {
  *     "denyRead": ["~/.ssh", "~/.aws"],
- *     "allowWrite": [".", "/tmp"],
+ *     "allowWrite": ["."],
  *     "denyWrite": [".env"],
+ *     "allowTempDirs": true,
  *     "allowGitCommonDir": true
  *   }
  * }
@@ -47,7 +48,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   SandboxManager,
@@ -132,8 +133,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
   },
   filesystem: {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
-    allowWrite: [".", "/tmp", "/private/tmp", "~/.cache", "~/.npm"],
+    allowWrite: [".", "~/.cache", "~/.npm"],
     denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+    allowTempDirs: true,
     allowGitConfig: true,
     allowGitCommonDir: true,
   },
@@ -164,6 +166,7 @@ type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   enabled?: boolean;
   mode?: PromptMode;
   filesystem: SandboxRuntimeConfig["filesystem"] & {
+    allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
   };
 };
@@ -626,6 +629,10 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         DEFAULT_CONFIG.filesystem.denyWrite,
         "filesystem.denyWrite",
       ),
+      allowTempDirs:
+        typeof config.filesystem?.allowTempDirs === "boolean"
+          ? config.filesystem.allowTempDirs
+          : DEFAULT_CONFIG.filesystem.allowTempDirs,
       allowGitCommonDir:
         typeof config.filesystem?.allowGitCommonDir === "boolean"
           ? config.filesystem.allowGitCommonDir
@@ -749,12 +756,32 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   return result;
 }
 
+let cachedTemporaryWritePaths: string[] | undefined;
+
+function getTemporaryWritePaths(): string[] {
+  if (cachedTemporaryWritePaths) return cachedTemporaryWritePaths;
+
+  // allowTempDirs always includes the conventional shared temp path, even when
+  // os.tmpdir() points at a platform-specific per-user directory.
+  const currentTmpDir = tmpdir();
+  const paths = ["/tmp", currentTmpDir, normalizePathForSandbox(currentTmpDir)];
+  if (process.platform === "darwin") paths.push("/private/tmp");
+
+  cachedTemporaryWritePaths = Array.from(
+    new Set(paths.map((path) => path.replace(/\/+$/, "") || "/")),
+  );
+  return cachedTemporaryWritePaths;
+}
+
 function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
-  const { allowGitCommonDir: _allowGitCommonDir, ...filesystem } = config.filesystem;
+  const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
+  const allowWrite = allowTempDirs
+    ? Array.from(new Set([...filesystem.allowWrite, ...getTemporaryWritePaths()]))
+    : filesystem.allowWrite;
 
   return {
     network: config.network,
-    filesystem,
+    filesystem: { ...filesystem, allowWrite },
     ignoreViolations: config.ignoreViolations,
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
@@ -2507,6 +2534,7 @@ export default function (pi: ExtensionAPI) {
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
           `    Allow Write: ${runtimeConfig.filesystem.allowWrite.join(", ") || "(none)"}`,
           `    Deny Write: ${runtimeConfig.filesystem.denyWrite.join(", ") || "(none)"}`,
+          `    allowTempDirs: ${sandboxConfig?.filesystem.allowTempDirs ? "true" : "false"}`,
           `    allowGitConfig: ${runtimeConfig.filesystem.allowGitConfig ? "true" : "false"}`,
           `    allowGitCommonDir: ${sandboxConfig?.filesystem.allowGitCommonDir ? "true" : "false"}`,
           "",

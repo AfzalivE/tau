@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- Added a sandbox `allowTempDirs` option, enabled by default, for platform temporary directory writes.
+
 ### Changed
 
 - Allowed `/fix context=...` to guide fix passes without forcing a fresh review.
