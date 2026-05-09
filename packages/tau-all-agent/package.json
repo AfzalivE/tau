@@ -63,7 +63,7 @@
       "../../extensions/notify.ts",
       "../../extensions/openai-fast.ts",
       "../../extensions/openai-verbosity.ts",
-      "../../extensions/review.ts",
+      "../../extensions/review/index.ts",
       "../../extensions/sandbox/index.ts",
       "../../extensions/tool-display-mode.ts",
       "../../extensions/usage/index.ts",
