@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ThinkingLevel } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
   DefaultResourceLoader,
   SessionManager,
@@ -11,7 +11,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   type Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   Key,
   Markdown,
@@ -21,7 +21,7 @@ import {
   type TUI,
   visibleWidth,
   wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 const STATUS_KEY = "0-btw";
 const RESULT_MARKDOWN_THEME = getMarkdownTheme();

@@ -1,4 +1,4 @@
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
 import type { WebsearchResult } from "../types.js";
 import { decodeJwtAccountId, runOpenAICodexSearch } from "./openai-codex.shared.js";

@@ -1,4 +1,4 @@
-import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
+import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   SessionManager,
@@ -13,7 +13,7 @@ import {
   type SessionEntry,
   type SessionHeader,
   type Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   Key,
   Markdown,
@@ -23,7 +23,7 @@ import {
   type TUI,
   visibleWidth,
   wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";

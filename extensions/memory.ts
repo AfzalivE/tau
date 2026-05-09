@@ -1,11 +1,17 @@
-import { complete, StringEnum, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
+import {
+  complete,
+  StringEnum,
+  type Api,
+  type Model,
+  type UserMessage,
+} from "@earendil-works/pi-ai";
 import {
   defineTool,
   withFileMutationQueue,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import fs from "node:fs/promises";
 import path from "node:path";

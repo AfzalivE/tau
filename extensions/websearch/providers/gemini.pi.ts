@@ -1,4 +1,4 @@
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { dedupeSources, extractMarkdownSources, normalizeSourceTitle } from "../normalize.js";
 import type { WebsearchResult, WebsearchSource } from "../types.js";

@@ -3,7 +3,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type ExtensionCommandContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";

@@ -18,14 +18,14 @@
  *      Lists worktrees and their status.
  */
 
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
   CURRENT_SESSION_VERSION,
   DynamicBorder,
   SessionManager,
   highlightCode,
   type SessionHeader,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   Box,
   Container,
@@ -33,7 +33,7 @@ import {
   SelectList,
   Text,
   matchesKey,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";

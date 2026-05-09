@@ -2,7 +2,7 @@ import {
   isBashToolResult,
   type ExtensionAPI,
   type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "1-git-pr-status";
 

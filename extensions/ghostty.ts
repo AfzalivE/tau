@@ -10,7 +10,7 @@
  * Pi now emits native OSC 9;4 progress indicators, so this extension only manages the title.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
 
 const STATUS_SPINNER_INTERVAL_MS = 80;

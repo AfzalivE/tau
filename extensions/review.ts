@@ -38,9 +38,9 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
-import { supportsXhigh, type Api, type Model } from "@mariozechner/pi-ai";
-import { matchesKey } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -3289,7 +3289,7 @@ function createResolvedReviewProviderCandidateFromModel(
   return createResolvedReviewProviderCandidate({
     baseModelArg: `${model.provider}/${model.id}`,
     supportsThinking: model.reasoning,
-    supportsXhigh: supportsXhigh(model),
+    supportsXhigh: getSupportedThinkingLevels(model).includes("xhigh"),
   });
 }
 
@@ -3417,7 +3417,9 @@ async function resolveModels(
         createResolvedReviewProviderCandidate({
           baseModelArg,
           supportsThinking: ctx.model?.reasoning,
-          supportsXhigh: ctx.model ? supportsXhigh(ctx.model) : undefined,
+          supportsXhigh: ctx.model
+            ? getSupportedThinkingLevels(ctx.model).includes("xhigh")
+            : undefined,
         }),
       ],
     }),

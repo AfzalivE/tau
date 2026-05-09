@@ -3,7 +3,7 @@ import {
   isWriteToolResult,
   type ExtensionAPI,
   type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";

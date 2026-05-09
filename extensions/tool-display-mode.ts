@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  type AppKeybinding,
   CustomEditor,
   createBashToolDefinition,
   createFindToolDefinition,
@@ -16,8 +17,15 @@ import {
   type ToolDefinition,
   type ToolInfo,
   type ToolRenderResultOptions,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Text, type Component, type EditorTheme, type TUI } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import {
+  Container,
+  Text,
+  type AutocompleteProvider,
+  type Component,
+  type EditorComponent,
+  type Focusable,
+} from "@earendil-works/pi-tui";
 
 // --- Constants ---
 
@@ -46,10 +54,21 @@ type ToolName = keyof typeof TOOL_FACTORIES;
 type AnyToolDefinition = ToolDefinition<any, any, any>;
 type AnyToolRenderContext = Parameters<NonNullable<AnyToolDefinition["renderResult"]>>[3];
 type JsonObject = Record<string, unknown>;
+type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 
 type ToolDisplayModeConfig = {
   mode: Mode;
 };
+
+type CustomEditorLike = EditorComponent &
+  Partial<Focusable> & {
+    actionHandlers?: Map<AppKeybinding, () => void>;
+    onEscape?: () => void;
+    onCtrlD?: () => void;
+    onPasteImage?: () => void;
+    onExtensionShortcut?: (data: string) => boolean;
+    isShowingAutocomplete?: () => boolean;
+  };
 
 // --- Config ---
 
@@ -328,29 +347,152 @@ function emptyComponent(): Container {
 
 // --- Editor ---
 
-class ToolDisplayEditor extends CustomEditor {
+class ToolDisplayEditor implements EditorComponent, Focusable {
+  readonly actionHandlers: Map<AppKeybinding, () => void>;
+  private readonly customBase: CustomEditorLike;
+  private fallbackFocused = false;
+  private fallbackOnEscape?: () => void;
+  private fallbackOnCtrlD?: () => void;
+  private fallbackOnPasteImage?: () => void;
+  private fallbackOnExtensionShortcut?: (data: string) => boolean;
+
   constructor(
-    tui: TUI,
-    theme: EditorTheme,
+    private readonly base: EditorComponent,
     private readonly appKeybindings: KeybindingsManager,
     private readonly cycleMode: () => void,
   ) {
-    super(tui, theme, appKeybindings);
+    this.customBase = base as CustomEditorLike;
+    this.actionHandlers = this.customBase.actionHandlers ?? new Map();
   }
 
-  override handleInput(data: string): void {
+  get focused(): boolean {
+    return this.customBase.focused ?? this.fallbackFocused;
+  }
+
+  set focused(value: boolean) {
+    this.fallbackFocused = value;
+    if ("focused" in this.customBase) this.customBase.focused = value;
+  }
+
+  get onSubmit(): ((text: string) => void) | undefined {
+    return this.base.onSubmit;
+  }
+
+  set onSubmit(handler: ((text: string) => void) | undefined) {
+    this.base.onSubmit = handler;
+  }
+
+  get onChange(): ((text: string) => void) | undefined {
+    return this.base.onChange;
+  }
+
+  set onChange(handler: ((text: string) => void) | undefined) {
+    this.base.onChange = handler;
+  }
+
+  get wantsKeyRelease(): boolean | undefined {
+    return this.base.wantsKeyRelease;
+  }
+
+  get borderColor(): ((str: string) => string) | undefined {
+    return this.base.borderColor;
+  }
+
+  set borderColor(handler: ((str: string) => string) | undefined) {
+    this.base.borderColor = handler;
+  }
+
+  get onEscape(): (() => void) | undefined {
+    return this.customBase.onEscape ?? this.fallbackOnEscape;
+  }
+
+  set onEscape(handler: (() => void) | undefined) {
+    this.fallbackOnEscape = handler;
+    if ("onEscape" in this.customBase) this.customBase.onEscape = handler;
+  }
+
+  get onCtrlD(): (() => void) | undefined {
+    return this.customBase.onCtrlD ?? this.fallbackOnCtrlD;
+  }
+
+  set onCtrlD(handler: (() => void) | undefined) {
+    this.fallbackOnCtrlD = handler;
+    if ("onCtrlD" in this.customBase) this.customBase.onCtrlD = handler;
+  }
+
+  get onPasteImage(): (() => void) | undefined {
+    return this.customBase.onPasteImage ?? this.fallbackOnPasteImage;
+  }
+
+  set onPasteImage(handler: (() => void) | undefined) {
+    this.fallbackOnPasteImage = handler;
+    if ("onPasteImage" in this.customBase) this.customBase.onPasteImage = handler;
+  }
+
+  get onExtensionShortcut(): ((data: string) => boolean) | undefined {
+    return this.customBase.onExtensionShortcut ?? this.fallbackOnExtensionShortcut;
+  }
+
+  set onExtensionShortcut(handler: ((data: string) => boolean) | undefined) {
+    this.fallbackOnExtensionShortcut = handler;
+    if ("onExtensionShortcut" in this.customBase) this.customBase.onExtensionShortcut = handler;
+  }
+
+  getText(): string {
+    return this.base.getText();
+  }
+
+  setText(text: string): void {
+    this.base.setText(text);
+  }
+
+  addToHistory(text: string): void {
+    this.base.addToHistory?.(text);
+  }
+
+  insertTextAtCursor(text: string): void {
+    this.base.insertTextAtCursor?.(text);
+  }
+
+  getExpandedText(): string {
+    return this.base.getExpandedText?.() ?? this.base.getText();
+  }
+
+  setAutocompleteProvider(provider: AutocompleteProvider): void {
+    this.base.setAutocompleteProvider?.(provider);
+  }
+
+  setPaddingX(padding: number): void {
+    this.base.setPaddingX?.(padding);
+  }
+
+  setAutocompleteMaxVisible(maxVisible: number): void {
+    this.base.setAutocompleteMaxVisible?.(maxVisible);
+  }
+
+  render(width: number): string[] {
+    return this.base.render(width);
+  }
+
+  invalidate(): void {
+    this.base.invalidate();
+  }
+
+  handleInput(data: string): void {
     if (this.appKeybindings.matches(data, "app.tools.expand")) {
       this.cycleMode();
       return;
     }
 
-    super.handleInput(data);
+    this.base.handleInput(data);
   }
 }
 
 export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   let mode: Mode = DEFAULT_MODE;
   let registeredToolRenderers = false;
+  let installedEditorFactory: EditorFactory | undefined;
+  let previousEditorFactory: EditorFactory | undefined;
   const toolCache = new Map<string, Partial<Record<ToolName, AnyToolDefinition>>>();
 
   const setMode = (ctx: ExtensionContext, next: Mode): void => {
@@ -379,9 +521,24 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
     applyMode(ctx, mode);
     if (!ctx.hasUI) return;
 
-    ctx.ui.setEditorComponent(
-      (tui, theme, keybindings) =>
-        new ToolDisplayEditor(tui, theme, keybindings, () => setMode(ctx, nextMode(mode))),
-    );
+    if (ctx.ui.getEditorComponent() === installedEditorFactory) return;
+
+    previousEditorFactory = ctx.ui.getEditorComponent();
+    installedEditorFactory = (tui, theme, keybindings) => {
+      const baseEditor =
+        previousEditorFactory?.(tui, theme, keybindings) ??
+        new CustomEditor(tui, theme, keybindings);
+      return new ToolDisplayEditor(baseEditor, keybindings, () => setMode(ctx, nextMode(mode)));
+    };
+    ctx.ui.setEditorComponent(installedEditorFactory);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (ctx.hasUI && ctx.ui.getEditorComponent() === installedEditorFactory) {
+      ctx.ui.setEditorComponent(previousEditorFactory);
+    }
+
+    installedEditorFactory = undefined;
+    previousEditorFactory = undefined;
   });
 }
