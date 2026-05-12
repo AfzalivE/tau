@@ -57,7 +57,7 @@
       "../../extensions/answer.ts",
       "../../extensions/branch-term.ts",
       "../../extensions/btw.ts",
-      "../../extensions/command-preview.ts",
+      "../../extensions/tool-display-mode.ts",
       "../../extensions/converge.ts",
       "../../extensions/ghostty.ts",
       "../../extensions/git-diff-stats.ts",
