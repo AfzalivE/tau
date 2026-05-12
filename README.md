@@ -10,6 +10,8 @@ It takes Pi's minimal core and turns it into an opinionated, complete, polished 
 | `tau-all-agent`       | Full package.                                                       |
 | `afzal-tau-all-agent` | Everything in this repo except the `memory` extension.              |
 
+Fork-specific package/configuration details are grouped under [Fork-specific additions](#fork-specific-additions) below.
+
 ## Install
 
 [Install Pi](https://pi.dev/docs/latest#quick-start), and then:
@@ -29,54 +31,6 @@ Project-local install allows you to pin Tau for everyone working on the project:
 ```bash
 pi install -l npm:tau-coding-agent
 ```
-
-## Agent configuration
-
-Tau does not include agent configuration; those files are highly personal.
-
-Check out [AfzalivE/.agents](https://github.com/AfzalivE/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
-
-## Extensions in this fork
-
-Bundled in `afzal-tau-all-agent`.
-
-| Extension         | Command      | Description                                                              |
-| ----------------- | ------------ | ------------------------------------------------------------------------ |
-| `command-preview` | `ctrl+o`     | Tri-state tool output cycle: standard, expanded, and collapsed.          |
-| `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
-| `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
-| `todoist`         | `/todoist`   | Todoist-backed tasks with offline outbox sync for single or multi-session work. |
-
-## Skills in this fork
-
-Bundled in `afzal-tau-all-agent`.
-
-| Skill                           | Description                                                                                 |
-| ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `diagnose`                      | Disciplined diagnosis loop for hard bugs and performance regressions.                       |
-| `grill-me`                      | Interview the user relentlessly about a plan or design until reaching shared understanding. |
-| `grill-with-docs`               | Stress-test a plan against the project's domain model, terminology, and ADRs.               |
-| `improve-codebase-architecture` | Find deepening opportunities informed by `CONTEXT.md` and `docs/adr/`.                      |
-| `setup-matt-pocock-skills`      | Scaffold repo config for issue tracker, triage labels, and domain doc layout.               |
-| `tdd`                           | Test-driven development with a red-green-refactor loop.                                     |
-| `to-issues`                     | Break a plan, spec, or PRD into independently grabbable issues.                             |
-| `to-prd`                        | Turn the current conversation context into a PRD and publish it to the issue tracker.       |
-| `triage`                        | Triage issues through a state machine driven by triage roles.                               |
-| `write-a-skill`                 | Create new agent skills with proper structure and bundled resources.                         |
-| `zoom-out`                      | Give broader codebase context and a higher-level perspective for unfamiliar areas.           |
-| `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
-| `daily-agenda`                  | Retrieve the active daily agenda against the current local time.                             |
-| `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |
-| `gh`                            | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                             |
-| `git-rebase-check`              | Verify that a rebased branch preserved the same cumulative patch.                            |
-| `git-worktree`                  | Manage git worktrees for multiple branches in separate directories.                          |
-| `ms-openapi-explorer`           | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                            |
-| `qmd`                           | Local semantic search engine for markdown knowledge bases.                                   |
-| `review-breaker`                | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.     |
-| `td`                            | Todoist CLI for task and project management.                                                 |
-| `tw`                            | Twist CLI for team messaging, threads, DMs, and search.                                     |
-
-See each `skills/*/SKILL.md` for the exact behavior and usage contract.
 
 ## Extensions
 
@@ -148,6 +102,92 @@ The GitHub Actions publish workflow stages packages under `dist/` and publishes 
 3. `afzal-tau-all-agent`
 
 Published packages are self-contained copies of their selected Tau resources.
+
+## Fork-specific additions
+
+This fork keeps Afzal-specific packaging, personal setup helpers, and extra resources separate from the original Tau package documentation above.
+
+### Package
+
+`afzal-tau-all-agent` bundles the base Tau package contents plus the fork-specific extensions and skills listed below, but intentionally excludes the `memory` extension.
+
+Install it with:
+
+```bash
+pi install npm:afzal-tau-all-agent
+```
+
+For local development/testing:
+
+```bash
+pi -e ./packages/afzal-tau-all-agent
+```
+
+When publishing this fork, `afzal-tau-all-agent` is published after `tau-coding-agent` and `tau-all-agent`.
+
+### Agent configuration
+
+Tau does not include agent configuration; those files are highly personal.
+
+Check out [AfzalivE/.agents](https://github.com/AfzalivE/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
+
+If you keep a separate personal agent-config repo, set up Tau-managed Codex and Claude links from the Tau checkout root with:
+
+```bash
+./bin/setup
+```
+
+That keeps the personal agent-config skills directory pointed at this checkout's `skills/` directory, links the personal `AGENTS.md` into Codex and Claude, and populates Claude's local skills directory with Tau skill symlinks.
+
+Nightly vault maintenance also lives here:
+
+```bash
+./bin/dream [--dry-run]
+```
+
+That wrapper reads dream config from the personal agent-config repo via `AGENTS_DIR`, runs the bundled `dream` skill helpers from this repo, and targets the configured agent-brain vault by default. Set `AGENT_BRAIN_DIR` to override the vault path.
+
+### Extensions in this fork
+
+Bundled in `afzal-tau-all-agent`.
+
+| Extension         | Command      | Description                                                              |
+| ----------------- | ------------ | ------------------------------------------------------------------------ |
+| `command-preview` | `ctrl+o`     | Tri-state tool output cycle: standard, expanded, and collapsed.          |
+| `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
+| `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
+| `todoist`         | `/todoist`   | Todoist-backed tasks with offline outbox sync for single or multi-session work. |
+
+### Skills in this fork
+
+Bundled in `afzal-tau-all-agent`.
+
+| Skill                           | Description                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `diagnose`                      | Disciplined diagnosis loop for hard bugs and performance regressions.                       |
+| `grill-me`                      | Interview the user relentlessly about a plan or design until reaching shared understanding. |
+| `grill-with-docs`               | Stress-test a plan against the project's domain model, terminology, and ADRs.               |
+| `improve-codebase-architecture` | Find deepening opportunities informed by `CONTEXT.md` and `docs/adr/`.                      |
+| `setup-matt-pocock-skills`      | Scaffold repo config for issue tracker, triage labels, and domain doc layout.               |
+| `tdd`                           | Test-driven development with a red-green-refactor loop.                                     |
+| `to-issues`                     | Break a plan, spec, or PRD into independently grabbable issues.                             |
+| `to-prd`                        | Turn the current conversation context into a PRD and publish it to the issue tracker.       |
+| `triage`                        | Triage issues through a state machine driven by triage roles.                               |
+| `write-a-skill`                 | Create new agent skills with proper structure and bundled resources.                         |
+| `zoom-out`                      | Give broader codebase context and a higher-level perspective for unfamiliar areas.           |
+| `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
+| `daily-agenda`                  | Retrieve the active daily agenda against the current local time.                             |
+| `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |
+| `gh`                            | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                             |
+| `git-rebase-check`              | Verify that a rebased branch preserved the same cumulative patch.                            |
+| `git-worktree`                  | Manage git worktrees for multiple branches in separate directories.                          |
+| `ms-openapi-explorer`           | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                            |
+| `qmd`                           | Local semantic search engine for markdown knowledge bases.                                   |
+| `review-breaker`                | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.     |
+| `td`                            | Todoist CLI for task and project management.                                                 |
+| `tw`                            | Twist CLI for team messaging, threads, DMs, and search.                                     |
+
+See each `skills/*/SKILL.md` for the exact behavior and usage contract.
 
 ## Acknowledgements
 
