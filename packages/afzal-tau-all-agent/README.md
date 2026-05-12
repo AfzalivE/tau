@@ -2,7 +2,7 @@
 
 Full fork-specific Tau package for [Pi](https://pi.dev).
 
-This package bundles every extension except `memory`, every skill in this repo, plus the `tau-dark` theme.
+This package bundles every extension except `memory`, the skills listed below, plus the `tau-dark` theme.
 
 ## Install
 
@@ -55,6 +55,7 @@ pi install -l npm:afzal-tau-all-agent
 | `update-changelog`             | Update CHANGELOG.md following Keep a Changelog.                                             |
 | `web-design`                   | Distinctive, production-ready web interfaces.                                               |
 | `homeassistant-ops`            | Operate a Home Assistant instance via REST/WebSocket APIs.                                  |
+| `material-3`                   | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.       |
 | `openscad`                     | Create and render OpenSCAD 3D models, export STL.                                           |
 | `diagnose`                     | Disciplined diagnosis loop for hard bugs and performance regressions.                        |
 | `grill-me`                     | Interview the user relentlessly about a plan or design until reaching shared understanding.  |
@@ -75,6 +76,7 @@ pi install -l npm:afzal-tau-all-agent
 | `git-worktree`                 | Manage git worktrees for multiple branches in separate directories.                           |
 | `ms-openapi-explorer`          | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                             |
 | `qmd`                          | Local semantic search engine for markdown knowledge bases.                                    |
+| `pup/datadog/dashboards`       | Manage Datadog dashboards through the pup CLI and Datadog API.                                |
 | `review-breaker`               | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.      |
 | `td`                           | Todoist CLI for task and project management.                                                  |
 | `tw`                           | Twist CLI for team messaging, threads, DMs, and search.                                      |
