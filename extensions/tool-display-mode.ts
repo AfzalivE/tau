@@ -521,7 +521,7 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
     applyMode(ctx, mode);
     if (!ctx.hasUI) return;
 
-    if (ctx.ui.getEditorComponent() === installedEditorFactory) return;
+    if (installedEditorFactory && ctx.ui.getEditorComponent() === installedEditorFactory) return;
 
     previousEditorFactory = ctx.ui.getEditorComponent();
     installedEditorFactory = (tui, theme, keybindings) => {
