@@ -1,0 +1,614 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENTS_DIR="${AGENTS_DIR:-${HOME}/.agents}"
+VAULT_DIR="${AGENT_BRAIN_DIR:-${AGENTS_DIR}/agent-brain}"
+ARCHIVE_DIR="${VAULT_DIR}/archive"
+CONFIG_FILE="${AGENTS_DIR}/config/dream.yaml"
+SRT_SETTINGS="${AGENTS_DIR}/config/dream-srt.json"
+PI_SANDBOX_EXTENSION="${ROOT}/extensions/sandbox/index.ts"
+DREAM_SKILL_DIR="${ROOT}/skills/dream"
+REFERENCE_CHECKER="${DREAM_SKILL_DIR}/scripts/validate-references.mjs"
+PLAN_INTEGRITY_CHECKER="${DREAM_SKILL_DIR}/scripts/check-plan-integrity.mjs"
+
+DEFAULT_RUNNER="claude"
+DEFAULT_WEAKEN_DAYS=60
+DEFAULT_ARCHIVE_DAYS=90
+
+DRY_RUN=0
+CHECK_ONLY=0
+VERBOSE=0
+RUNNER="$DEFAULT_RUNNER"
+WEAKEN_DAYS="$DEFAULT_WEAKEN_DAYS"
+ARCHIVE_DAYS="$DEFAULT_ARCHIVE_DAYS"
+declare -a PROTECTED=("Index.md")
+declare -a PROTECTED_NOTE_TAGS=("planning")
+
+usage() {
+  cat <<'EOF'
+Nightly vault maintenance for agent-brain.
+
+Usage:
+  dream [--dry-run] [--check] [--verbose]
+
+Options:
+  --dry-run   Run pre-audit only, print summary, no LLM call
+  --check     Check that all dependencies are installed
+  --verbose   Show detailed Pi event rendering instead of the compact progress spinner
+
+Dependencies:
+  node      (should already be installed)
+  yq        brew install yq
+  git       (should already be installed)
+  srt       npm install -g @anthropic-ai/sandbox-runtime (if runner=claude)
+  claude    npm install -g @anthropic-ai/claude-code (if runner=claude)
+  pi        npm install -g @mariozechner/pi-coding-agent (if runner=pi)
+
+Environment:
+  AGENTS_DIR       Personal config root (default: ~/.agents)
+  AGENT_BRAIN_DIR  Vault path override (default: ~/.agents/agent-brain)
+
+EOF
+}
+
+box_line() {
+  local label="$1"
+  local value="$2"
+  printf '│ %-12s %s\n' "$label" "$value"
+}
+
+box_section_items() {
+  local title="$1"
+  local count="$2"
+  shift 2
+
+  if [[ "$count" -eq 0 ]]; then
+    box_line "$title" "none"
+    return
+  fi
+
+  box_line "$title" "$count"
+  local max_items=8
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    max_items="$count"
+  fi
+
+  local i=0
+  local item=""
+  for item in "$@"; do
+    [[ "$i" -ge "$max_items" ]] && break
+    printf '│   • %s\n' "$item"
+    i=$((i + 1))
+  done
+  if [[ "$count" -gt "$max_items" ]]; then
+    printf '│   • … %s more\n' "$((count - max_items))"
+  fi
+}
+
+print_audit_summary() {
+  echo "╭─ Dream audit"
+  box_line "Vault" "$VAULT_DIR"
+  box_line "Files" "${total_files} (${strong_count} strong, ${weak_count} weak, ${dormant_count} dormant)"
+  box_line "Size" "$(( total_size / 1024 ))KB"
+  box_line "Runner" "$RUNNER"
+  box_line "Thresholds" "weaken ${WEAKEN_DAYS}d · archive ${ARCHIVE_DAYS}d"
+  box_line "References" "$([[ "$REFERENCE_UNRESOLVED" -eq 0 ]] && echo "✓ clean" || echo "✗ ${REFERENCE_UNRESOLVED} unresolved")"
+  echo "│"
+  box_section_items "Weaken" "${#WEAKEN_LIST[@]}" ${WEAKEN_LIST[@]+"${WEAKEN_LIST[@]}"}
+  box_section_items "Archive" "${#ARCHIVE_LIST[@]}" ${ARCHIVE_LIST[@]+"${ARCHIVE_LIST[@]}"}
+  box_section_items "Large" "${#LARGE_LIST[@]}" ${LARGE_LIST[@]+"${LARGE_LIST[@]}"}
+  box_section_items "Recent" "${#RECENT_LIST[@]}" ${RECENT_LIST[@]+"${RECENT_LIST[@]}"}
+  echo "╰─"
+}
+
+print_run_intro() {
+  echo "╭─ Dream maintenance"
+  box_line "Runner" "$([[ "$RUNNER" == "claude" ]] && echo "claude via srt" || echo "pi via sandbox")"
+  box_line "Mode" "$([[ "$VERBOSE" -eq 1 ]] && echo "verbose" || echo "compact")"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    box_line "Dry run" "yes — agent invocation skipped"
+  fi
+  box_line "Sandbox" "$SRT_SETTINGS"
+  box_line "Log" "$LOG_FILE"
+  echo "╰─"
+}
+
+print_post_checks() {
+  echo "╭─ Post-run checks"
+  box_line "References" "$([[ "$REFERENCE_UNRESOLVED" -eq 0 ]] && echo "✓ clean" || echo "✗ ${REFERENCE_UNRESOLVED} unresolved")"
+  box_line "Plan guard" "$([[ "$PLAN_INTEGRITY_VIOLATIONS" -eq 0 ]] && echo "✓ clean" || echo "✗ ${PLAN_INTEGRITY_VIOLATIONS} violations")"
+  echo "╰─"
+}
+
+validate_runner() {
+  case "$RUNNER" in
+    claude|pi) ;;
+    *)
+      echo "error: unsupported runner '$RUNNER' in $CONFIG_FILE (expected: claude or pi)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+print_dep_status() {
+  local cmd="$1"
+  local required="$2"
+  local missing_ref="$3"
+  local status=""
+
+  if command -v "$cmd" &>/dev/null; then
+    status="✓ $(command -v "$cmd")"
+  elif [[ "$required" -eq 1 ]]; then
+    status="✗ missing"
+    printf -v "$missing_ref" '%s' 1
+  else
+    status="- optional"
+  fi
+
+  printf "  %-10s %s\n" "$cmd" "$status"
+}
+
+check_deps() {
+  local missing=0
+
+  echo "Configured runner: $RUNNER"
+  print_dep_status node 1 missing
+  print_dep_status yq 1 missing
+  print_dep_status git 1 missing
+
+  case "$RUNNER" in
+    claude)
+      print_dep_status srt 1 missing
+      print_dep_status claude 1 missing
+      print_dep_status pi 0 missing
+      ;;
+    pi)
+      print_dep_status srt 0 missing
+      print_dep_status claude 0 missing
+      print_dep_status pi 1 missing
+      ;;
+  esac
+
+  exit "$missing"
+}
+
+parse_config() {
+  local val=""
+  local file=""
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    validate_runner
+    return
+  fi
+
+  if ! command -v yq &>/dev/null; then
+    echo "error: yq not found — install with: brew install yq" >&2
+    exit 1
+  fi
+
+  val=$(yq '.runner' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ -n "$val" && "$val" != "null" ]] && RUNNER="$val"
+
+  val=$(yq '.thresholds.weaken_days' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ -n "$val" && "$val" != "null" ]] && WEAKEN_DAYS="$val"
+
+  val=$(yq '.thresholds.archive_days' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ -n "$val" && "$val" != "null" ]] && ARCHIVE_DAYS="$val"
+
+  while IFS= read -r file; do
+    [[ -n "$file" && "$file" != "null" ]] && PROTECTED+=("$file")
+  done < <(yq '.protected_files[]' "$CONFIG_FILE" 2>/dev/null || true)
+
+  PROTECTED_NOTE_TAGS=()
+  while IFS= read -r tag; do
+    [[ -n "$tag" && "$tag" != "null" ]] && PROTECTED_NOTE_TAGS+=("$tag")
+  done < <(yq '.protected_note_tags[]' "$CONFIG_FILE" 2>/dev/null || true)
+
+  if [[ ${#PROTECTED_NOTE_TAGS[@]} -eq 0 ]]; then
+    PROTECTED_NOTE_TAGS=("planning")
+  fi
+
+  validate_runner
+}
+
+is_protected() {
+  local name="$1"
+  local p=""
+
+  for p in "${PROTECTED[@]}"; do
+    [[ "$name" == "$p" ]] && return 0
+  done
+  return 1
+}
+
+maintenance_prompt() {
+  cat <<'EOF'
+Use the `dream` skill to perform vault maintenance based on the DREAM_AUDIT below. Fix broken note references before other maintenance, then re-validate references after your edits. Work autonomously: plan changes, apply them, and commit. If nothing meaningful needs changing, say so and exit.
+Treat stale referential prose as a reference bug too: if a note names an old section/title/location that has been renamed, moved, merged, or replaced, update the wording even if the literal link still resolves.
+Plan files are protected by a precomputed snapshot and a post-run integrity check. Do not trim, summarize, condense, paraphrase, or rewrite them. Only surgical reference fixes and intact archival moves are allowed. If DREAM_AUDIT includes a plan-integrity verifier command, run it before committing.
+EOF
+}
+
+run_claude_maintenance() {
+  local -a cmd=(
+    srt
+    --settings "$SRT_SETTINGS"
+    claude -p
+    --dangerously-skip-permissions
+    --allowedTools "Read,Edit,Write,Glob,Grep,Bash\(git:*,mv:*,mkdir:*,node:*\)"
+    --model opus
+    --max-budget-usd 1.00
+    --verbose
+  )
+
+  # Prevent nested Claude from detecting it's inside an outer Claude Code session,
+  # which changes its behavior (e.g., tool availability, permission handling).
+  unset CLAUDECODE 2>/dev/null || true
+
+  printf '%s\n\nDREAM_AUDIT:\n%s' "$(maintenance_prompt)" "$audit" \
+    | "${cmd[@]}"
+}
+
+run_pi_maintenance() {
+  local prompt=""
+  local -a cmd=(
+    pi
+    --no-extensions
+    -e "$PI_SANDBOX_EXTENSION"
+    --sandbox-config "$SRT_SETTINGS"
+    --skill "$DREAM_SKILL_DIR"
+    --tools read,bash,edit,write,grep,find,ls
+    --no-session
+    --mode json
+  )
+
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    cmd+=(--verbose)
+  fi
+
+  if [[ ! -f "$PI_SANDBOX_EXTENSION" ]]; then
+    echo "error: Pi sandbox extension entrypoint not found at $PI_SANDBOX_EXTENSION" >&2
+    echo "Expected Tau's sandbox extension at extensions/sandbox/index.ts relative to bin/dream." >&2
+    exit 1
+  fi
+
+  prompt=$(printf '%s\n\nDREAM_AUDIT:\n%s' "$(maintenance_prompt)" "$audit")
+
+  set +e
+  "${cmd[@]}" "$prompt" </dev/null 2>&1 | DREAM_RENDER_VERBOSE="$VERBOSE" render_pi_json_stream
+  local -a statuses=("${PIPESTATUS[@]}")
+  set -e
+
+  if [[ "${statuses[0]}" -ne 0 ]]; then
+    return "${statuses[0]}"
+  fi
+  return "${statuses[1]}"
+}
+
+render_pi_json_stream() {
+  node "$DREAM_SKILL_DIR/scripts/render-pi-json-stream.mjs"
+}
+
+run_agent_maintenance() {
+  case "$RUNNER" in
+    claude) run_claude_maintenance ;;
+    pi) run_pi_maintenance ;;
+  esac
+}
+
+run_reference_check() {
+  local label="$1"
+  local output=""
+  local status=0
+
+  if [[ ! -f "$REFERENCE_CHECKER" ]]; then
+    echo "error: reference checker not found at $REFERENCE_CHECKER" >&2
+    exit 1
+  fi
+
+  set +e
+  output=$(node "$REFERENCE_CHECKER" --vault "$VAULT_DIR" --label "$label" 2>&1)
+  status=$?
+  set -e
+
+  if [[ $status -gt 1 ]]; then
+    printf '%s\n' "$output" >&2
+    echo "error: reference checker failed" >&2
+    exit 1
+  fi
+
+  REFERENCE_REPORT="$output"
+  REFERENCE_UNRESOLVED=0
+
+  if [[ "$output" =~ unresolved=([0-9]+) ]]; then
+    REFERENCE_UNRESOLVED="${BASH_REMATCH[1]}"
+  elif [[ $status -ne 0 ]]; then
+    REFERENCE_UNRESOLVED=1
+  fi
+}
+
+create_plan_snapshot() {
+  local snapshot_base=""
+  local tmp_root="${TMPDIR:-/tmp}"
+  local tags_csv=""
+
+  if [[ ! -f "$PLAN_INTEGRITY_CHECKER" ]]; then
+    echo "error: plan integrity checker not found at $PLAN_INTEGRITY_CHECKER" >&2
+    exit 1
+  fi
+
+  snapshot_base=$(mktemp "${tmp_root%/}/dream-plan-snapshot.XXXXXX")
+  PLAN_SNAPSHOT_FILE="${snapshot_base}.json"
+  mv "$snapshot_base" "$PLAN_SNAPSHOT_FILE"
+  tags_csv=$(IFS=,; echo "${PROTECTED_NOTE_TAGS[*]}")
+  node "$PLAN_INTEGRITY_CHECKER" snapshot --vault "$VAULT_DIR" --output "$PLAN_SNAPSHOT_FILE" --tags "$tags_csv"
+}
+
+run_plan_integrity_check() {
+  local label="$1"
+  local output=""
+  local status=0
+  local tags_csv=""
+
+  set +e
+  tags_csv=$(IFS=,; echo "${PROTECTED_NOTE_TAGS[*]}")
+  output=$(node "$PLAN_INTEGRITY_CHECKER" verify --vault "$VAULT_DIR" --snapshot "$PLAN_SNAPSHOT_FILE" --label "$label" --tags "$tags_csv" 2>&1)
+  status=$?
+  set -e
+
+  if [[ $status -gt 1 ]]; then
+    printf '%s\n' "$output" >&2
+    echo "error: plan integrity checker failed" >&2
+    exit 1
+  fi
+
+  PLAN_INTEGRITY_REPORT="$output"
+  PLAN_INTEGRITY_VIOLATIONS=0
+
+  if [[ "$output" =~ violations=([0-9]+) ]]; then
+    PLAN_INTEGRITY_VIOLATIONS="${BASH_REMATCH[1]}"
+  elif [[ $status -ne 0 ]]; then
+    PLAN_INTEGRITY_VIOLATIONS=1
+  fi
+}
+
+cleanup() {
+  if [[ -n "${PLAN_SNAPSHOT_FILE:-}" && -f "${PLAN_SNAPSHOT_FILE:-}" ]]; then
+    rm -f "$PLAN_SNAPSHOT_FILE"
+  fi
+}
+
+trap cleanup EXIT
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --check) CHECK_ONLY=1; shift ;;
+    --verbose) VERBOSE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+parse_config
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  check_deps
+fi
+
+REFERENCE_REPORT=""
+REFERENCE_UNRESOLVED=0
+PLAN_INTEGRITY_REPORT=""
+PLAN_INTEGRITY_VIOLATIONS=0
+PLAN_SNAPSHOT_FILE=""
+run_reference_check "pre-audit"
+create_plan_snapshot
+
+# --- Collect MOC files ---
+moc_files=("$VAULT_DIR/Index.md")
+for f in "$VAULT_DIR"/*\ MOC.md; do
+  [[ -f "$f" ]] && moc_files+=("$f")
+done
+
+is_linked_in_moc() {
+  local basename="$1"
+  local link_name="${basename%.md}"
+  local moc=""
+
+  for moc in "${moc_files[@]}"; do
+    [[ -f "$moc" ]] && grep -q "\[\[${link_name}\]\]" "$moc" && return 0
+  done
+  return 1
+}
+
+# --- Audit each file ---
+NOW=$(date +%s)
+declare -a WEAKEN_LIST=()
+declare -a ARCHIVE_LIST=()
+declare -a LARGE_LIST=()
+declare -a RECENT_LIST=()
+
+total_files=0
+strong_count=0
+weak_count=0
+total_size=0
+
+mkdir -p "$ARCHIVE_DIR"
+
+for filepath in "$VAULT_DIR"/*.md; do
+  [[ -f "$filepath" ]] || continue
+  filename=$(basename "$filepath")
+  [[ "$filename" == .* ]] && continue
+
+  total_files=$((total_files + 1))
+
+  size=$(wc -c < "$filepath")
+  total_size=$((total_size + size))
+
+  last_mod=$(git -C "$VAULT_DIR" log -1 --format="%at" -- "$filename" 2>/dev/null || true)
+  [[ -z "$last_mod" ]] && last_mod="$NOW"
+  days_ago=$(( (NOW - last_mod) / 86400 ))
+
+  linked=0
+  is_linked_in_moc "$filename" && linked=1
+
+  if [[ $linked -eq 1 ]]; then
+    strong_count=$((strong_count + 1))
+  else
+    weak_count=$((weak_count + 1))
+  fi
+
+  if is_protected "$filename"; then
+    continue
+  fi
+
+  if [[ $linked -eq 1 && $days_ago -ge $WEAKEN_DAYS ]]; then
+    WEAKEN_LIST+=("$filename — last modified ${days_ago} days ago")
+  fi
+
+  if [[ $linked -eq 0 && $days_ago -ge $ARCHIVE_DAYS ]]; then
+    ARCHIVE_LIST+=("$filename — last modified ${days_ago} days ago")
+  fi
+
+  if [[ $size -gt 5120 ]]; then
+    LARGE_LIST+=("$filename — $(( size / 1024 ))KB")
+  fi
+
+  if [[ $days_ago -le 7 ]]; then
+    RECENT_LIST+=("$filename")
+  fi
+done
+
+# Count dormant files
+dormant_count=0
+for f in "$ARCHIVE_DIR"/*.md; do
+  [[ -f "$f" ]] && dormant_count=$((dormant_count + 1))
+done
+
+# --- Format audit ---
+audit="=== Agent Brain Dream Audit ===
+Files: ${total_files} (${strong_count} strong, ${weak_count} weak, ${dormant_count} dormant)
+Total size: $(( total_size / 1024 ))KB
+Runner: ${RUNNER}
+Thresholds: weaken=${WEAKEN_DAYS}d, archive=${ARCHIVE_DAYS}d
+
+Candidates for attention:"
+
+audit+=$'\n\nReference integrity:'
+audit+=$'\n'"  Validator: node ${REFERENCE_CHECKER} --apply --label during-run"
+audit+=$'\n'"  Config: ${CONFIG_FILE}"
+audit+=$'\n'"$REFERENCE_REPORT"
+audit+=$'\n'
+audit+=$'\nPlan protection:'
+audit+=$'\n'"  Snapshot: ${PLAN_SNAPSHOT_FILE}"
+audit+=$'\n'"  Protected tags: $(IFS=,; echo "${PROTECTED_NOTE_TAGS[*]}")"
+audit+=$'\n'"  Verify before commit: node ${PLAN_INTEGRITY_CHECKER} verify --vault ${VAULT_DIR} --snapshot ${PLAN_SNAPSHOT_FILE} --label during-run --tags $(IFS=,; echo "${PROTECTED_NOTE_TAGS[*]}")"
+
+if [[ ${#WEAKEN_LIST[@]} -gt 0 ]]; then
+  audit+=$'\n  WEAKEN ('"${WEAKEN_DAYS}"'+ days untouched, still linked):'
+  for item in "${WEAKEN_LIST[@]}"; do
+    audit+=$'\n    '"$item"
+  done
+else
+  audit+=$'\n  WEAKEN: (none)'
+fi
+
+if [[ ${#ARCHIVE_LIST[@]} -gt 0 ]]; then
+  audit+=$'\n  ARCHIVE ('"${ARCHIVE_DAYS}"'+ days untouched, already unlinked):'
+  for item in "${ARCHIVE_LIST[@]}"; do
+    audit+=$'\n    '"$item"
+  done
+else
+  audit+=$'\n  ARCHIVE: (none)'
+fi
+
+if [[ ${#LARGE_LIST[@]} -gt 0 ]]; then
+  audit+=$'\n  LARGE (>5KB, may need splitting):'
+  for item in "${LARGE_LIST[@]}"; do
+    audit+=$'\n    '"$item"
+  done
+else
+  audit+=$'\n  LARGE: (none)'
+fi
+
+if [[ ${#RECENT_LIST[@]} -gt 0 ]]; then
+  audit+=$'\n  RECENTLY CHANGED (last 7 days, may need consolidation):'
+  audit+=$'\n    '"$(printf '%s, ' "${RECENT_LIST[@]}" | sed 's/, $//')"
+else
+  audit+=$'\n  RECENTLY CHANGED: (none)'
+fi
+
+# --- Check if anything needs attention ---
+if [[ "$DRY_RUN" -eq 0 && ${#WEAKEN_LIST[@]} -eq 0 && ${#ARCHIVE_LIST[@]} -eq 0 && ${#LARGE_LIST[@]} -eq 0 && ${#RECENT_LIST[@]} -eq 0 && "$REFERENCE_UNRESOLVED" -eq 0 ]]; then
+  print_audit_summary
+  echo ""
+  echo "✓ Nothing needs attention — skipping LLM call."
+  exit 0
+fi
+
+if [[ "$RUNNER" == "claude" ]] && ! command -v srt &>/dev/null; then
+  echo "error: srt not found — install with: npm install -g @anthropic-ai/sandbox-runtime" >&2
+  exit 1
+fi
+
+LOG_DIR="${AGENTS_DIR}/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="${LOG_DIR}/dream-$(date +%Y-%m-%d).log"
+
+print_audit_summary | tee -a "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
+print_run_intro | tee -a "$LOG_FILE"
+
+{
+  echo "=== Dream run: $(date) ==="
+  echo ""
+  echo "$audit"
+  echo ""
+} >> "$LOG_FILE"
+
+cd "$VAULT_DIR"
+
+# Pipe prompt via stdin to avoid srt's shell re-interpreting special characters
+# in the audit text (parentheses, etc.).
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "• Dry run — skipped agent invocation" | tee -a "$LOG_FILE"
+else
+  run_agent_maintenance 2>&1 | tee -a "$LOG_FILE"
+fi
+
+{
+  echo ""
+  echo "=== Finished: $(date) ==="
+} >> "$LOG_FILE"
+
+run_reference_check "post-run"
+run_plan_integrity_check "post-run"
+
+{
+  echo ""
+  echo "$REFERENCE_REPORT"
+  echo ""
+  echo "$PLAN_INTEGRITY_REPORT"
+} >> "$LOG_FILE"
+
+print_post_checks | tee -a "$LOG_FILE"
+
+if [[ "$REFERENCE_UNRESOLVED" -gt 0 ]]; then
+  echo ""
+  echo "Dream maintenance left unresolved broken references. See report above." >&2
+  exit 1
+fi
+
+if [[ "$PLAN_INTEGRITY_VIOLATIONS" -gt 0 ]]; then
+  echo ""
+  echo "Dream maintenance rewrote or trimmed protected plan files. See report above." >&2
+  exit 1
+fi
+
+echo ""
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "✓ Dry run complete — agent invocation skipped."
+else
+  echo "✓ Dream maintenance complete."
+fi
