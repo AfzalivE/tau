@@ -149,6 +149,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       ".",
       "~/.cache",
       "~/Library/Caches",
+      "~/.pi/agent/*.lock",
       "~/**/__pycache__",
       "~/**/__pycache__/*",
       "~/.npm",
