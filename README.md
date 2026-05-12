@@ -153,7 +153,6 @@ Bundled in `afzal-tau-all-agent`.
 
 | Extension         | Command      | Description                                                              |
 | ----------------- | ------------ | ------------------------------------------------------------------------ |
-| `command-preview` | `ctrl+o`     | Tri-state tool output cycle: standard, expanded, and collapsed.          |
 | `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
 | `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
 | `todoist`         | `/todoist`   | Todoist-backed tasks with offline outbox sync for single or multi-session work. |
