@@ -15,7 +15,7 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 - Fix broken note references before any consolidation, weakening, archiving, or deletion decisions.
 - Validate both Obsidian wikilinks (`[[Note]]`, `[[Note#Heading]]`) and markdown note links (`[label](Note.md)` / relative `.md` paths).
 - Treat stale semantic references as first-class reference problems even when the literal link still resolves. Examples: a note says "see X under Y", quotes a heading/title that no longer exists, points at an old canonical note after a merge/rename, or describes a location that has moved.
-- Use `node skills/dream/scripts/validate-references.mjs --apply --label during-run` when Bash + `node` are available. Otherwise use the report embedded in `DREAM_AUDIT`, then repair links directly with read/edit/search tools.
+- Use the reference-validator command embedded in `DREAM_AUDIT` when Bash + `node` are available. If `DREAM_AUDIT` does not provide it, locate `scripts/validate-references.mjs` beside this skill and run it with `--apply --label during-run`. Otherwise use the report embedded in `DREAM_AUDIT`, then repair links directly with read/edit/search tools.
 - Use the scripted validator for syntactic link breakage, then manually inspect the surrounding sentence/paragraph for stale reference prose that the validator cannot detect.
 - Best-effort repair means: prefer exact path matches, exact basename matches, unique aliases, recently moved files, archive destinations, and current canonical notes before considering fuzzy matches. Use surrounding context, backlinks, headings, and `git log` when needed to disambiguate.
 - When a reference mentions a note section or location in prose, verify that the named heading/location still exists. If the content moved, update both the link and the prose so the instruction remains true.
@@ -27,7 +27,7 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 - Read files flagged as RECENTLY CHANGED in the audit
 - If multiple files contain overlapping content on the same topic, merge into the canonical location
 - Remove duplication after merging
-- **Protected notes** (configured in `config/dream.yaml` under `protected_note_tags`, currently `agenda` and `planning`): never trim, summarize, condense, paraphrase, or rewrite their content. These are reference artifacts — their detailed steps have value even after implementation.
+- **Protected notes** (configured in the personal dream config summarized in `DREAM_AUDIT`, currently note tags `agenda` and `planning`): never trim, summarize, condense, paraphrase, or rewrite their content. These are reference artifacts — their detailed steps have value even after implementation.
 - For protected notes, allowed edits are narrow: fix broken/stale references, update obsolete note/heading names, or move the entire file intact when archiving a shipped technical plan.
 - Do not replace a protected note body with a retrospective summary, status blurb, or short “see X” note.
 - Assume the wrapper will run a post-maintenance integrity check that fails the run if a protected note is materially shortened or rewritten.
@@ -49,11 +49,11 @@ Files move through three states based on staleness:
 | **Weak** | `agent-brain/` | No |
 | **Dormant** | `agent-brain/archive/` | No |
 
-Use the thresholds from `config/dream.yaml`:
+Use the thresholds from the dream config summarized in `DREAM_AUDIT`:
 - **Strong → Weak**: File untouched for `weaken_days`+ days AND still linked in MOC. Action: remove its `[[wikilink]]` from the relevant MOC page.
 - **Weak → Dormant**: File untouched for `archive_days`+ days AND already unlinked. Action: `mv` the file to `agent-brain/archive/`.
 
-Never weaken or archive files listed in `config/dream.yaml` under `protected_files`.
+Never weaken or archive files listed there under `protected_files`.
 
 ### 5. Archiving shipped technical plans
 - When a technical plan file (tagged `planning`) has a **Status** of "Shipped", move it intact to `archive/plans/`.

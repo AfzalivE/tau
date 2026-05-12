@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+TAU_SKILLS_DIR="${ROOT}/skills"
+
+AGENTS_DIR="${AGENTS_DIR:-${HOME}/.agents}"
+AGENTS_INSTRUCTIONS_FILE="${AGENTS_DIR}/AGENTS.md"
+AGENTS_SKILLS_DIR="${AGENTS_DIR}/skills"
+
+CODEX_INSTRUCTIONS_FILE="${HOME}/.codex/AGENTS.md"
+CLAUDE_INSTRUCTIONS_FILE="${HOME}/.claude/CLAUDE.md"
+CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
+
+SYNC_CODEX=0
+SYNC_CLAUDE=0
+SYNC_TARGETS_SET=0
+PRUNE=0
+
+usage() {
+  cat <<EOF
+Set up Tau-managed files for Codex and Claude.
+
+Usage:
+  setup [--codex] [--claude] [--prune]
+
+Options:
+  --codex   Set up only Codex-managed files
+  --claude  Set up only Claude-managed files
+  --prune   Remove stale Claude skill symlinks that point into ~/.agents/skills
+
+Environment:
+  AGENTS_DIR  Override the personal agent config directory (default: ~/.agents)
+
+Notes:
+  - If no agent flag is provided, set up Codex and Claude.
+  - ~/.agents/skills is kept as a symlink to this checkout's skills/ directory.
+  - Codex reads ~/.agents/skills directly; Claude gets per-skill symlinks in ~/.claude/skills.
+  - ~/.agents/AGENTS.md remains the source of truth for personal instructions.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --codex)
+        SYNC_CODEX=1
+        SYNC_TARGETS_SET=1
+        shift
+        ;;
+      --claude)
+        SYNC_CLAUDE=1
+        SYNC_TARGETS_SET=1
+        shift
+        ;;
+      --prune)
+        PRUNE=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "error: unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+apply_default_targets() {
+  if [[ "${SYNC_TARGETS_SET}" -eq 0 ]]; then
+    SYNC_CODEX=1
+    SYNC_CLAUDE=1
+  fi
+}
+
+require_source() {
+  local path="$1"
+  local kind="$2"
+
+  if [[ "${kind}" == "file" && ! -f "${path}" ]]; then
+    echo "error: missing file: ${path}" >&2
+    exit 1
+  fi
+
+  if [[ "${kind}" == "dir" && ! -d "${path}" ]]; then
+    echo "error: missing directory: ${path}" >&2
+    exit 1
+  fi
+}
+
+link_path() {
+  local source="$1"
+  local target="$2"
+
+  mkdir -p "$(dirname "${target}")"
+
+  if [[ -L "${target}" ]]; then
+    local current
+    current="$(readlink "${target}")"
+    if [[ "${current}" == "${source}" ]]; then
+      return 0
+    fi
+    rm "${target}"
+  elif [[ -e "${target}" ]]; then
+    if [[ -f "${source}" && -f "${target}" ]] && cmp -s "${source}" "${target}"; then
+      rm "${target}"
+    else
+      local backup="${target}.bak.$(date +%Y%m%d%H%M%S)"
+      mv "${target}" "${backup}"
+      printf 'Backed up %s to %s\n' "${target}" "${backup}"
+    fi
+  fi
+
+  ln -s "${source}" "${target}"
+  printf 'Linked %s -> %s\n' "${target}" "${source}"
+}
+
+prune_claude_skills() {
+  [[ "${PRUNE}" -eq 1 ]] || return 0
+  [[ -d "${CLAUDE_SKILLS_DIR}" ]] || return 0
+
+  local target
+  for target in "${CLAUDE_SKILLS_DIR}"/*; do
+    [[ -e "${target}" || -L "${target}" ]] || continue
+    [[ -L "${target}" ]] || continue
+
+    local base
+    base="$(basename "${target}")"
+    [[ "${base}" == ".system" ]] && continue
+
+    if [[ -d "${TAU_SKILLS_DIR}/${base}" ]]; then
+      continue
+    fi
+
+    local current
+    current="$(readlink "${target}")"
+    case "${current}" in
+      "${AGENTS_SKILLS_DIR}/"*)
+        rm "${target}"
+        printf 'Removed %s\n' "${target}"
+        ;;
+    esac
+  done
+}
+
+setup_shared_skills_dir() {
+  link_path "${TAU_SKILLS_DIR}" "${AGENTS_SKILLS_DIR}"
+}
+
+setup_codex() {
+  [[ "${SYNC_CODEX}" -eq 1 ]] || return 0
+  link_path "${AGENTS_INSTRUCTIONS_FILE}" "${CODEX_INSTRUCTIONS_FILE}"
+}
+
+setup_claude() {
+  [[ "${SYNC_CLAUDE}" -eq 1 ]] || return 0
+
+  link_path "${AGENTS_INSTRUCTIONS_FILE}" "${CLAUDE_INSTRUCTIONS_FILE}"
+
+  local skill_dir
+  for skill_dir in "${TAU_SKILLS_DIR}"/*; do
+    [[ -d "${skill_dir}" ]] || continue
+
+    local skill_name
+    skill_name="$(basename "${skill_dir}")"
+    [[ "${skill_name}" == .* ]] && continue
+
+    link_path "${AGENTS_SKILLS_DIR}/${skill_name}" "${CLAUDE_SKILLS_DIR}/${skill_name}"
+  done
+
+  prune_claude_skills
+}
+
+main() {
+  parse_args "$@"
+  apply_default_targets
+
+  require_source "${AGENTS_INSTRUCTIONS_FILE}" file
+  require_source "${TAU_SKILLS_DIR}" dir
+
+  setup_shared_skills_dir
+  setup_codex
+  setup_claude
+}
+
+main "$@"
