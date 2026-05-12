@@ -1,8 +1,8 @@
 {
   "name": "afzal-tau-all-agent",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "private": true,
-  "description": "Full fork-specific Tau package for Pi with every extension except memory, every skill in this repo, and the Tau theme",
+  "description": "Full fork-specific Tau package for Pi with every extension except memory, a curated fork skill set, and the Tau theme",
   "keywords": [
     "agent-tools",
     "code-review",
@@ -43,10 +43,10 @@
     "turndown-plugin-gfm": "^1.0.2"
   },
   "peerDependencies": {
-    "@mariozechner/pi-agent-core": "*",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "engines": {
@@ -86,6 +86,7 @@
       "../../skills/update-changelog",
       "../../skills/web-design",
       "../../skills/homeassistant-ops",
+      "../../skills/material-3",
       "../../skills/openscad",
       "../../skills/diagnose",
       "../../skills/grill-me",
@@ -106,6 +107,7 @@
       "../../skills/git-worktree",
       "../../skills/ms-openapi-explorer",
       "../../skills/qmd",
+      "../../skills/pup/datadog/dashboards",
       "../../skills/review-breaker",
       "../../skills/td",
       "../../skills/tw"

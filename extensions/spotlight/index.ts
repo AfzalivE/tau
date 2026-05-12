@@ -23,7 +23,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
