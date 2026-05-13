@@ -2,6 +2,7 @@
  * Command policy helpers for sandbox extension.
  */
 
+import { homedir } from "node:os";
 import { basename } from "node:path";
 
 const SIMPLE_COMMAND_OPERATORS = new Set([
@@ -40,37 +41,200 @@ export interface BlockedCommandMatch {
   rawExecutable: string;
 }
 
+export interface SimpleCommand {
+  executable: string;
+  rawExecutable: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+export interface ExcludedCommandMatch {
+  pattern: string;
+  executable: string;
+  rawExecutable: string;
+  command: SimpleCommand;
+}
+
 export function findBlockedCommand(
   command: string,
   blockedCommands: string[],
 ): BlockedCommandMatch | null {
-  const normalizedBlockedCommands = blockedCommands
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
+  const normalizedBlockedCommands = normalizeCommandPatterns(blockedCommands);
   if (normalizedBlockedCommands.length === 0) return null;
 
-  const tokens = tokenizeShellCommand(command);
+  for (const words of splitShellCommandWords(command)) {
+    const match = findBlockedCommandInSimpleCommand(words, normalizedBlockedCommands);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+/**
+ * Match a command against an allow-to-bypass list.
+ *
+ * Unlike blocked-command matching, bypass matching is deliberately strict: the
+ * whole shell input must be a single simple command. A command containing shell
+ * separators, pipelines, redirections, command substitution, or shell wrappers
+ * should stay sandboxed so that a trusted executable prefix cannot unsandbox an
+ * arbitrary process tree (for example: `tw auth status && node steal.js`).
+ */
+export function findExcludedCommand(
+  command: string,
+  excludedCommands: string[],
+): ExcludedCommandMatch | null {
+  const normalizedExcludedCommands = normalizeCommandPatterns(excludedCommands);
+  if (normalizedExcludedCommands.length === 0) return null;
+
+  const simpleCommand = parseSingleSimpleCommand(command);
+  if (!simpleCommand) return null;
+
+  for (const pattern of normalizedExcludedCommands) {
+    if (matchesExcludedPattern(simpleCommand, pattern)) {
+      return {
+        pattern,
+        executable: simpleCommand.executable,
+        rawExecutable: simpleCommand.rawExecutable,
+        command: simpleCommand,
+      };
+    }
+  }
+
+  return null;
+}
+
+export function parseSingleSimpleCommand(command: string): SimpleCommand | null {
+  if (hasUnsafeBypassShellSyntax(command)) return null;
+
+  const words = getSingleSimpleCommandWords(command.trim());
+  if (!words) return null;
+
+  return parseDirectSimpleCommandWords(words);
+}
+
+function normalizeCommandPatterns(patterns: string[]): string[] {
+  return patterns.map((value) => value.trim()).filter((value) => value.length > 0);
+}
+
+function splitShellCommandWords(command: string): string[][] {
+  const commands: string[][] = [];
   const words: string[] = [];
 
-  const flush = (): BlockedCommandMatch | null => {
-    if (words.length === 0) return null;
-
-    const match = findBlockedCommandInSimpleCommand(words, normalizedBlockedCommands);
+  const flush = (): void => {
+    if (words.length === 0) return;
+    commands.push([...words]);
     words.length = 0;
-    return match;
   };
 
-  for (const token of tokens) {
+  for (const token of tokenizeShellCommand(command)) {
     if (token.type === "operator") {
-      const match = flush();
-      if (match) return match;
+      flush();
       continue;
     }
 
     words.push(token.value);
   }
 
-  return flush();
+  flush();
+  return commands;
+}
+
+function getSingleSimpleCommandWords(command: string): string[] | null {
+  const tokens = tokenizeShellCommand(command);
+  if (tokens.length === 0) return null;
+  if (tokens.some((token) => token.type === "operator")) return null;
+  return tokens.map((token) => token.value);
+}
+
+function parseDirectSimpleCommandWords(words: string[]): SimpleCommand | null {
+  const env: Record<string, string> = {};
+  let index = 0;
+
+  while (index < words.length && isEnvironmentAssignment(words[index] ?? "")) {
+    const word = words[index] ?? "";
+    const separator = word.indexOf("=");
+    env[word.slice(0, separator)] = word.slice(separator + 1);
+    index += 1;
+  }
+
+  const rawExecutable = words[index];
+  if (!rawExecutable) return null;
+
+  const expandedRawExecutable = expandTildePath(rawExecutable);
+  const executable = executableBasename(expandedRawExecutable);
+  const args = words.slice(index + 1).map(expandTildePath);
+  return { executable, rawExecutable: expandedRawExecutable, args, env };
+}
+
+function hasUnsafeBypassShellSyntax(command: string): boolean {
+  // Excluded commands are executed directly, not through a shell. Keep this
+  // strict so `/sandbox commands exclude add tw` never becomes an unsandboxed
+  // escape hatch for shell syntax the direct runner would not reproduce.
+  return /[`<>]|\$\(|\$\{|\$\[/.test(command);
+}
+
+function matchesExcludedPattern(command: SimpleCommand, pattern: string): boolean {
+  const commandLines = commandLineVariants(command);
+  const patternLines = patternLineVariants(pattern);
+
+  if (!containsPatternGlob(pattern)) {
+    if (isExecutableOnlyPattern(pattern)) {
+      return patternLines.some(
+        (candidate) =>
+          candidate === command.rawExecutable ||
+          candidate === command.executable ||
+          candidate === expandTildePath(command.rawExecutable),
+      );
+    }
+
+    return patternLines.some((candidate) => commandLines.includes(candidate));
+  }
+
+  return patternLines.some((candidate) => {
+    const regex = new RegExp(`^${globPatternToRegex(candidate)}$`);
+    return commandLines.some((line) => regex.test(line));
+  });
+}
+
+function commandLineVariants(command: SimpleCommand): string[] {
+  return Array.from(
+    new Set([
+      [command.rawExecutable, ...command.args].join(" "),
+      [command.executable, ...command.args].join(" "),
+    ]),
+  );
+}
+
+function patternLineVariants(pattern: string): string[] {
+  return Array.from(new Set([pattern, expandTildePath(pattern)]));
+}
+
+function expandTildePath(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return `${homedir()}${value.slice(1)}`;
+  return value;
+}
+
+function containsPatternGlob(pattern: string): boolean {
+  return /[*?]/.test(pattern);
+}
+
+function isExecutableOnlyPattern(pattern: string): boolean {
+  return !/\s/.test(pattern) && !containsPatternGlob(pattern);
+}
+
+function globPatternToRegex(pattern: string): string {
+  let regex = "";
+  for (const char of pattern) {
+    if (char === "*") regex += ".*";
+    else if (char === "?") regex += ".";
+    else regex += escapeRegex(char);
+  }
+  return regex;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
 }
 
 function findBlockedCommandInSimpleCommand(

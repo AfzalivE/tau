@@ -20,7 +20,8 @@
  *   "enabled": true,
  *   "mode": "interactive",
  *   "commands": {
- *     "blocked": ["npx"]
+ *     "blocked": ["npx"],
+ *     "excluded": ["tw"]
  *   },
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
@@ -69,7 +70,7 @@ import {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type BashOperations, createBashTool } from "@earendil-works/pi-coding-agent";
-import { findBlockedCommand } from "./command-policy.js";
+import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
 import {
   getMachErrorFallback,
   getMachLookupArgumentCompletions,
@@ -96,6 +97,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
   mode: DEFAULT_PROMPT_MODE,
   commands: {
     blocked: [],
+    excluded: [],
   },
   network: {
     allowedDomains: [
@@ -228,6 +230,8 @@ type SandboxState =
 
 type SandboxCommandConfig = {
   blocked: string[];
+  /** Commands that run outside the OS sandbox. Must match a single simple command. */
+  excluded: string[];
 };
 
 type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
@@ -253,6 +257,7 @@ type SandboxEventReason =
   | "init-failed"
   | "already-approved-still-failed"
   | "blocked-command"
+  | "excluded-command"
   | "unknown";
 type SandboxConfigPathStatus = "loaded" | "parse-error";
 type SandboxConfigPathLabel = "Global" | "Project" | "Override";
@@ -667,6 +672,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         config.commands?.blocked,
         DEFAULT_CONFIG.commands.blocked,
         "commands.blocked",
+      ),
+      excluded: coerceStringArray(
+        config.commands?.excluded,
+        DEFAULT_CONFIG.commands.excluded,
+        "commands.excluded",
       ),
     },
     network: {
@@ -1714,6 +1724,76 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     });
   }
 
+  async function runExcludedCommand(
+    command: SimpleCommand,
+    cwd: string,
+    onData: (data: Buffer) => void,
+    signal?: AbortSignal,
+    timeout?: number,
+    env?: NodeJS.ProcessEnv,
+  ): Promise<{ exitCode: number | null }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command.rawExecutable, command.args, {
+        cwd,
+        env: { ...(env ?? process.env), ...command.env },
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let timedOut = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let timeoutEscalationHandle: NodeJS.Timeout | undefined;
+
+      if (timeout !== undefined && timeout > 0) {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          killProcessGroup(child, "SIGTERM");
+          timeoutEscalationHandle = setTimeout(() => {
+            killProcessGroup(child, "SIGKILL");
+          }, 2000);
+        }, timeout * 1000);
+      }
+
+      child.stdout?.on("data", onData);
+      child.stderr?.on("data", onData);
+
+      const onAbort = () => {
+        killProcessGroup(child, "SIGKILL");
+      };
+
+      child.on("error", (err) => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
+        signal?.removeEventListener("abort", onAbort);
+        killProcessGroup(child, "SIGKILL");
+        reject(err);
+      });
+
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      child.on("close", (code) => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
+        signal?.removeEventListener("abort", onAbort);
+
+        if (signal?.aborted) {
+          reject(new Error("aborted"));
+          return;
+        }
+
+        if (timedOut) {
+          reject(new Error(`timeout:${timeout}`));
+          return;
+        }
+
+        resolve({ exitCode: code });
+      });
+    });
+  }
+
   function getRemainingTimeout(timeout: number | undefined, startedAt: number): number | undefined {
     if (timeout === undefined) return undefined;
 
@@ -1869,6 +1949,32 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       return runSerially(async () => {
         if (!existsSync(cwd)) {
           throw new Error(`Working directory does not exist: ${cwd}`);
+        }
+
+        const excludedMatch = findExcludedCommand(
+          command,
+          getSandboxConfig()?.commands.excluded ?? [],
+        );
+        if (excludedMatch) {
+          const summary = `command bypassed sandbox via commands.excluded entry \`${excludedMatch.pattern}\``;
+          recordEvent?.({
+            timestamp: Date.now(),
+            kind: "command",
+            outcome: "allowed",
+            reason: "excluded-command",
+            target: excludedMatch.executable,
+            command,
+            cwd,
+            summary,
+          });
+
+          const message = `[sandbox] Running excluded command outside sandbox: ${excludedMatch.rawExecutable} (matched ${excludedMatch.pattern})`;
+          onData(Buffer.from(`${message}\n`));
+          const ctx = getContext();
+          if (ctx?.hasUI) notify(ctx, message, "info");
+          else console.error(message);
+
+          return runExcludedCommand(excludedMatch.command, cwd, onData, signal, timeout, env);
         }
 
         const startedAt = Date.now();
@@ -2714,6 +2820,7 @@ export default function (pi: ExtensionAPI) {
           "",
           "  Commands:",
           `    Blocked: ${sandboxConfig?.commands.blocked.join(", ") || "(none)"}`,
+          `    Excluded: ${sandboxConfig?.commands.excluded.join(", ") || "(none)"}`,
           "",
           "  Advanced:",
           `    ignoreViolations: ${runtimeConfig.ignoreViolations ? "configured" : "(none)"}`,
