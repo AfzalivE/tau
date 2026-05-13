@@ -1,0 +1,11 @@
+{
+  "name": "afzal-tau-local",
+  "owner": { "name": "Jason" },
+  "plugins": [
+    {
+      "name": "tau-afzal",
+      "source": "./",
+      "description": "TODO: one-line description"
+    }
+  ]
+}
