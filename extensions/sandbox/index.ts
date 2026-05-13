@@ -145,6 +145,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
   },
   filesystem: {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
+    allowRead: ["~/.ssh/config", "~/.ssh/known_hosts", "~/.ssh/*.pub"],
     allowWrite: [
       ".",
       "~/.cache",
