@@ -10,15 +10,18 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Added a dedicated `/review` security focus.
 - Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
+- Added Matt Pocock's `handoff` skill to the fork-specific skill bundle.
 
 ### Changed
 
 - Grounded `/review` efficiency findings in locally provable runtime costs.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
+- Updated bundled Matt Pocock skills from the local `mattpocock-skills` checkout.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
 
 ### Fixed
 
+- Fixed the fork-specific package manifest's `review` extension entry so packaging resolves the extension directory.
 - Fixed `/sandbox off` still prompting for network access.
 
 ## [0.1.4] - 2026-05-09
