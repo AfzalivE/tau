@@ -141,6 +141,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.doist.com",
     ],
     deniedDomains: [],
+    allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
   },
   filesystem: {
@@ -186,6 +187,7 @@ const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
 const METADATA_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
 const GIT_FILESYSTEM_PATHS_CACHE = new Map<string, GitFilesystemPaths | null>();
+const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 // --- Types ---
 
@@ -616,12 +618,7 @@ function formatSandboxConfigLoadErrorMessage(
   return `Could not read sandbox override config ${path}: ${detail ?? "unknown error"}`;
 }
 
-function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
-  if (!Array.isArray(value)) {
-    console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
-    return [...fallback];
-  }
-
+function cleanStringArray(value: unknown[], field: string): string[] {
   const cleaned = value
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
@@ -633,6 +630,30 @@ function coerceStringArray(value: unknown, fallback: string[], field: string): s
   }
 
   return cleaned;
+}
+
+function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
+  if (!Array.isArray(value)) {
+    console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
+    return [...fallback];
+  }
+
+  return cleanStringArray(value, field);
+}
+
+function coerceOptionalStringArray(
+  value: unknown,
+  fallback: string[] | undefined,
+  field: string,
+): string[] | undefined {
+  if (value === undefined) return fallback ? [...fallback] : undefined;
+
+  if (!Array.isArray(value)) {
+    console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
+    return fallback ? [...fallback] : undefined;
+  }
+
+  return cleanStringArray(value, field);
 }
 
 function finalizeConfig(config: SandboxConfig): SandboxConfig {
@@ -652,6 +673,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         DEFAULT_CONFIG.network.deniedDomains,
         "network.deniedDomains",
       ),
+      allowUnixSockets: coerceOptionalStringArray(
+        config.network?.allowUnixSockets,
+        DEFAULT_CONFIG.network.allowUnixSockets,
+        "network.allowUnixSockets",
+      ),
     },
     filesystem: {
       ...config.filesystem,
@@ -659,6 +685,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         config.filesystem?.denyRead,
         DEFAULT_CONFIG.filesystem.denyRead,
         "filesystem.denyRead",
+      ),
+      allowRead: coerceOptionalStringArray(
+        config.filesystem?.allowRead,
+        DEFAULT_CONFIG.filesystem.allowRead,
+        "filesystem.allowRead",
       ),
       allowWrite: coerceStringArray(
         config.filesystem?.allowWrite,
@@ -814,15 +845,128 @@ function getTemporaryWritePaths(): string[] {
   return cachedTemporaryWritePaths;
 }
 
+function deduplicateStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function deduplicateOptionalStrings(values: string[] | undefined): string[] | undefined {
+  return values ? deduplicateStrings(values) : undefined;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function expandPathConfigEntry(value: string, field: string): string | null {
+  const source = value.trim();
+  if (!source) return null;
+
+  const missingEnvNames = new Set<string>();
+  const expanded = source.replace(
+    ENV_PATH_REFERENCE_PATTERN,
+    (_match, bracedName: string | undefined, bareName: string | undefined) => {
+      const envName = bracedName ?? bareName;
+      const envValue = envName ? (process.env[envName]?.trim() ?? "") : "";
+      if (!envValue) {
+        if (envName) missingEnvNames.add(envName);
+        return "";
+      }
+      return envValue;
+    },
+  );
+
+  if (missingEnvNames.size > 0) {
+    const names = Array.from(missingEnvNames).join(", ");
+    const label = missingEnvNames.size === 1 ? "environment variable" : "environment variables";
+    const verb = missingEnvNames.size === 1 ? "is" : "are";
+    console.error(
+      `Warning: Ignoring ${field} entry because ${label} ${names} ${verb} unset or empty.`,
+    );
+    return null;
+  }
+
+  if (containsControlCharacter(expanded)) {
+    console.error(
+      `Warning: Ignoring ${field} entry because the expanded path contains control characters.`,
+    );
+    return null;
+  }
+
+  return expanded;
+}
+
+function expandPathConfigList(values: string[] | undefined, field: string): string[] | undefined {
+  if (!values) return undefined;
+
+  return values
+    .map((value) => expandPathConfigEntry(value, field))
+    .filter((value): value is string => value !== null);
+}
+
+function expandMitmProxyPathConfig(
+  mitmProxy: SandboxRuntimeConfig["network"]["mitmProxy"],
+): SandboxRuntimeConfig["network"]["mitmProxy"] {
+  if (!mitmProxy) return undefined;
+  if (!isPlainObject(mitmProxy) || typeof mitmProxy.socketPath !== "string") return mitmProxy;
+
+  const socketPath = expandPathConfigEntry(mitmProxy.socketPath, "network.mitmProxy.socketPath");
+  if (!socketPath) {
+    console.error("Warning: Disabling network.mitmProxy because its socketPath did not expand.");
+    return undefined;
+  }
+
+  return { ...mitmProxy, socketPath } as SandboxRuntimeConfig["network"]["mitmProxy"];
+}
+
+function expandNetworkPathConfig(
+  network: SandboxRuntimeConfig["network"],
+): SandboxRuntimeConfig["network"] {
+  return {
+    ...network,
+    allowUnixSockets: expandPathConfigList(network.allowUnixSockets, "network.allowUnixSockets"),
+    mitmProxy: expandMitmProxyPathConfig(network.mitmProxy),
+  };
+}
+
+function expandFilesystemPathConfig(
+  filesystem: SandboxRuntimeConfig["filesystem"],
+): SandboxRuntimeConfig["filesystem"] {
+  return {
+    ...filesystem,
+    denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead") ?? [],
+    allowRead: expandPathConfigList(filesystem.allowRead, "filesystem.allowRead"),
+    allowWrite: expandPathConfigList(filesystem.allowWrite, "filesystem.allowWrite") ?? [],
+    denyWrite: expandPathConfigList(filesystem.denyWrite, "filesystem.denyWrite") ?? [],
+  };
+}
+
 function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
+  const expandedNetwork = expandNetworkPathConfig(config.network);
+  const expandedFilesystem = expandFilesystemPathConfig(filesystem);
   const allowWrite = allowTempDirs
-    ? Array.from(new Set([...filesystem.allowWrite, ...getTemporaryWritePaths()]))
-    : filesystem.allowWrite;
+    ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]
+    : expandedFilesystem.allowWrite;
 
   return {
-    network: config.network,
-    filesystem: { ...filesystem, allowWrite },
+    network: {
+      ...expandedNetwork,
+      allowUnixSockets: deduplicateOptionalStrings(expandedNetwork.allowUnixSockets),
+    },
+    filesystem: {
+      ...expandedFilesystem,
+      denyRead: deduplicateStrings(expandedFilesystem.denyRead),
+      allowRead: deduplicateOptionalStrings(expandedFilesystem.allowRead),
+      allowWrite: deduplicateStrings(allowWrite),
+      denyWrite: deduplicateStrings(expandedFilesystem.denyWrite),
+    },
     ignoreViolations: config.ignoreViolations,
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
@@ -2571,6 +2715,7 @@ export default function (pi: ExtensionAPI) {
           "",
           "  Filesystem:",
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
+          `    Allow Read: ${runtimeConfig.filesystem.allowRead?.join(", ") || "(none)"}`,
           `    Allow Write: ${runtimeConfig.filesystem.allowWrite.join(", ") || "(none)"}`,
           `    Deny Write: ${runtimeConfig.filesystem.denyWrite.join(", ") || "(none)"}`,
           `    allowTempDirs: ${sandboxConfig?.filesystem.allowTempDirs ? "true" : "false"}`,

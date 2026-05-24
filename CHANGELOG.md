@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
+- Added runtime environment-variable expansion for path-valued sandbox config.
+- Added `$SSH_AUTH_SOCK` to the default sandbox Unix socket allowlist.
 - Added a dedicated `/review` security focus.
 - Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
 
