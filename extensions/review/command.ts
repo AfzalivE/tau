@@ -44,8 +44,9 @@ import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-work
 import { matchesKey } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import path from "node:path";
 import { promises as fs } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 
 import {
   ADDITIONAL_CONTEXT_SECTION_PROMPT,
@@ -93,6 +94,12 @@ const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
 const FIX_PASS_START_GRACE_MS = 1_000;
+const FIX_LOOP_RETRY_START_GRACE_MS = 1_000;
+const FIX_LOOP_DEFAULT_RETRY_SETTINGS = {
+  enabled: true,
+  maxRetries: 3,
+  baseDelayMs: 2_000,
+} as const;
 const REVIEW_UNTRACKED_HASH_DISABLED = "__disabled__";
 const REVIEW_CANCELLED_ERROR = "Review aborted";
 const REVIEW_STALE_REVIEW_WARNING = "Repository changed while this review was running.";
@@ -217,15 +224,30 @@ type ManagedReviewRun = {
   markCancelled: () => void;
 };
 
-type AgentEndMessages = Array<{ role?: string; stopReason?: string }>;
-
-type FixPassAgentTracker = {
-  waitForNextEnd: () => Promise<AgentEndMessages>;
-  waitForStartAfter: (lastSeenStartCount: number, timeoutMs: number) => Promise<boolean>;
-  getStartCount: () => number;
+type AgentEndMessage = {
+  role?: string;
+  stopReason?: string;
+  errorMessage?: string;
 };
 
-type AgentRunTracker = FixPassAgentTracker & {
+type AgentEndMessages = AgentEndMessage[];
+
+type FixLoopRetrySettings = {
+  enabled: boolean;
+  maxRetries: number;
+  baseDelayMs: number;
+};
+
+type FixLoopAgentTracker = {
+  waitForNextEnd: () => Promise<AgentEndMessages>;
+  waitForStartAfter: (lastSeenStartCount: number, timeoutMs: number) => Promise<boolean>;
+  waitForEndAfter: (lastSeenEndCount: number) => Promise<AgentEndMessages>;
+  getStartCount: () => number;
+  getEndCount: () => number;
+  getLastEndMessages: () => AgentEndMessages | undefined;
+};
+
+type AgentRunTracker = FixLoopAgentTracker & {
   handleStart: () => void;
   handleEnd: (messages: AgentEndMessages) => void;
   reset: () => void;
@@ -3846,12 +3868,88 @@ function queueFixPass(
   return { startsImmediately };
 }
 
+function getLastAssistantMessage(messages: AgentEndMessages): AgentEndMessage | undefined {
+  return messages.findLast((message) => message?.role === "assistant");
+}
+
 function wasLastAssistantAborted(messages: AgentEndMessages): boolean {
-  return messages.findLast((message) => message?.role === "assistant")?.stopReason === "aborted";
+  return getLastAssistantMessage(messages)?.stopReason === "aborted";
+}
+
+function hasAssistantError(message: AgentEndMessage | undefined): boolean {
+  return message?.stopReason === "error";
+}
+
+async function readFixLoopRetrySettings(cwd: string): Promise<FixLoopRetrySettings> {
+  const globalSettings = await readSettingsFile(
+    path.join(homedir(), ".pi", "agent", "settings.json"),
+  );
+  const projectSettings = await readSettingsFile(path.join(cwd, ".pi", "settings.json"));
+  const settings = mergeSettings(globalSettings, projectSettings);
+  const retry = asPlainRecord(settings.retry);
+
+  return {
+    enabled: readBooleanSetting(retry?.enabled, FIX_LOOP_DEFAULT_RETRY_SETTINGS.enabled),
+    maxRetries: readNonNegativeIntegerSetting(
+      retry?.maxRetries,
+      FIX_LOOP_DEFAULT_RETRY_SETTINGS.maxRetries,
+    ),
+    baseDelayMs: readNonNegativeIntegerSetting(
+      retry?.baseDelayMs,
+      FIX_LOOP_DEFAULT_RETRY_SETTINGS.baseDelayMs,
+    ),
+  };
+}
+
+async function readSettingsFile(settingsPath: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    return asPlainRecord(parsed) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function mergeSettings(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const current = asPlainRecord(merged[key]);
+    const next = asPlainRecord(value);
+    merged[key] = current && next ? mergeSettings(current, next) : value;
+  }
+  return merged;
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readBooleanSetting(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readNonNegativeIntegerSetting(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+function getFixLoopRetryStartTimeoutMs(
+  retrySettings: FixLoopRetrySettings,
+  retryAttempt: number,
+): number {
+  return (
+    retrySettings.baseDelayMs * 2 ** Math.max(0, retryAttempt - 1) + FIX_LOOP_RETRY_START_GRACE_MS
+  );
 }
 
 async function waitForPromptStartIfImmediate(
-  agentTracker: FixPassAgentTracker,
+  agentTracker: FixLoopAgentTracker,
   startCountBeforePrompt: number,
   startsImmediately: boolean,
 ): Promise<void> {
@@ -3859,13 +3957,47 @@ async function waitForPromptStartIfImmediate(
   await agentTracker.waitForStartAfter(startCountBeforePrompt, FIX_PASS_START_GRACE_MS);
 }
 
+async function waitForFixPassCompletion(
+  ctx: ExtensionCommandContext,
+  firstFinishedMessages: AgentEndMessages,
+  agentTracker: FixLoopAgentTracker,
+  retrySettings: FixLoopRetrySettings,
+): Promise<AgentEndMessages> {
+  let messages = agentTracker.getLastEndMessages() ?? firstFinishedMessages;
+  let retryAttempt = 0;
+
+  for (;;) {
+    const startCountBeforeIdle = agentTracker.getStartCount();
+    await ctx.waitForIdle();
+    messages = agentTracker.getLastEndMessages() ?? messages;
+
+    if (!retrySettings.enabled || !hasAssistantError(getLastAssistantMessage(messages))) {
+      return messages;
+    }
+
+    retryAttempt += 1;
+    if (retryAttempt > retrySettings.maxRetries) return messages;
+
+    const endCountBeforeRetry = agentTracker.getEndCount();
+    const retryStarted = await agentTracker.waitForStartAfter(
+      startCountBeforeIdle,
+      getFixLoopRetryStartTimeoutMs(retrySettings, retryAttempt),
+    );
+    if (!retryStarted) return agentTracker.getLastEndMessages() ?? messages;
+
+    messages = await agentTracker.waitForEndAfter(endCountBeforeRetry);
+  }
+}
+
 async function runFixLoop(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
-  agentTracker: FixPassAgentTracker,
+  agentTracker: FixLoopAgentTracker,
   reviewMessageQueue: ReviewMessageQueue,
 ): Promise<void> {
+  const retrySettings = await readFixLoopRetrySettings(ctx.cwd);
+
   for (;;) {
     const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, true);
     if (!reviewDetails) return;
@@ -3884,8 +4016,13 @@ async function runFixLoop(
       forceFollowUp: sentSteering,
     });
 
-    const fixMessages = await fixPassFinished;
-    await ctx.waitForIdle();
+    const firstFinishedMessages = await fixPassFinished;
+    const fixMessages = await waitForFixPassCompletion(
+      ctx,
+      firstFinishedMessages,
+      agentTracker,
+      retrySettings,
+    );
     if (wasLastAssistantAborted(fixMessages)) {
       notify(ctx, "Fix loop stopped: fix pass was aborted.", "warning");
       return;
@@ -3987,12 +4124,21 @@ function stopAndFlushReviewQueue(
 function createAgentRunTracker(): AgentRunTracker {
   let resolveNextAgentEnd: ((messages: AgentEndMessages) => void) | undefined;
   let resolveNextAgentStart: (() => void) | undefined;
+  let lastAgentEndMessages: AgentEndMessages | undefined;
   let agentStartCount = 0;
+  let agentEndCount = 0;
 
   function waitForNextEnd(): Promise<AgentEndMessages> {
     return new Promise((resolve) => {
       resolveNextAgentEnd = resolve;
     });
+  }
+
+  function waitForEndAfter(lastSeenEndCount: number): Promise<AgentEndMessages> {
+    if (agentEndCount > lastSeenEndCount && lastAgentEndMessages) {
+      return Promise.resolve(lastAgentEndMessages);
+    }
+    return waitForNextEnd();
   }
 
   function waitForStartAfter(lastSeenStartCount: number, timeoutMs: number): Promise<boolean> {
@@ -4020,7 +4166,10 @@ function createAgentRunTracker(): AgentRunTracker {
   return {
     waitForNextEnd,
     waitForStartAfter,
+    waitForEndAfter,
     getStartCount: () => agentStartCount,
+    getEndCount: () => agentEndCount,
+    getLastEndMessages: () => lastAgentEndMessages,
     handleStart: () => {
       agentStartCount += 1;
       const resolve = resolveNextAgentStart;
@@ -4029,15 +4178,19 @@ function createAgentRunTracker(): AgentRunTracker {
       resolve();
     },
     handleEnd: (messages) => {
+      agentEndCount += 1;
+      lastAgentEndMessages = messages;
       const resolve = resolveNextAgentEnd;
       if (!resolve) return;
       resolveNextAgentEnd = undefined;
-      resolve(messages);
+      resolve(lastAgentEndMessages);
     },
     reset: () => {
       resolveNextAgentEnd = undefined;
       resolveNextAgentStart = undefined;
+      lastAgentEndMessages = undefined;
       agentStartCount = 0;
+      agentEndCount = 0;
     },
   };
 }
