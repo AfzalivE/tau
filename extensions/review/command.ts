@@ -1746,6 +1746,7 @@ function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewD
       seenIds.add(id);
     }
 
+    // Reason is requested to make duplicate judgments explicit; the host only needs ids.
     groups.push({ ids });
   }
 
