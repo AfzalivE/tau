@@ -1,9 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 
 import type { BrowserCookie, BrowserProfile } from "../types.js";
+import { pathExists } from "./fs.js";
 import { withSqliteSnapshot } from "./sqlite.js";
 
 function firefoxBaseDir(): string | null {
@@ -45,7 +46,9 @@ function parseIni(text: string): Array<Record<string, string>> {
   return sections;
 }
 
-export function discoverFirefoxProfiles(preferredProfileName?: string): BrowserProfile[] {
+export async function discoverFirefoxProfiles(
+  preferredProfileName?: string,
+): Promise<BrowserProfile[]> {
   const baseDir = firefoxBaseDir();
   if (!baseDir) return [];
 
@@ -53,7 +56,7 @@ export function discoverFirefoxProfiles(preferredProfileName?: string): BrowserP
 
   let sections: Array<Record<string, string>> = [];
   try {
-    sections = parseIni(readFileSync(profilesIniPath, "utf8"));
+    sections = parseIni(await readFile(profilesIniPath, "utf8"));
   } catch {
     return [];
   }
@@ -67,7 +70,7 @@ export function discoverFirefoxProfiles(preferredProfileName?: string): BrowserP
     const profilePath =
       section.IsRelative === "1" ? path.join(baseDir, profilePathValue) : profilePathValue;
     const cookiesPath = path.join(profilePath, "cookies.sqlite");
-    if (!existsSync(cookiesPath)) continue;
+    if (!(await pathExists(cookiesPath))) continue;
 
     profiles.push({
       family: "firefox",
@@ -100,12 +103,12 @@ function isPreferredFirefoxProfile(
   );
 }
 
-export function loadFirefoxCookies(profile: BrowserProfile): BrowserCookie[] {
+export async function loadFirefoxCookies(profile: BrowserProfile): Promise<BrowserCookie[]> {
   const cookiesPath = path.join(profile.profilePath, "cookies.sqlite");
-  if (!existsSync(cookiesPath)) return [];
+  if (!(await pathExists(cookiesPath))) return [];
 
   try {
-    return withSqliteSnapshot(cookiesPath, "websearch-firefox", (tempDbPath) => {
+    return await withSqliteSnapshot(cookiesPath, "websearch-firefox", (tempDbPath) => {
       const db = new DatabaseSync(tempDbPath, { readOnly: true });
       try {
         const rows = db

@@ -8,23 +8,22 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
-- Added runtime environment-variable expansion for path-valued sandbox config.
-- Added `$SSH_AUTH_SOCK` to the default sandbox Unix socket allowlist.
-- Added a dedicated `/review` security focus.
-- Added message queueing during `/review` and `/fix` runs.
-- Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
+- Added environment-variable support in sandbox path settings.
+- Allowed sandboxed commands to use the active SSH agent by default.
+- Added a security focus for `/review`.
+- Added message queueing while `/review` and `/fix` are running.
+- Added `/fix loop` to keep fixing until reviews pass or progress stops.
 
 ### Changed
 
-- Changed `/fix` to apply findings from partial reviews before reporting failed focus runs.
-- Grounded `/review` focus prompts in locally provable issues introduced by scoped changes.
-- Grounded `/review` efficiency findings in locally provable runtime costs.
-- Sharpened `/review` prompts for deslopify-style maintainability issues.
-- Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
+- Improved websearch responsiveness when using browser sessions.
+- Made `/fix` use findings from partial reviews instead of failing the whole run.
+- Improved `/review` prompts to focus on locally verifiable issues.
+- Relaxed sandbox defaults for common developer caches and trusted package/source domains.
 
 ### Fixed
 
-- Fixed rare `/review` focus runs finishing without usable findings and leaving stray result files.
+- Fixed rare `/review` runs that could finish without usable findings and leave stray result files.
 - Fixed `/sandbox off` still prompting for network access.
 
 ## [0.1.4] - 2026-05-09

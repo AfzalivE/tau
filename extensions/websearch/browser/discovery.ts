@@ -11,32 +11,34 @@ import type {
 const COOKIE_CACHE_TTL_MS = 30_000;
 const cookieCache = new Map<string, { cookies: BrowserCookie[]; expiresAt: number }>();
 
-export function discoverProfiles(
+export async function discoverProfiles(
   browserFamilies: WebsearchBrowserFamily[],
   preferredProfiles: WebsearchConfig["profiles"],
-): BrowserProfile[] {
+): Promise<BrowserProfile[]> {
   const profiles: BrowserProfile[] = [];
 
   for (const family of browserFamilies) {
     if (family === "firefox") {
-      profiles.push(...discoverFirefoxProfiles(preferredProfiles.firefox));
+      profiles.push(...(await discoverFirefoxProfiles(preferredProfiles.firefox)));
       continue;
     }
 
-    profiles.push(...discoverChromiumProfiles(preferredProfiles.chromium));
+    profiles.push(...(await discoverChromiumProfiles(preferredProfiles.chromium)));
   }
 
   return profiles;
 }
 
-export function loadCookies(profile: BrowserProfile): BrowserCookie[] {
+export async function loadCookies(profile: BrowserProfile): Promise<BrowserCookie[]> {
   const cacheKey = `${profile.family}:${profile.profilePath}`;
   const cached = cookieCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.cookies;
   if (cached) cookieCache.delete(cacheKey);
 
   const cookies =
-    profile.family === "firefox" ? loadFirefoxCookies(profile) : loadChromiumCookies(profile);
+    profile.family === "firefox"
+      ? await loadFirefoxCookies(profile)
+      : await loadChromiumCookies(profile);
 
   if (cookies.length > 0) {
     cookieCache.set(cacheKey, {
@@ -48,11 +50,11 @@ export function loadCookies(profile: BrowserProfile): BrowserCookie[] {
   return cookies;
 }
 
-export function createBrowserSession(
+export async function createBrowserSession(
   profile: BrowserProfile,
   domains: string[],
-): BrowserSession | null {
-  const cookies = loadCookies(profile).filter((cookie) => {
+): Promise<BrowserSession | null> {
+  const cookies = (await loadCookies(profile)).filter((cookie) => {
     return domains.some((domain) => matchesBrowserDomain(domain, cookie.domain));
   });
   if (cookies.length === 0) return null;
