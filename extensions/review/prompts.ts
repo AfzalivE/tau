@@ -188,23 +188,11 @@ Process:
 PR feedback payload (authoritative JSON):
 {TRIAGE_INPUT_JSON}
 
-Output JSON only, with this exact shape:
-{
-  "items": [
-    {
-      "id": "feedback-1",
-      "decision": "address",
-      "summary": "brief description of the feedback",
-      "rationale": "why this decision is correct",
-      "action": "what to do next"
-    }
-  ]
-}
-
 Requirements:
-- Return exactly one item per input feedback id.
-- Keep summary, rationale, and action concise and specific.
-- Before sending, self-check that JSON.parse(output) would succeed.`;
+- Never output triage items as text or write them to files.
+- Always call submit_triage exactly once as your final action.
+- Pass exactly one item per input feedback id to submit_triage.
+- Keep summary, rationale, and action concise and specific.`;
 
 export const REVIEW_DEDUP_PROMPT = `You are identifying duplicate findings from multiple independent code review passes.
 

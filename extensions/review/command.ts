@@ -87,12 +87,15 @@ import type {
 } from "./schema.js";
 import { createReviewMessageQueue, type ReviewMessageQueue } from "./message-queue.js";
 import { SUBMIT_REVIEW_EXTENSION_PATH, SUBMIT_REVIEW_SCHEMA } from "./submit-review-tool.js";
+import { SUBMIT_TRIAGE_EXTENSION_PATH, SUBMIT_TRIAGE_SCHEMA } from "./submit-triage-tool.js";
 
 // --- Constants ---
 
 const SUBMIT_REVIEW_TOOL = "submit_review";
+const SUBMIT_TRIAGE_TOOL = "submit_triage";
 const REVIEW_INSPECTION_TOOLS = "read,bash,grep,find,ls";
 const REVIEW_TOOLS = `${REVIEW_INSPECTION_TOOLS},${SUBMIT_REVIEW_TOOL}`;
+const TRIAGE_TOOLS = `${REVIEW_INSPECTION_TOOLS},${SUBMIT_TRIAGE_TOOL}`;
 const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
@@ -269,8 +272,7 @@ type PiJsonTaskResult = {
   stderr: string;
   exitCode?: number;
   error?: string;
-  submittedReview?: unknown;
-  submittedReviewCount: number;
+  submittedPayloads: unknown[];
 };
 
 type PiJsonTaskOptions = {
@@ -279,6 +281,7 @@ type PiJsonTaskOptions = {
   cwd: string;
   timeoutMs: number;
   control?: ReviewExecutionControl;
+  submitTool?: string;
 };
 
 type PreparedReviewRun = {
@@ -1630,15 +1633,18 @@ function extractAssistantMessageFromEvent(event: unknown): Record<string, unknow
   return null;
 }
 
-function extractSubmitReviewPayloadFromEvent(event: unknown): unknown | undefined {
+function extractSubmitToolPayloadFromEvent(
+  event: unknown,
+  submitTool: string,
+): { details: unknown } | null {
   const record = asRecord(event);
-  if (!record || record.type !== "message_end") return undefined;
+  if (!record || record.type !== "message_end") return null;
 
   const message = asRecord(record.message);
-  if (message?.role !== "toolResult" || message.toolName !== SUBMIT_REVIEW_TOOL) {
-    return undefined;
+  if (message?.role !== "toolResult" || message.toolName !== submitTool) {
+    return null;
   }
-  return message.details;
+  return { details: message.details };
 }
 
 function parsePossiblyWrappedJson(raw: string): unknown {
@@ -1662,28 +1668,21 @@ function parsePossiblyWrappedJson(raw: string): unknown {
 }
 
 function getSubmittedPayload(options: {
-  submittedPayload: unknown | undefined;
-  submittedPayloadCount: number;
+  submittedPayloads: unknown[];
   assistantOutput: string;
   submitTool: string;
   taskLabel: string;
   fallbackPayloadSchema: { Check: (payload: unknown) => boolean };
 }): { ok: true; payload: unknown } | { ok: false; error: string } {
-  const {
-    submittedPayload,
-    submittedPayloadCount,
-    assistantOutput,
-    submitTool,
-    taskLabel,
-    fallbackPayloadSchema,
-  } = options;
-  if (submittedPayloadCount === 1) {
-    return { ok: true, payload: submittedPayload };
+  const { submittedPayloads, assistantOutput, submitTool, taskLabel, fallbackPayloadSchema } =
+    options;
+  if (submittedPayloads.length === 1) {
+    return { ok: true, payload: submittedPayloads[0] };
   }
-  if (submittedPayloadCount > 1) {
+  if (submittedPayloads.length > 1) {
     return {
       ok: false,
-      error: `${taskLabel} called ${submitTool} ${submittedPayloadCount} times.`,
+      error: `${taskLabel} called ${submitTool} ${submittedPayloads.length} times.`,
     };
   }
 
@@ -1754,47 +1753,18 @@ function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewD
 }
 
 function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem[]): TriageItem[] {
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("Triage output must be a JSON object.");
-  }
-  if (!("items" in parsed) || !Array.isArray(parsed.items)) {
-    throw new Error('Triage output is missing required "items" array.');
+  if (!SUBMIT_TRIAGE_SCHEMA.Check(parsed)) {
+    throw new Error("Triage output does not match submit_triage schema.");
   }
 
   const knownIds = new Set(feedbackItems.map((item) => item.id));
   const triageById = new Map<string, TriageItem>();
   for (const item of parsed.items) {
-    if (typeof item !== "object" || item === null) continue;
-    const record = item as Record<string, unknown>;
-    const id = String(record.id ?? "").trim();
-    const decision = String(record.decision ?? "").trim();
-    const summary = String(record.summary ?? "").trim();
-    const rationale = String(record.rationale ?? "").trim();
-    const action = String(record.action ?? "").trim();
-    if (!id || !knownIds.has(id)) continue;
-    if (
-      decision !== "address" &&
-      decision !== "push_back" &&
-      decision !== "research" &&
-      decision !== "ignore"
-    ) {
-      continue;
+    if (!knownIds.has(item.id)) continue;
+    if (triageById.has(item.id)) {
+      throw new Error(`Triage output contains duplicate id ${item.id}.`);
     }
-    if (!summary || !rationale || !action) continue;
-    if (triageById.has(id)) {
-      throw new Error(`Triage output contains duplicate id ${id}.`);
-    }
-    triageById.set(id, {
-      id,
-      decision: decision as TriageDecision,
-      summary,
-      rationale,
-      action,
-    });
-  }
-
-  if (triageById.size === 0 && parsed.items.length > 0) {
-    throw new Error("All triage items are malformed.");
+    triageById.set(item.id, item as TriageItem);
   }
 
   const missingIds = feedbackItems
@@ -2043,13 +2013,14 @@ async function runPiJsonTask({
   cwd,
   timeoutMs,
   control,
+  submitTool,
 }: PiJsonTaskOptions): Promise<PiJsonTaskResult> {
   if (control?.isCancelled()) {
     return {
       status: "cancelled",
       assistantOutput: "",
       stderr: "",
-      submittedReviewCount: 0,
+      submittedPayloads: [],
     };
   }
 
@@ -2065,13 +2036,12 @@ async function runPiJsonTask({
     let stdoutBuffer = "";
     let latestAssistantOutput = "";
     let latestAssistantError = "";
-    let submittedReview: unknown;
-    let submittedReviewCount = 0;
+    const submittedPayloads: unknown[] = [];
     let stderr = "";
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-    const finish = (result: Omit<PiJsonTaskResult, "submittedReview" | "submittedReviewCount">) => {
+    const finish = (result: Omit<PiJsonTaskResult, "submittedPayloads">) => {
       if (settled) return;
       settled = true;
       if (timeoutId) {
@@ -2081,8 +2051,7 @@ async function runPiJsonTask({
       unregisterProcess?.();
       resolve({
         ...result,
-        ...(submittedReviewCount > 0 ? { submittedReview } : {}),
-        submittedReviewCount,
+        submittedPayloads,
       });
     };
 
@@ -2091,10 +2060,11 @@ async function runPiJsonTask({
       if (!trimmed) return;
       try {
         const event = JSON.parse(trimmed);
-        const reviewPayload = extractSubmitReviewPayloadFromEvent(event);
-        if (reviewPayload !== undefined) {
-          submittedReview = reviewPayload;
-          submittedReviewCount += 1;
+        const submittedPayload = submitTool
+          ? extractSubmitToolPayloadFromEvent(event, submitTool)
+          : null;
+        if (submittedPayload) {
+          submittedPayloads.push(submittedPayload.details);
         }
 
         const message = extractAssistantMessageFromEvent(event);
@@ -2227,6 +2197,7 @@ async function runFocusTaskOnce(
     cwd,
     timeoutMs: REVIEW_TASK_TIMEOUT_MS,
     control,
+    submitTool: SUBMIT_REVIEW_TOOL,
   });
 
   if (taskResult.status === "cancelled") {
@@ -2287,8 +2258,7 @@ async function runFocusTaskOnce(
   }
 
   const submittedPayload = getSubmittedPayload({
-    submittedPayload: taskResult.submittedReview,
-    submittedPayloadCount: taskResult.submittedReviewCount,
+    submittedPayloads: taskResult.submittedPayloads,
     assistantOutput: taskResult.assistantOutput,
     submitTool: SUBMIT_REVIEW_TOOL,
     taskLabel: "Focus",
@@ -2619,8 +2589,10 @@ async function runTriageTask(options: {
     "-p",
     "--no-session",
     "--tools",
-    REVIEW_INSPECTION_TOOLS,
+    TRIAGE_TOOLS,
     "--no-extensions",
+    "--extension",
+    SUBMIT_TRIAGE_EXTENSION_PATH,
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -2645,6 +2617,7 @@ async function runTriageTask(options: {
           cwd,
           timeoutMs: REVIEW_TASK_TIMEOUT_MS,
           control,
+          submitTool: SUBMIT_TRIAGE_TOOL,
         }),
     );
 
@@ -2708,18 +2681,26 @@ async function runTriageTask(options: {
       };
     }
 
-    const assistantOutput = taskResult.assistantOutput;
-    if (!assistantOutput.trim()) {
-      return { ok: false, error: "Triage returned no assistant output." };
+    const submittedPayload = getSubmittedPayload({
+      submittedPayloads: taskResult.submittedPayloads,
+      assistantOutput: taskResult.assistantOutput,
+      submitTool: SUBMIT_TRIAGE_TOOL,
+      taskLabel: "Triage",
+      fallbackPayloadSchema: SUBMIT_TRIAGE_SCHEMA,
+    });
+    if (!submittedPayload.ok) {
+      return { ok: false, error: submittedPayload.error };
     }
 
     try {
-      const parsed = parsePossiblyWrappedJson(assistantOutput);
-      return { ok: true, items: validateTriageOutput(parsed, feedbackItems) };
+      return {
+        ok: true,
+        items: validateTriageOutput(submittedPayload.payload, feedbackItems),
+      };
     } catch (error) {
       return {
         ok: false,
-        error: `Triage output is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+        error: `submit_triage payload is invalid: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
