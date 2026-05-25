@@ -117,6 +117,10 @@ function throwIfAborted(signal?: AbortSignal) {
   }
 }
 
+function getAgentEndWillRetry(event: unknown): boolean {
+  return Boolean((event as { willRetry?: boolean }).willRetry);
+}
+
 async function runWithLoader<T>(
   ctx: ExtensionContext,
   message: string,
@@ -451,6 +455,7 @@ export default function (pi: ExtensionAPI) {
     sessionNo: null as number | null,
     busy: false,
     compacting: false,
+    awaitingRetry: false,
     pendingInjectedTexts: [] as PendingInject[],
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
@@ -522,7 +527,7 @@ export default function (pi: ExtensionAPI) {
         const ctx = state.lastCtx;
         const inject = state.pendingInjectedTexts[0];
         if (!ctx || !inject) return;
-        if (state.compacting) return;
+        if (state.compacting || state.awaitingRetry) return;
 
         if (!isPendingInjectForCurrentSession(inject, ctx)) {
           state.pendingInjectedTexts.shift();
@@ -872,22 +877,32 @@ export default function (pi: ExtensionAPI) {
     state.busy = true;
     if (isSocketConnected()) {
       updateMeta(ctx);
-      void flushPendingInjectedTexts();
+      if (!state.awaitingRetry) {
+        void flushPendingInjectedTexts();
+      }
       return;
     }
     void tryAutoConnect();
-    void flushPendingInjectedTexts();
+    if (!state.awaitingRetry) {
+      void flushPendingInjectedTexts();
+    }
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
-    state.busy = false;
+  pi.on("agent_end", async (event, ctx) => {
+    const willRetry = getAgentEndWillRetry(event);
+    state.awaitingRetry = willRetry;
+    state.busy = willRetry;
     if (isSocketConnected()) {
       updateMeta(ctx);
-      void flushPendingInjectedTexts();
+      if (!willRetry) {
+        void flushPendingInjectedTexts();
+      }
       return;
     }
     void tryAutoConnect();
-    void flushPendingInjectedTexts();
+    if (!willRetry) {
+      void flushPendingInjectedTexts();
+    }
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -921,6 +936,7 @@ export default function (pi: ExtensionAPI) {
     clearCompactionResetTimer();
     state.busy = false;
     state.compacting = false;
+    state.awaitingRetry = false;
     state.pendingInjectedTexts = [];
     disconnect(false);
     state.lastCtx = null;

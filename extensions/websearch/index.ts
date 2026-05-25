@@ -265,7 +265,7 @@ export default function (pi: ExtensionAPI) {
       promptSnippet:
         "Search the web for current or external information unavailable in local files",
       promptGuidelines: [
-        "Use this for recent facts, live service behavior, or external documentation that is not already present in the repo.",
+        "Use websearch for recent facts, live service behavior, or external documentation that is not already present in the repo.",
         "Do not use websearch when repository files or supplied context already answer the question.",
       ],
       parameters: Type.Object({

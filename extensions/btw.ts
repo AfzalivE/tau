@@ -278,8 +278,8 @@ function seedSessionManager(sessionManager: SessionManager, messages: AgentMessa
 }
 
 async function showResultDialog(ctx: ExtensionContext, result: BtwResult): Promise<void> {
-  await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
-    return new BtwResultComponent(result, tui, ctx.ui.theme, done);
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    return new BtwResultComponent(result, tui, theme, done);
   });
 }
 

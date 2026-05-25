@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Updated Pi to 0.75.5.
 - Improved websearch responsiveness when using browser sessions.
 - Made `/fix` use findings from partial reviews instead of failing the whole run.
 - Improved `/review` prompts to focus on locally verifiable issues.
@@ -23,6 +24,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Fixed loop, notify, telegram, ghostty and review extensions treating retry pauses as finished runs.
 - Fixed rare `/review` runs that could finish without usable findings and leave stray result files.
 - Fixed `/sandbox off` still prompting for network access.
 

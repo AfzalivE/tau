@@ -55,6 +55,10 @@ function notify(title: string, body: string): void {
   }
 }
 
+function getAgentEndWillRetry(event: unknown): boolean {
+  return Boolean((event as { willRetry?: boolean }).willRetry);
+}
+
 function getPromptSource(event: unknown): string | undefined {
   if (!event || typeof event !== "object") return undefined;
   const source = (event as Record<string, unknown>).source;
@@ -143,8 +147,9 @@ export default function (pi: ExtensionAPI) {
     notify("Pi", "Review failed");
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_end", async (event, ctx) => {
     currentSessionKey = getSessionKey(ctx);
+    if (getAgentEndWillRetry(event)) return;
     if (pendingPromptCount > 0) return;
     if (hasCurrentSessionReviewRun()) return;
     notify("Pi", "Ready for input");

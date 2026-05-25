@@ -936,12 +936,9 @@ async function waitForHeadlessSessionPromptWindow(session) {
 
     const pendingMessageCount =
       typeof session.pendingMessageCount === "number" ? session.pendingMessageCount : 0;
-    const waitingForRetryStart = !session.busy && session.retryAfterCompactionUntil > Date.now();
-    if (
-      !session.compacting &&
-      !waitingForRetryStart &&
-      (session.busy || pendingMessageCount === 0)
-    ) {
+    const retrying =
+      Boolean(session.awaitingRetry) || session.retryAfterCompactionUntil > Date.now();
+    if (!session.compacting && !retrying && (session.busy || pendingMessageCount === 0)) {
       return;
     }
 
@@ -1258,7 +1255,10 @@ async function refreshHeadlessSessionState(session) {
   }
 
   if (typeof data.isStreaming === "boolean") {
-    session.busy = data.isStreaming;
+    session.busy = session.awaitingRetry ? true : data.isStreaming;
+    if (data.isStreaming) {
+      session.retryAfterCompactionUntil = 0;
+    }
     updateTypingIndicator();
   }
 
@@ -1360,6 +1360,7 @@ async function createHeadlessSession(cwd) {
       ? stateResponse.data.pendingMessageCount
       : 0,
     retryAfterCompactionUntil: 0,
+    awaitingRetry: false,
     lastTurnText: undefined,
     lastTurnSeq: 0,
     unreadTurns: [],
@@ -1425,16 +1426,22 @@ async function createHeadlessSession(cwd) {
     if (!sessions.has(session.key)) return;
 
     if (event.type === "compaction_start") {
+      session.awaitingRetry = false;
       session.retryAfterCompactionUntil = 0;
       setSessionCompacting(session, true);
       return;
     }
 
     if (event.type === "compaction_end") {
+      session.awaitingRetry = Boolean(event.willRetry);
       session.retryAfterCompactionUntil = event.willRetry
         ? Date.now() + POST_COMPACTION_RETRY_GRACE_MS
         : 0;
+      if (event.willRetry) {
+        session.busy = true;
+      }
       setSessionCompacting(session, false);
+      updateTypingIndicator();
       return;
     }
 
@@ -1447,7 +1454,8 @@ async function createHeadlessSession(cwd) {
     }
 
     if (event.type === "agent_end") {
-      session.busy = false;
+      session.awaitingRetry = Boolean(event.willRetry);
+      session.busy = Boolean(event.willRetry);
       updateTypingIndicator();
       return;
     }

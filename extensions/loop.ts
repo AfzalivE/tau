@@ -55,6 +55,10 @@ type ModelRequestAuth = {
   headers?: Record<string, string>;
 };
 
+function getAgentEndWillRetry(event: unknown): boolean {
+  return Boolean((event as { willRetry?: boolean }).willRetry);
+}
+
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
   pi.events.emit("ui:prompt_start", { source: "loop" });
 
@@ -385,11 +389,11 @@ export default function loopExtension(pi: ExtensionAPI): void {
       name: "signal_loop_success",
       label: "Signal Loop Success",
       description:
-        "Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.",
+        "Stop the active loop when the breakout condition is satisfied. Only call signal_loop_success when explicitly instructed to do so by the user, tool, or system prompt.",
       promptSnippet: "Signal that the active /loop breakout condition has been satisfied",
       promptGuidelines: [
-        "Call this tool only when the active loop's breakout condition is actually satisfied.",
-        "Do not call this tool unless a loop is currently active.",
+        "Call signal_loop_success only when the active loop's breakout condition is actually satisfied.",
+        "Do not call signal_loop_success unless a loop is currently active.",
       ],
       parameters: Type.Object({}),
       async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -460,6 +464,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event, ctx) => {
     if (!loopState.active) return;
+    if (getAgentEndWillRetry(event)) return;
 
     if (ctx.hasUI && wasLastAssistantAborted(event.messages)) {
       const confirm = await withPromptSignal(pi, () =>
@@ -477,7 +482,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
   pi.on("session_before_compact", async (event, ctx) => {
     if (!loopState.active || !loopState.mode || !ctx.model) return;
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-    if (!auth.ok || !auth.apiKey) return;
+    if (!auth.ok) return;
 
     const instructionParts = [
       event.customInstructions,

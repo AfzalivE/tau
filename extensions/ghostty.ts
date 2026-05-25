@@ -29,6 +29,10 @@ let latestCtx: ExtensionContext | undefined;
 let currentSessionKey: string | undefined;
 const activeReviewSessions = new Set<string>();
 
+function getAgentEndWillRetry(event: unknown): boolean {
+  return Boolean((event as { willRetry?: boolean }).willRetry);
+}
+
 function buildTitle(extra?: string, marker = "π"): string {
   const cwd = sessionCwd ?? process.cwd();
   const segments: string[] = [marker, path.basename(cwd)];
@@ -221,9 +225,18 @@ export default function (pi: ExtensionAPI) {
     startSpinner(ctx);
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_end", async (event, ctx) => {
     if (!ctx.hasUI) return;
     latestCtx = ctx;
+    if (getAgentEndWillRetry(event)) {
+      currentTool = undefined;
+      isWorking = true;
+      renderActiveTitle(ctx);
+      if (!hasPendingPrompts()) {
+        startSpinnerTimer(ctx);
+      }
+      return;
+    }
     stopSpinner(ctx);
   });
 
