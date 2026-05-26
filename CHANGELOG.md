@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
 - Updated bundled Matt Pocock skills from the local `mattpocock-skills` checkout.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
+- Clarified sandbox violation prompts with compact prominent access summaries, targets, and session-only policy changes.
 
 ### Fixed
 

@@ -163,6 +163,23 @@ export async function handleMachLookupViolation(options: {
     selection: string | undefined,
     autoRetryAvailable: boolean,
   ) => MachPromptDecision;
+  showPermissionSelect?: (
+    ctx: ExtensionContext,
+    details: {
+      title: string;
+      request: string;
+      target?: string;
+      targetLabel?: string;
+      requester?: string;
+      command?: string;
+      sandboxChange?: string;
+      equivalentCommand?: string;
+      typeCode?: string;
+      scope?: string;
+      extra?: string;
+    },
+    options: string[],
+  ) => Promise<string | undefined>;
   escapeSlashCommandArg: (value: string) => string;
 }): Promise<MachViolationResolution | null> {
   const {
@@ -180,6 +197,7 @@ export async function handleMachLookupViolation(options: {
     withPromptSignal,
     getPromptOptions,
     parsePromptSelection,
+    showPermissionSelect,
     escapeSlashCommandArg,
   } = options;
 
@@ -191,9 +209,7 @@ export async function handleMachLookupViolation(options: {
     violations[0];
   const allowCommand = buildMachLookupAllowCommand(violation.service, escapeSlashCommandArg);
   const alreadyApproved = isMachLookupAlreadyAllowed(runtimeConfig, violation.service);
-  const eventReason = alreadyApproved
-    ? "already-approved-still-failed"
-    : "missing-mach-lookup";
+  const eventReason = alreadyApproved ? "already-approved-still-failed" : "missing-mach-lookup";
 
   const recordMachEvent = (outcome: MachSandboxEvent["outcome"]): void => {
     recordEvent?.({
@@ -231,11 +247,12 @@ export async function handleMachLookupViolation(options: {
 
   const promptTask: Promise<MachViolationResolution | null> = (async () => {
     try {
+      const promptOptions = getPromptOptions(autoRetryAvailable);
+      const promptDetails = getMachLookupPromptDetails({ violation, allowCommand, command });
       const selection = await withPromptSignal(() =>
-        interactiveContext.ui.select(
-          `Sandbox blocked Mach service ${describeMachLookupTarget(violation)}`,
-          getPromptOptions(autoRetryAvailable),
-        ),
+        showPermissionSelect
+          ? showPermissionSelect(interactiveContext, promptDetails, promptOptions)
+          : interactiveContext.ui.select(formatMachLookupPromptTitle(promptDetails), promptOptions),
       );
       const decision = parsePromptSelection(selection, autoRetryAvailable);
       if (decision === "deny") {
@@ -319,10 +336,7 @@ function getMachLookupAllowList(runtimeConfig: SandboxRuntimeConfig): string[] {
   return runtimeConfig.network.allowMachLookup;
 }
 
-function isMachLookupAlreadyAllowed(
-  runtimeConfig: SandboxRuntimeConfig,
-  service: string,
-): boolean {
+function isMachLookupAlreadyAllowed(runtimeConfig: SandboxRuntimeConfig, service: string): boolean {
   return (runtimeConfig.network.allowMachLookup ?? []).some((rule) =>
     matchesMachLookupRule(service, rule),
   );
@@ -339,15 +353,41 @@ function formatMachLookupViolationSummary(violation: MachLookupViolation): strin
   return `[sandbox] Blocked Mach service lookup: ${violation.service}`;
 }
 
-function formatMachLookupAllowHint(
-  violation: MachLookupViolation,
-  allowCommand: string,
-): string {
+function formatMachLookupAllowHint(violation: MachLookupViolation, allowCommand: string): string {
   return `${formatMachLookupViolationSummary(violation)}\n[sandbox] To temporarily allow for this session, run: ${allowCommand}`;
 }
 
-function describeMachLookupTarget(violation: MachLookupViolation): string {
-  return `lookup of ${violation.service}`;
+function getMachLookupPromptDetails(options: {
+  violation: MachLookupViolation;
+  allowCommand: string;
+  command: string;
+}) {
+  const { violation, allowCommand, command } = options;
+  return {
+    title: "Sandbox blocked macOS service access",
+    request: "Mach/XPC service lookup",
+    target: violation.service,
+    targetLabel: "service",
+    requester: violation.processName,
+    command,
+    sandboxChange: `Allow lookup of ${violation.service} for this session`,
+    equivalentCommand: allowCommand,
+    typeCode: "MACH_LU",
+  };
+}
+
+function formatMachLookupPromptTitle(
+  details: ReturnType<typeof getMachLookupPromptDetails>,
+): string {
+  const lines = [`⛔  ${details.title}`, details.request];
+
+  if (details.target) lines.push("", `${details.targetLabel}:`, `  ${details.target}`);
+  if (details.sandboxChange) lines.push("", "Allowing this will:", `  ${details.sandboxChange}`);
+  if (details.requester) lines.push("", `Triggered by: ${details.requester}`);
+  else if (details.command) lines.push("", `Command: ${details.command}`);
+  lines.push("", "Scope: Session only; sandbox config files are not changed.");
+
+  return lines.join("\n");
 }
 
 function describeMachLookupEventSummary(

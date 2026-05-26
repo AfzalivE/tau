@@ -79,6 +79,12 @@ import {
   mutateMachLookupAllowList,
   type MachViolationResolution,
 } from "./mach-violation.js";
+import {
+  getViolationPromptOptions,
+  parseViolationPromptSelection,
+  showSandboxPermissionConfirm,
+  showSandboxPermissionSelect,
+} from "./prompt-ui.js";
 import type {
   ListOp,
   PromptMode,
@@ -1280,25 +1286,54 @@ function formatFilesystemViolationSummary(violation: FilesystemViolation): strin
   return "[sandbox] Blocked filesystem access (EPERM).";
 }
 
-const FILESYSTEM_ALLOW_RETRY_OPTION = "Allow and retry now";
-const FILESYSTEM_ALLOW_ADAPT_OPTION = "Allow but adapt for side-effects";
-const FILESYSTEM_DENY_OPTION = "Deny";
-
-function getViolationPromptOptions(autoRetryAvailable: boolean): string[] {
-  if (!autoRetryAvailable) {
-    return [FILESYSTEM_ALLOW_ADAPT_OPTION, FILESYSTEM_DENY_OPTION];
+function describeFilesystemRequest(violation: FilesystemViolation): string {
+  if (violation.kind === "write") return "Filesystem write";
+  if (violation.kind === "read") {
+    if (violation.readAccess === "metadata") return "Filesystem metadata read";
+    if (violation.readAccess === "data") return "Filesystem data read";
+    return "Filesystem read";
   }
-
-  return [FILESYSTEM_ALLOW_RETRY_OPTION, FILESYSTEM_ALLOW_ADAPT_OPTION, FILESYSTEM_DENY_OPTION];
+  return "Filesystem access";
 }
 
-function parseFilesystemPromptSelection(
-  selection: string | undefined,
-  autoRetryAvailable: boolean,
-): FilesystemViolationResolutionKind {
-  if (selection === FILESYSTEM_ALLOW_ADAPT_OPTION) return "allow-adapt";
-  if (selection === FILESYSTEM_ALLOW_RETRY_OPTION && autoRetryAvailable) return "allow-retry";
-  return "deny";
+function getFilesystemTypeCode(violation: FilesystemViolation): string {
+  if (violation.kind === "write") return "FS_WRITE";
+  if (violation.readAccess === "metadata") return "FS_META";
+  if (violation.kind === "read") return "FS_READ";
+  return "FS_ACCESS";
+}
+
+function describeFilesystemSandboxChange(action: FilesystemAllowAction): string {
+  if (action.list === "deny-read" && action.op === "remove") {
+    return `Allow reads covered by ${action.value} for this session`;
+  }
+  if (action.list === "deny-write" && action.op === "remove") {
+    return `Allow writes covered by ${action.value} for this session`;
+  }
+  if (action.list === "allow-write" && action.op === "add") {
+    return `Allow writes to ${action.value} for this session`;
+  }
+  return `${action.op} ${action.value} in ${action.list} for this session`;
+}
+
+function getFilesystemViolationPromptDetails(options: {
+  violation: FilesystemViolation;
+  target: string;
+  allowAction: FilesystemAllowAction;
+  allowCommand: string;
+  command: string;
+}) {
+  const { violation, target, allowAction, allowCommand, command } = options;
+  return {
+    title: `Sandbox blocked ${describeFilesystemRequest(violation).toLowerCase()}`,
+    request: describeFilesystemRequest(violation),
+    target,
+    requester: violation.processName,
+    command,
+    sandboxChange: describeFilesystemSandboxChange(allowAction),
+    equivalentCommand: allowCommand,
+    typeCode: getFilesystemTypeCode(violation),
+  };
 }
 
 function formatFilesystemAllowRetryMessage(target: string): string {
@@ -1440,12 +1475,19 @@ async function handleFilesystemViolation(options: {
   const promptTask: Promise<FilesystemViolationResolution | null> = (async () => {
     try {
       const selection = await withPromptSignal(pi, () =>
-        ctx.ui.select(
-          `Sandbox blocked filesystem ${target}`,
+        showSandboxPermissionSelect(
+          ctx,
+          getFilesystemViolationPromptDetails({
+            violation,
+            target,
+            allowAction,
+            allowCommand,
+            command,
+          }),
           getViolationPromptOptions(autoRetryAvailable),
         ),
       );
-      const decision = parseFilesystemPromptSelection(selection, autoRetryAvailable);
+      const decision = parseViolationPromptSelection(selection, autoRetryAvailable);
       if (decision === "deny") {
         recordFilesystemEvent("blocked");
         return { kind: "deny", message: formatFilesystemDeniedMessage(target) };
@@ -1915,7 +1957,8 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           autoRetryAvailable,
           withPromptSignal: (run) => withPromptSignal(pi, run),
           getPromptOptions: getViolationPromptOptions,
-          parsePromptSelection: parseFilesystemPromptSelection,
+          parsePromptSelection: parseViolationPromptSelection,
+          showPermissionSelect: showSandboxPermissionSelect,
           escapeSlashCommandArg,
         });
       }
@@ -2421,10 +2464,16 @@ export default function (pi: ExtensionAPI) {
 
           const target = port ? `${normalizedHost}:${port}` : normalizedHost;
           const approved = await withPromptSignal(pi, () =>
-            ctx.ui.confirm(
-              `Sandbox blocked network access to ${target}`,
-              "\nAllow for this session?",
-            ),
+            showSandboxPermissionConfirm(ctx, {
+              title: "Sandbox blocked network access",
+              request: "Network connection",
+              target,
+              targetLabel: "Host",
+              sandboxChange: `Allow connections to ${normalizedHost} for this session`,
+              equivalentCommand: suggestedCommand,
+              typeCode: "NET_OUT",
+              extra: "Network policy is host-based, so allowing this host may cover multiple URLs.",
+            }),
           );
           if (!approved) {
             recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);
