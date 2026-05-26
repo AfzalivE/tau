@@ -3120,9 +3120,10 @@ async function resolveModels(
   requestedModels: string[],
   currentThinkingLevel: ReviewThinkingLevel,
 ): Promise<ResolvedReviewModel[]> {
+  ctx.modelRegistry.refresh();
   const currentProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
   const currentModelId = ctx.model?.id;
-  const availableModels = ctx.modelRegistry.getAvailable();
+  const allModels = ctx.modelRegistry.getAll();
 
   const resolveRequestedModel = (modelPattern: string): ResolvedReviewModel => {
     const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
@@ -3131,7 +3132,7 @@ async function resolveModels(
     const slash = basePattern.indexOf("/");
     const explicitProvider = slash > 0 ? basePattern.slice(0, slash).trim() : "";
     if (explicitProvider) {
-      const exactCandidate = availableModels.find(
+      const exactCandidate = allModels.find(
         (model) => `${model.provider}/${model.id}`.toLowerCase() === basePattern.toLowerCase(),
       );
       return createResolvedReviewModel({
@@ -3149,7 +3150,7 @@ async function resolveModels(
 
     const resolved = resolveUnqualifiedModelPattern(
       modelPattern,
-      availableModels,
+      allModels,
       currentProvider,
       ctx.modelRegistry,
       currentThinkingLevel,
