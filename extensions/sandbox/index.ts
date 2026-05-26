@@ -1396,32 +1396,36 @@ function parseFilesystemPromptSelection(
   return "deny";
 }
 
-function formatFilesystemAllowRetryMessage(_target: string): string {
-  return "\nSandbox blocked access.\n\nGranting access and retrying the command per user request...\n\n";
+function formatFilesystemAllowRetryMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nGranting access and retrying the command per user request...\n\n`;
 }
 
-function formatFilesystemAllowAdaptMessage(_target: string): string {
-  return "\nSandbox blocked access.\n\nAccess granted for this session. Retry the command manually if appropriate.";
+function formatFilesystemAllowAdaptMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess granted for this session. Retry the command manually if appropriate.`;
 }
 
-function formatFilesystemDeniedMessage(_target: string): string {
-  return "\nSandbox blocked access.\n\nAccess remains denied for this session.";
+function formatFilesystemDeniedMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess remains denied for this session.`;
 }
 
-function formatFilesystemAlreadyAllowedMessage(_target: string): string {
-  return "\nSandbox blocked access again after permission had already been granted. The remaining failure may be unrelated to sandbox policy.";
+function formatFilesystemAlreadyAllowedMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess had already been granted for this session. The remaining failure may be unrelated to sandbox policy.`;
 }
 
 function formatFilesystemRetrySucceededMessage(_target: string): string {
   return "";
 }
 
-function formatFilesystemRetryFailedMessage(_target: string): string {
-  return "\nAccess granted and command retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.";
+function formatFilesystemRetryFailedMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess granted for this session and the command was retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.`;
 }
 
-function formatFilesystemRetrySkippedMessage(_target: string): string {
-  return "\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.";
+function formatFilesystemRetrySkippedMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
+}
+
+function formatFilesystemBlockedTarget(target: string): string {
+  return `Sandbox blocked filesystem ${target}.`;
 }
 
 function appendOutputPostamble(postamble: string, addition: string, output: string): string {
