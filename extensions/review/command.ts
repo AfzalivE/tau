@@ -3914,7 +3914,7 @@ function parseFixCommandRequest(
   const first = tokenizeArgs(raw)[0];
   const loop = Boolean(first && unquoteToken(first).toLowerCase() === "loop");
   const requestArgs = loop ? raw.slice(first!.length).trim() || undefined : args;
-  const request = parseCommandRequest(pi, requestArgs, ctx, { allowOutputOptions: false });
+  const request = parseCommandRequest(pi, requestArgs, ctx);
   if (!request) return null;
   return { loop, request };
 }
