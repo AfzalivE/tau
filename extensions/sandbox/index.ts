@@ -80,6 +80,8 @@ import {
   type MachViolationResolution,
 } from "./mach-violation.js";
 import {
+  formatSandboxPermissionApprovalMessage,
+  formatSandboxPermissionDeniedMessage,
   getViolationPromptOptions,
   parseViolationPromptSelection,
   showSandboxPermissionConfirm,
@@ -1336,24 +1338,26 @@ function getFilesystemViolationPromptDetails(options: {
   };
 }
 
-function formatFilesystemAllowRetryMessage(target: string): string {
-  return `${formatFilesystemBlockedPrefix(target)}Granting access and retrying the command per user request...\n\n`;
+function formatFilesystemAllowRetryMessage(
+  details: ReturnType<typeof getFilesystemViolationPromptDetails>,
+): string {
+  return formatSandboxPermissionApprovalMessage(details, "retry");
 }
 
-function formatFilesystemAllowAdaptMessage(target: string): string {
-  return `${formatFilesystemBlockedPrefix(target)}Access granted for this session. Retry the command manually if appropriate.`;
+function formatFilesystemAllowAdaptMessage(
+  details: ReturnType<typeof getFilesystemViolationPromptDetails>,
+): string {
+  return formatSandboxPermissionApprovalMessage(details, "manual");
 }
 
-function formatFilesystemDeniedMessage(target: string): string {
-  return `${formatFilesystemBlockedPrefix(target)}Access remains denied for this session.`;
+function formatFilesystemDeniedMessage(
+  details: ReturnType<typeof getFilesystemViolationPromptDetails>,
+): string {
+  return formatSandboxPermissionDeniedMessage(details);
 }
 
 function formatFilesystemAlreadyAllowedMessage(target: string): string {
   return `\nSandbox blocked filesystem ${target} again after permission had already been granted. The remaining failure may be unrelated to sandbox policy.`;
-}
-
-function formatFilesystemBlockedPrefix(target: string): string {
-  return `\nSandbox blocked filesystem ${target}.\n\n`;
 }
 
 function formatFilesystemRetrySucceededMessage(_target: string): string {
@@ -1474,23 +1478,24 @@ async function handleFilesystemViolation(options: {
 
   const promptTask: Promise<FilesystemViolationResolution | null> = (async () => {
     try {
+      const promptDetails = getFilesystemViolationPromptDetails({
+        violation,
+        target,
+        allowAction,
+        allowCommand,
+        command,
+      });
       const selection = await withPromptSignal(pi, () =>
         showSandboxPermissionSelect(
           ctx,
-          getFilesystemViolationPromptDetails({
-            violation,
-            target,
-            allowAction,
-            allowCommand,
-            command,
-          }),
+          promptDetails,
           getViolationPromptOptions(autoRetryAvailable),
         ),
       );
       const decision = parseViolationPromptSelection(selection, autoRetryAvailable);
       if (decision === "deny") {
         recordFilesystemEvent("blocked");
-        return { kind: "deny", message: formatFilesystemDeniedMessage(target) };
+        return { kind: "deny", message: formatFilesystemDeniedMessage(promptDetails) };
       }
 
       const nextConfig = cloneRuntimeConfig(runtimeConfig);
@@ -1504,7 +1509,7 @@ async function handleFilesystemViolation(options: {
       if (decision === "allow-retry") {
         return {
           kind: "allow-retry",
-          message: formatFilesystemAllowRetryMessage(target),
+          message: formatFilesystemAllowRetryMessage(promptDetails),
           retrySuccessMessage: formatFilesystemRetrySucceededMessage(target),
           retryFailureMessage: formatFilesystemRetryFailedMessage(target),
           retrySkippedMessage: formatFilesystemRetrySkippedMessage(target),
@@ -1514,7 +1519,7 @@ async function handleFilesystemViolation(options: {
       return {
         kind: "allow-adapt",
         message: changed
-          ? formatFilesystemAllowAdaptMessage(target)
+          ? formatFilesystemAllowAdaptMessage(promptDetails)
           : formatFilesystemAlreadyAllowedMessage(target),
       };
     } catch {
@@ -1959,6 +1964,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           getPromptOptions: getViolationPromptOptions,
           parsePromptSelection: parseViolationPromptSelection,
           showPermissionSelect: showSandboxPermissionSelect,
+          formatPermissionDenied: formatSandboxPermissionDeniedMessage,
           escapeSlashCommandArg,
         });
       }

@@ -180,6 +180,19 @@ export async function handleMachLookupViolation(options: {
     },
     options: string[],
   ) => Promise<string | undefined>;
+  formatPermissionDenied?: (details: {
+    title: string;
+    request: string;
+    target?: string;
+    targetLabel?: string;
+    requester?: string;
+    command?: string;
+    sandboxChange?: string;
+    equivalentCommand?: string;
+    typeCode?: string;
+    scope?: string;
+    extra?: string;
+  }) => string;
   escapeSlashCommandArg: (value: string) => string;
 }): Promise<MachViolationResolution | null> {
   const {
@@ -198,6 +211,7 @@ export async function handleMachLookupViolation(options: {
     getPromptOptions,
     parsePromptSelection,
     showPermissionSelect,
+    formatPermissionDenied,
     escapeSlashCommandArg,
   } = options;
 
@@ -257,7 +271,12 @@ export async function handleMachLookupViolation(options: {
       const decision = parsePromptSelection(selection, autoRetryAvailable);
       if (decision === "deny") {
         recordMachEvent("blocked");
-        return { kind: "deny", message: MACH_LOOKUP_MESSAGES.denied };
+        return {
+          kind: "deny",
+          message: formatPermissionDenied
+            ? formatPermissionDenied(promptDetails)
+            : MACH_LOOKUP_MESSAGES.denied,
+        };
       }
 
       const nextConfig = structuredClone(runtimeConfig);

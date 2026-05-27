@@ -7,6 +7,7 @@ const DEFAULT_PROMPT_SCOPE = "Session only; sandbox config files are not changed
 const PROMPT_VALUE_LIMIT = 260;
 const PANEL_MAX_WIDTH = 96;
 const PANEL_MIN_WIDTH = 52;
+const APPROVAL_PANEL_WIDTH = 56;
 const LABEL_WIDTH = 9;
 
 export const SANDBOX_ALLOW_RETRY_OPTION = "Allow and retry now";
@@ -112,6 +113,41 @@ export function formatSandboxPermissionConfirmMessage(
   return [...formatSandboxPermissionLines(details, { includeTitle: false }), "", question].join(
     "\n",
   );
+}
+
+export function formatSandboxPermissionApprovalMessage(
+  details: SandboxPermissionPromptDetails,
+  outcome: "retry" | "manual",
+): string {
+  const lines = [
+    "",
+    ...renderPlainDecisionPanel(details, {
+      label: "APPROVED",
+      marker: "✓",
+      decision: details.sandboxChange,
+    }),
+    "",
+    outcome === "retry" ? "Retrying command..." : "Retry the command manually if appropriate.",
+  ];
+
+  return `${lines.join("\n")}\n\n`;
+}
+
+export function formatSandboxPermissionDeniedMessage(
+  details: SandboxPermissionPromptDetails,
+): string {
+  const lines = [
+    "",
+    ...renderPlainDecisionPanel(details, {
+      label: "DENIED",
+      marker: "✕",
+      decision: "Access remains denied; policy unchanged",
+    }),
+    "",
+    "Access remains denied for this session.",
+  ];
+
+  return `${lines.join("\n")}\n\n`;
 }
 
 function renderSandboxPermissionPanel(
@@ -241,6 +277,97 @@ function bottomBorder(width: number, theme: SandboxPromptTheme): string {
 
 function panelLine(content: string, width: number, theme: SandboxPromptTheme): string {
   return `${theme.fg("warning", "│")}${truncateToWidth(content, width - 2, "…", true)}${theme.fg("warning", "│")}`;
+}
+
+function renderPlainDecisionPanel(
+  details: SandboxPermissionPromptDetails,
+  decision: { label: string; marker: string; decision: string | undefined },
+): string[] {
+  const width = APPROVAL_PANEL_WIDTH;
+  const lines = [
+    plainTopBorder(width),
+    renderPlainDecisionHeader(details, decision, width),
+    plainSeparator(width),
+  ];
+
+  lines.push(
+    ...renderPlainField({
+      label: details.targetLabel?.toLowerCase() ?? "target",
+      value: details.target,
+      width,
+      maxLines: 3,
+    }),
+  );
+  lines.push(
+    ...renderPlainField({
+      label: "process",
+      value: details.requester,
+      width,
+      maxLines: 1,
+    }),
+  );
+  lines.push(
+    ...renderPlainField({
+      label: "decision",
+      value: decision.decision,
+      width,
+      maxLines: 3,
+      spacerBefore: Boolean(details.target || details.requester),
+    }),
+  );
+
+  lines.push(plainBottomBorder(width));
+  return lines;
+}
+
+function renderPlainDecisionHeader(
+  details: SandboxPermissionPromptDetails,
+  decision: { label: string; marker: string },
+  width: number,
+): string {
+  return plainPanelLine(
+    ` ${decision.marker}  SANDBOX ${decision.label} · ${details.request}`,
+    width,
+  );
+}
+
+function renderPlainField(options: {
+  label: string;
+  value: string | undefined;
+  width: number;
+  maxLines: number;
+  spacerBefore?: boolean;
+}): string[] {
+  const { label, value, width, maxLines, spacerBefore = false } = options;
+  if (!value) return [];
+
+  const innerWidth = width - 2;
+  const valueWidth = Math.max(12, innerWidth - LABEL_WIDTH - 4);
+  const valueLines = wrapPlainText(truncatePromptValue(value), valueWidth, maxLines);
+  const rows = spacerBefore ? [plainPanelLine("", width)] : [];
+
+  valueLines.forEach((line, index) => {
+    const labelCell = index === 0 ? `  ${label.padEnd(LABEL_WIDTH)}` : " ".repeat(LABEL_WIDTH + 2);
+    rows.push(plainPanelLine(`${labelCell}${line}`, width));
+  });
+
+  return rows;
+}
+
+function plainTopBorder(width: number): string {
+  return `╭${"─".repeat(width - 2)}╮`;
+}
+
+function plainSeparator(width: number): string {
+  return `├${"─".repeat(width - 2)}┤`;
+}
+
+function plainBottomBorder(width: number): string {
+  return `╰${"─".repeat(width - 2)}╯`;
+}
+
+function plainPanelLine(content: string, width: number): string {
+  return `│${truncateToWidth(content, width - 2, "…", true)}│`;
 }
 
 function formatSandboxPermissionLines(

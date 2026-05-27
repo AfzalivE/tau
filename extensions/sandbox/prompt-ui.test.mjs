@@ -5,7 +5,9 @@ import {
   SANDBOX_ALLOW_ADAPT_OPTION,
   SANDBOX_ALLOW_RETRY_OPTION,
   SANDBOX_DENY_OPTION,
+  formatSandboxPermissionApprovalMessage,
   formatSandboxPermissionConfirmMessage,
+  formatSandboxPermissionDeniedMessage,
   formatSandboxPermissionPromptTitle,
   getViolationPromptOptions,
   parseViolationPromptSelection,
@@ -53,6 +55,46 @@ test("formats sandbox permission prompt details", () => {
   );
   assert.doesNotMatch(title, /Equivalent command:/);
   assert.match(title, /Scope: Session only; sandbox config files are not changed\./);
+});
+
+test("formats sandbox approval messages with approved details", () => {
+  const message = formatSandboxPermissionApprovalMessage(
+    {
+      title: "Sandbox blocked filesystem write",
+      request: "Filesystem write",
+      target: "/Users/example/.env.poop",
+      requester: "rm",
+      sandboxChange: "Allow writes to /Users/example/.env.poop for this session",
+    },
+    "retry",
+  );
+
+  assert.match(message, /╭─+╮/);
+  assert.match(message, /✓  SANDBOX APPROVED · Filesystem write/);
+  assert.doesNotMatch(message, /FS_WRITE/);
+  assert.match(message, /│\s+target\s+\/Users\/example\/\.env\.poop\s+│/);
+  assert.match(message, /│\s+process\s+rm\s+│/);
+  assert.match(message, /│\s+decision\s+Allow writes to \/Users\/example\/\.env\.poop\s+│/);
+  assert.match(message, /│\s+for this session\s+│/);
+  assert.match(message, /╰─+╯/);
+  assert.match(message, /Retrying command\.\.\./);
+});
+
+test("formats sandbox denial messages with denied details", () => {
+  const message = formatSandboxPermissionDeniedMessage({
+    title: "Sandbox blocked filesystem write",
+    request: "Filesystem write",
+    target: "/Users/example/.env.poop",
+    requester: "rm",
+    sandboxChange: "Allow writes to /Users/example/.env.poop for this session",
+  });
+
+  assert.match(message, /✕  SANDBOX DENIED · Filesystem write/);
+  assert.doesNotMatch(message, /FS_WRITE/);
+  assert.match(message, /│\s+target\s+\/Users\/example\/\.env\.poop\s+│/);
+  assert.match(message, /│\s+process\s+rm\s+│/);
+  assert.match(message, /│\s+decision\s+Access remains denied; policy unchanged\s+│/);
+  assert.match(message, /Access remains denied for this session\./);
 });
 
 test("formats confirm messages without duplicating the dialog title", () => {
