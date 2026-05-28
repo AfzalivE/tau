@@ -42,7 +42,7 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `git-diff-stats`    | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    |   ✓    |  ✓  | Status bar PR number and link for the current branch.                                                                     |
 | `insights`          | `/insights`          |   ✓    |  ✓  | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
-| `interlude`         | `alt+x`              |   ✓    |  ✓  | Stash the current message draft, send one interlude message, then restore the draft.                                      |
+| `stash`             | `alt+x`              |   ✓    |  ✓  | Stash the current message draft, send one message, then restore it.                                                       |
 | `loop`              | `/loop`              |   ✓    |  ✓  | Repeat a prompt until the agent signals success.                                                                          |
 | `memory`            | `/memory`            |   ✓    |  ✓  | Opt-in project-local memory for learning and continuity across sessions.                                                  |
 | `notify`            | —                    |   ✓    |  ✓  | Terminal notification when the agent is waiting for input.                                                                |
@@ -106,7 +106,7 @@ Some extensions and skills were inspired by prior work from other agent setups a
 
 - @mitsuhiko for `answer`, `btw`, `loop`, `openscad`, `sentry`, `update-changelog`, and `web-design`
 - @badlogic for `sandbox` and `browser-tools`
-- @mjakl for `interlude`
+- @mjakl for `stash`
 
 ## License
 
