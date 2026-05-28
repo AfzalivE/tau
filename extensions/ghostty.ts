@@ -3,6 +3,7 @@
  *
  * - Shows project/session in the terminal title
  * - Shows a braille spinner in the title while the agent is working
+ * - Shows the braille spinner backwards while context is compacting
  * - Shows a ? marker while an extension prompt is waiting for input
  * - Updates title with the current tool name during tool execution
  * - Treats background /review runs as working state via review:start/review:end events
@@ -22,16 +23,13 @@ let sessionName: string | undefined;
 let sessionCwd: string | undefined;
 let currentTool: string | undefined;
 let isWorking = false;
+let isCompacting = false;
 let frameIndex = 0;
 let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 let pendingPromptCount = 0;
 let latestCtx: ExtensionContext | undefined;
 let currentSessionKey: string | undefined;
 const activeReviewSessions = new Set<string>();
-
-function getAgentEndWillRetry(event: unknown): boolean {
-  return Boolean((event as { willRetry?: boolean }).willRetry);
-}
 
 function buildTitle(extra?: string, marker = "π"): string {
   const cwd = sessionCwd ?? process.cwd();
@@ -49,6 +47,15 @@ function clearSpinnerTimer(): void {
 
 function currentFrame(): string {
   return STATUS_SPINNER_FRAMES[frameIndex % STATUS_SPINNER_FRAMES.length];
+}
+
+function resetFrame(): void {
+  frameIndex = 0;
+}
+
+function advanceFrame(): void {
+  const step = isCompacting ? -1 : 1;
+  frameIndex = (frameIndex + step + STATUS_SPINNER_FRAMES.length) % STATUS_SPINNER_FRAMES.length;
 }
 
 function hasPendingPrompts(): boolean {
@@ -73,11 +80,12 @@ function hasActiveReviewRuns(): boolean {
 }
 
 function isBusy(): boolean {
-  return isWorking || hasActiveReviewRuns();
+  return isWorking || isCompacting || hasActiveReviewRuns();
 }
 
 function getWorkingExtra(): string | undefined {
   if (currentTool) return currentTool;
+  if (isCompacting) return "compacting";
   if (!isWorking && hasActiveReviewRuns()) return "review";
   return undefined;
 }
@@ -109,7 +117,7 @@ function startSpinnerTimer(ctx: ExtensionContext): void {
   clearSpinnerTimer();
   spinnerTimer = setInterval(() => {
     if (!isBusy() || hasPendingPrompts()) return;
-    frameIndex = (frameIndex + 1) % STATUS_SPINNER_FRAMES.length;
+    advanceFrame();
     renderWorkingTitle(ctx);
   }, STATUS_SPINNER_INTERVAL_MS);
 }
@@ -118,7 +126,7 @@ function startSpinner(ctx: ExtensionContext): void {
   clearSpinnerTimer();
   isWorking = true;
   currentTool = undefined;
-  frameIndex = 0;
+  resetFrame();
   renderActiveTitle(ctx);
 
   if (!hasPendingPrompts()) {
@@ -136,7 +144,7 @@ function stopSpinner(ctx: ExtensionContext): void {
     return;
   }
 
-  if (hasActiveReviewRuns()) {
+  if (isBusy()) {
     renderWorkingTitle(ctx);
     startSpinnerTimer(ctx);
     return;
@@ -165,6 +173,38 @@ function handlePromptEnd(ctx: ExtensionContext): void {
   renderActiveTitle(ctx);
 }
 
+function startCompaction(ctx: ExtensionContext, signal: AbortSignal): void {
+  isWorking = false;
+  isCompacting = true;
+  currentTool = undefined;
+  resetFrame();
+  signal.addEventListener("abort", () => stopCompaction(ctx), { once: true });
+
+  renderActiveTitle(ctx);
+  if (!hasPendingPrompts()) {
+    startSpinnerTimer(ctx);
+  }
+}
+
+function stopCompaction(ctx: ExtensionContext, options?: { render?: boolean }): void {
+  if (!isCompacting) return;
+
+  isCompacting = false;
+
+  if (options?.render === false) return;
+
+  if (isBusy()) {
+    renderActiveTitle(ctx);
+    if (!hasPendingPrompts()) {
+      startSpinnerTimer(ctx);
+    }
+    return;
+  }
+
+  clearSpinnerTimer();
+  renderActiveTitle(ctx);
+}
+
 function syncSessionTitle(ctx: ExtensionContext): void {
   renderActiveTitle(ctx);
 }
@@ -185,17 +225,12 @@ function handleReviewStart(ctx: ExtensionContext): void {
 }
 
 function handleReviewEnd(ctx: ExtensionContext): void {
-  if (isWorking) {
-    renderActiveTitle(ctx);
-    return;
-  }
-
   if (hasPendingPrompts()) {
     renderActiveTitle(ctx);
     return;
   }
 
-  if (hasActiveReviewRuns()) {
+  if (isBusy()) {
     renderActiveTitle(ctx);
     startSpinnerTimer(ctx);
     return;
@@ -222,21 +257,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     latestCtx = ctx;
+    stopCompaction(ctx, { render: false });
     startSpinner(ctx);
   });
 
-  pi.on("agent_end", async (event, ctx) => {
+  pi.on("agent_end", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     latestCtx = ctx;
-    if (getAgentEndWillRetry(event)) {
-      currentTool = undefined;
-      isWorking = true;
-      renderActiveTitle(ctx);
-      if (!hasPendingPrompts()) {
-        startSpinnerTimer(ctx);
-      }
-      return;
-    }
     stopSpinner(ctx);
   });
 
@@ -254,6 +281,18 @@ export default function (pi: ExtensionAPI) {
     latestCtx = ctx;
     if (!isWorking) return;
     renderActiveTitle(ctx);
+  });
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (!ctx.hasUI) return;
+    latestCtx = ctx;
+    startCompaction(ctx, event.signal);
+  });
+
+  pi.on("session_compact", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    latestCtx = ctx;
+    stopCompaction(ctx);
   });
 
   pi.events.on("ui:prompt_start", () => {
@@ -300,6 +339,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     clearSpinnerTimer();
     isWorking = false;
+    isCompacting = false;
     currentTool = undefined;
     pendingPromptCount = 0;
     const sessionKey = getSessionKey(ctx);
