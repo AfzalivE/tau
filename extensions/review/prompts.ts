@@ -105,6 +105,21 @@ export const REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT = `Project-specific review
 {PROJECT_GUIDELINES}
 `;
 
+export function buildAdditionalContextSection(additionalContext: string | undefined): string {
+  const trimmed = additionalContext?.trim();
+  if (!trimmed) return "";
+  return ADDITIONAL_CONTEXT_SECTION_PROMPT.replace("{ADDITIONAL_CONTEXT}", () => trimmed);
+}
+
+export function buildProjectReviewGuidelinesSection(projectGuidelines: string | null): string {
+  return projectGuidelines
+    ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace(
+        "{PROJECT_GUIDELINES}",
+        () => projectGuidelines,
+      )
+    : "";
+}
+
 export const SUBMIT_TOOL_RETRY_PROMPT = `You did not call {SUBMIT_TOOL} as instructed. You must call that tool exactly once with the final payload. Do not output any text, only call the {SUBMIT_TOOL} when you're done.`;
 
 export const REVIEW_OUTPUT_CONTRACT_PROMPT = `Requirements:

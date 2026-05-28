@@ -6,6 +6,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
 
+import { getReviewSessionKey } from "./runtime.js";
+
 const WIDGET_KEY = "review-message-queue";
 const PREVIEW_MAX_LENGTH = 180;
 
@@ -28,7 +30,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   const states = new Map<string, QueueState>();
 
   function start(ctx: ExtensionContext): () => void {
-    const sessionKey = getSessionKey(ctx);
+    const sessionKey = getReviewSessionKey(ctx);
     const state = getState(sessionKey);
     state.active = true;
 
@@ -63,7 +65,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   }
 
   function handleInput(event: InputEvent, ctx: ExtensionContext): boolean {
-    const sessionKey = getSessionKey(ctx);
+    const sessionKey = getReviewSessionKey(ctx);
     if (!isActive(sessionKey)) return false;
     if (event.source === "extension") return false;
 
@@ -90,7 +92,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   }
 
   function clear(ctx: ExtensionContext): void {
-    const sessionKey = getSessionKey(ctx);
+    const sessionKey = getReviewSessionKey(ctx);
     const state = states.get(sessionKey);
     state?.unsubscribeFollowUpShortcut?.();
     states.delete(sessionKey);
@@ -98,7 +100,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   }
 
   function stop(ctx: ExtensionContext): void {
-    const sessionKey = getSessionKey(ctx);
+    const sessionKey = getReviewSessionKey(ctx);
     const state = states.get(sessionKey);
     if (!state) return;
 
@@ -113,14 +115,14 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     mode: QueueMode,
     message: Omit<QueuedReviewMessage, "mode">,
   ): void {
-    const sessionKey = getSessionKey(ctx);
+    const sessionKey = getReviewSessionKey(ctx);
     const state = getState(sessionKey);
     state.messages.push({ mode, ...message });
     render(ctx);
   }
 
   function restoreMessagesToEditor(ctx: ExtensionContext): boolean {
-    const state = states.get(getSessionKey(ctx));
+    const state = states.get(getReviewSessionKey(ctx));
     if (!state?.messages.length) return false;
 
     const queuedText = state.messages.map((message) => message.text).join("\n\n");
@@ -137,7 +139,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     predicate: (message: QueuedReviewMessage) => boolean,
     options: FlushOptions = {},
   ): boolean {
-    const sessionKey = getSessionKey(ctx);
+    const sessionKey = getReviewSessionKey(ctx);
     const state = states.get(sessionKey);
     if (!state?.messages.length) return false;
 
@@ -183,7 +185,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   function render(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
 
-    const messages = states.get(getSessionKey(ctx))?.messages ?? [];
+    const messages = states.get(getReviewSessionKey(ctx))?.messages ?? [];
     if (messages.length === 0) {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       return;
@@ -209,10 +211,6 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     flushAll,
     clear,
   };
-}
-
-function getSessionKey(ctx: ExtensionContext): string {
-  return ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
 }
 
 function matchesConfiguredKey(data: string, keybinding: Parameters<typeof keyText>[0]): boolean {
