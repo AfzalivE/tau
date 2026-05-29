@@ -181,6 +181,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowGitConfig: true,
     allowGitCommonDir: true,
   },
+  ignoreViolations: {
+    "*": ["/__pycache__"],
+  },
 };
 
 const STATUS_KEY = "sandbox";
