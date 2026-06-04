@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Included duration in review result table.
 - Included short invalid-output excerpts when review focuses fail.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains.
+- Improved sandbox defaults for Kotlin, Android, and Gradle workflows while protecting user-level Gradle config.
 - Improved Python developer ergonomics by suppressing prompts for blocked `__pycache__` writes.
 
 ### Fixed
