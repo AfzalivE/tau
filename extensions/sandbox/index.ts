@@ -188,7 +188,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
-const METADATA_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
+const READ_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
 const GIT_FILESYSTEM_PATHS_CACHE = new Map<string, GitFilesystemPaths | null>();
 const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
@@ -242,6 +242,7 @@ type FilesystemList = "deny-read" | "allow-write" | "deny-write";
 
 type FilesystemViolationKind = "read" | "write" | "unknown";
 type FilesystemReadAccess = "metadata" | "data" | "unknown";
+type FilesystemWriteAccess = "unlink" | "unknown";
 type FilesystemViolationResolutionKind = "allow-retry" | "allow-adapt" | "deny";
 
 interface SandboxEvent {
@@ -291,6 +292,7 @@ interface FilesystemViolation {
   path?: string;
   processName?: string;
   readAccess?: FilesystemReadAccess;
+  writeAccess?: FilesystemWriteAccess;
 }
 
 type FilesystemViolationResolution =
@@ -1006,6 +1008,19 @@ function inferSandboxRuleMatch(path: string, rules: string[], cwd?: string): str
   return null;
 }
 
+function matchesSandboxRuleExactly(path: string, rule: string, cwd?: string): boolean {
+  if (containsGlobChars(rule)) return false;
+  return normalizeSandboxPath(path) === normalizeSandboxPath(rule, cwd);
+}
+
+function inferExactSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
+  for (const rule of rules) {
+    if (matchesSandboxRuleExactly(path, rule, cwd)) return rule;
+  }
+
+  return null;
+}
+
 function isSandboxWritablePath(
   runtimeConfig: SandboxRuntimeConfig,
   path: string,
@@ -1145,7 +1160,9 @@ function extractPathLikeValue(text: string): string | undefined {
 
 function extractViolationProcessName(line: string): string | undefined {
   const match = line.match(/^([^\s(]+)\(/);
-  return match?.[1]?.trim() || undefined;
+  const processName = match?.[1]?.trim();
+  if (!processName) return undefined;
+  return processName.split("/").pop() || processName;
 }
 
 function detectFilesystemViolationFromLine(line: string): FilesystemViolation | null {
@@ -1154,8 +1171,12 @@ function detectFilesystemViolationFromLine(line: string): FilesystemViolation | 
   const path = extractPathLikeValue(line);
   const processName = extractViolationProcessName(line);
 
+  if (lower.includes("file-write-unlink")) {
+    return { kind: "write", path, processName, writeAccess: "unlink" };
+  }
+
   if (lower.includes("file-write")) {
-    return { kind: "write", path, processName };
+    return { kind: "write", path, processName, writeAccess: "unknown" };
   }
 
   if (lower.includes("file-read-metadata")) {
@@ -1204,19 +1225,30 @@ function detectFilesystemViolations(
   return violations;
 }
 
-function isMetadataTraversalViolation(
+function isTraversalViolation(
   runtimeConfig: SandboxRuntimeConfig | null,
   violation: FilesystemViolation,
   cwd?: string,
 ): boolean {
-  if (!runtimeConfig || violation.kind !== "read" || violation.readAccess !== "metadata")
-    return false;
-  if (!violation.path || !METADATA_TRAVERSAL_PROCESSES.has(violation.processName ?? ""))
-    return false;
-  return inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null;
+  if (!runtimeConfig || !violation.path) return false;
+  if (!READ_TRAVERSAL_PROCESSES.has(violation.processName ?? "")) return false;
+
+  if (violation.kind === "read") {
+    return inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null;
+  }
+
+  if (violation.kind !== "write" || violation.writeAccess !== "unlink") return false;
+
+  // Seatbelt can emit file-write-unlink checks for protected directory roots
+  // while traversal commands enumerate them. Only exact protected roots are
+  // treated as skipped traversal so writes under protected trees still prompt.
+  return (
+    inferExactSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null ||
+    inferExactSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, cwd) !== null
+  );
 }
 
-function getMetadataTraversalPaths(options: {
+function getTraversalPaths(options: {
   runtimeConfig: SandboxRuntimeConfig | null;
   output: string;
   cwd?: string;
@@ -1235,7 +1267,7 @@ function getMetadataTraversalPaths(options: {
   const skippedPaths: string[] = [];
   for (const line of violationLines) {
     const violation = detectFilesystemViolationFromLine(line);
-    if (!violation || !isMetadataTraversalViolation(runtimeConfig, violation, cwd)) {
+    if (!violation || !isTraversalViolation(runtimeConfig, violation, cwd)) {
       return null;
     }
     if (violation.path && !skippedPaths.includes(violation.path)) {
@@ -1246,7 +1278,7 @@ function getMetadataTraversalPaths(options: {
   return skippedPaths.length > 0 ? skippedPaths : null;
 }
 
-function formatMetadataTraversalNotice(paths: string[]): string {
+function formatTraversalNotice(paths: string[]): string {
   if (paths.length === 0) return "";
 
   const visiblePaths = paths.slice(0, 3).join(", ");
@@ -1750,7 +1782,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
               const shouldStop = newViolations.some((violation) => {
                 const filesystemViolation = detectFilesystemViolationFromLine(violation.line);
                 if (!filesystemViolation) return false;
-                return !isMetadataTraversalViolation(runtimeConfig, filesystemViolation, cwd);
+                return !isTraversalViolation(runtimeConfig, filesystemViolation, cwd);
               });
               if (shouldStop) {
                 stopForFilesystemViolation();
@@ -1893,13 +1925,13 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       attempt.combinedOutput,
     );
     const runtimeConfig = getRuntimeConfig();
-    const metadataTraversalPaths = getMetadataTraversalPaths({
+    const traversalPaths = getTraversalPaths({
       runtimeConfig,
       output: annotatedOutput,
       cwd,
       skipViolationLines: existingViolationCount,
     });
-    const effectiveExitCode = metadataTraversalPaths ? 0 : attempt.exitCode;
+    const effectiveExitCode = traversalPaths ? 0 : attempt.exitCode;
     let postamble = extractAppendedSandboxAnnotation(
       attempt.combinedOutput,
       annotatedOutput,
@@ -1907,8 +1939,8 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     );
     let resolution: FilesystemViolationResolution | null = null;
 
-    if (metadataTraversalPaths) {
-      const notice = formatMetadataTraversalNotice(metadataTraversalPaths);
+    if (traversalPaths) {
+      const notice = formatTraversalNotice(traversalPaths);
       postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
     } else if (runtimeConfig) {
       resolution = await handleFilesystemViolation({

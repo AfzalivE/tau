@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Fixed
 
 - Fixed Oracle subprocesses loading package resources such as Telegram while running model-only checks.
+- Fixed sandbox prompts when traversal commands skip protected read-denied directories.
 - Fixed loop, notify, telegram, ghostty and review extensions treating retry pauses as finished runs.
 - Fixed rare `/review` runs that could finish without usable findings and leave stray result files.
 - Fixed `/sandbox off` still prompting for network access.
