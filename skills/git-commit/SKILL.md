@@ -49,7 +49,7 @@ Rules:
 Rules:
 
 - Avoid `git commit --amend` unless explicitly requested
-- Do not bypass hooks with `git commit --no-verify`
+- Do not bypass hooks with `git commit --no-verify` unless explicitly requested
   - If `git commit` fails due to hooks, fix issues and retry
 - Use `git commit -F` (or heredoc) when there is a body, never newline escapes in `-m`.
 - Never push to remotes unless explicitly requested
