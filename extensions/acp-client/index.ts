@@ -12,6 +12,7 @@
  * Commands:
  * - /acp <claude|codex> <prompt>   prompt the agent (conversation persists per agent)
  * - /acp new <claude|codex> <prompt>   start a fresh conversation, then prompt
+ * - /acp view [claude|codex]   tail a running agent's transcript live
  * - /acp stop   stop all running agents and their processes
  *
  * Agent processes are spawned lazily via `npx` adapters and reused for the
@@ -37,18 +38,20 @@ import { Type } from "typebox";
 import { ACP_AGENT_LABELS, isAcpAgentId, loadConfig } from "./config.js";
 import { AcpConnection } from "./connection.js";
 import { renderAcpCall, renderAcpResult } from "./render.js";
-import { TranscriptRecorder } from "./transcript.js";
+import { AcpRun, AcpRunRegistry } from "./runs.js";
+import { AcpSessionViewer } from "./viewer.js";
 import type { AcpAgentId, AcpMessageDetails, AcpToolDetails } from "./types.js";
 
 const CUSTOM_MESSAGE_TYPE = "acp-agent";
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const USAGE = "Usage: /acp [new] <claude|codex> <prompt>, /acp stop";
+const USAGE = "Usage: /acp [new] <claude|codex> <prompt>, /acp view [agent], /acp stop";
 
 export default function acpExtension(pi: ExtensionAPI): void {
   const connections = new Map<AcpAgentId, AcpConnection>();
   const commandSessions = new Map<AcpAgentId, string>();
   const commandRuns = new Map<AcpAgentId, AbortController>();
+  const runs = new AcpRunRegistry();
 
   function getOrCreateConnection(agent: AcpAgentId): AcpConnection {
     let connection = connections.get(agent);
@@ -114,34 +117,46 @@ export default function acpExtension(pi: ExtensionAPI): void {
               "Call acp_agent again without sessionId to start a new session.",
           );
         }
-        sessionId ??= await connection.newSession(ctx.cwd);
 
-        const recorder = new TranscriptRecorder();
-        const details: AcpToolDetails = {
-          agent: params.agent,
-          sessionId,
-          entries: recorder.entries,
-        };
-        const response = await connection.prompt(
-          sessionId,
-          params.prompt,
-          {
-            onUpdate: (update) => {
-              recorder.handleUpdate(update);
-              onUpdate?.({
-                content: [{ type: "text", text: recorder.progressLabel }],
-                details,
-              });
+        const run = runs.create(params.agent, "tool", params.prompt);
+        const { recorder } = run;
+        try {
+          sessionId ??= await connection.newSession(ctx.cwd);
+          run.sessionId = sessionId;
+
+          const details: AcpToolDetails = {
+            agent: params.agent,
+            sessionId,
+            entries: recorder.entries,
+          };
+          const response = await connection.prompt(
+            sessionId,
+            params.prompt,
+            {
+              onUpdate: (update) => {
+                recorder.handleUpdate(update);
+                run.notify();
+                onUpdate?.({
+                  content: [{ type: "text", text: recorder.progressLabel }],
+                  details,
+                });
+              },
+              requestPermission: (request) => resolvePermission(ctx, run, request),
             },
-            requestPermission: (request) => resolvePermission(ctx, params.agent, request, recorder),
-          },
-          signal,
-        );
+            signal,
+          );
 
-        details.stopReason = response.stopReason;
-        const answer = recorder.finalText || "(no response)";
-        const text = `[${params.agent} session: ${sessionId}, stop reason: ${response.stopReason}]\n\n${answer}`;
-        return { content: [{ type: "text", text }], details };
+          details.stopReason = response.stopReason;
+          run.finish("done");
+          const answer = recorder.finalText || "(no response)";
+          const text = `[${params.agent} session: ${sessionId}, stop reason: ${response.stopReason}]\n\n${answer}`;
+          return { content: [{ type: "text", text }], details };
+        } catch (error) {
+          run.finish("error", error instanceof Error ? error.message : String(error));
+          throw error;
+        } finally {
+          runs.remove(run);
+        }
       },
     }),
   );
@@ -153,6 +168,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
         { value: "claude ", label: "claude", description: "Prompt the Claude agent" },
         { value: "codex ", label: "codex", description: "Prompt the Codex agent" },
         { value: "new ", label: "new", description: "Start a fresh conversation" },
+        { value: "view", label: "view", description: "Tail a running agent's transcript" },
         { value: "stop", label: "stop", description: "Stop all running agents" },
       ];
       return items.filter((item) => item.value.startsWith(argumentPrefix));
@@ -168,6 +184,12 @@ export default function acpExtension(pi: ExtensionAPI): void {
         const hadConnections = connections.size > 0;
         disposeAll();
         ctx.ui.notify(hadConnections ? "ACP agents stopped." : "No ACP agents running.", "info");
+        return;
+      }
+
+      if (trimmed === "view" || trimmed.startsWith("view ")) {
+        const filter = trimmed.slice(4).trim();
+        await openSessionViewer(ctx, runs, isAcpAgentId(filter) ? filter : undefined);
         return;
       }
 
@@ -204,13 +226,14 @@ export default function acpExtension(pi: ExtensionAPI): void {
     const controller = new AbortController();
     commandRuns.set(agent, controller);
 
-    const recorder = new TranscriptRecorder();
+    const run = runs.create(agent, "command", prompt);
+    const { recorder } = run;
     let frame = 0;
     const statusTimer = ctx.hasUI
       ? setInterval(() => {
           frame = (frame + 1) % STATUS_SPINNER_FRAMES.length;
           const spinner = STATUS_SPINNER_FRAMES[frame];
-          ctx.ui.setStatus(statusKey, `${spinner} ${agent}: ${recorder.progressLabel}`);
+          ctx.ui.setStatus(statusKey, `${spinner} ${agent}: ${recorder.progressLabel} (/acp view)`);
         }, STATUS_SPINNER_INTERVAL_MS)
       : null;
 
@@ -224,18 +247,23 @@ export default function acpExtension(pi: ExtensionAPI): void {
           sessionId = await connection.newSession(ctx.cwd);
           commandSessions.set(agent, sessionId);
         }
+        run.sessionId = sessionId;
 
         const response = await connection.prompt(
           sessionId,
           prompt,
           {
-            onUpdate: (update) => recorder.handleUpdate(update),
-            requestPermission: (request) => resolvePermission(ctx, agent, request, recorder),
+            onUpdate: (update) => {
+              recorder.handleUpdate(update);
+              run.notify();
+            },
+            requestPermission: (request) => resolvePermission(ctx, run, request),
           },
           controller.signal,
         );
 
         if (controller.signal.aborted) return;
+        run.finish("done");
 
         const answer = recorder.finalText || "(no response)";
         const details: AcpMessageDetails = {
@@ -254,8 +282,11 @@ export default function acpExtension(pi: ExtensionAPI): void {
       } catch (error) {
         if (controller.signal.aborted) return;
         const message = error instanceof Error ? error.message : String(error);
+        run.finish("error", message);
         ctx.ui.notify(`/acp ${agent}: ${message}`, "error");
       } finally {
+        if (run.status === "running") run.finish(controller.signal.aborted ? "done" : "error");
+        runs.remove(run);
         if (statusTimer) clearInterval(statusTimer);
         if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
         commandRuns.delete(agent);
@@ -289,38 +320,72 @@ export default function acpExtension(pi: ExtensionAPI): void {
 
 async function resolvePermission(
   ctx: ExtensionContext,
-  agent: AcpAgentId,
+  run: AcpRun,
   request: RequestPermissionRequest,
-  recorder: TranscriptRecorder,
 ): Promise<RequestPermissionResponse> {
   const title = request.toolCall.title?.trim() || "a tool call";
   const fallback =
     request.options.find((option) => option.kind === "reject_once") ?? request.options[0];
 
   if (!ctx.hasUI) {
-    return concludePermission(recorder, title, fallback, "auto-rejected (no UI)");
+    return concludePermission(run, title, fallback, "auto-rejected (no UI)");
   }
 
   const labels = request.options.map((option) => option.name);
   const choice = await ctx.ui.select(
-    `${ACP_AGENT_LABELS[agent]} requests permission: ${title}`,
+    `${ACP_AGENT_LABELS[run.agent]} requests permission: ${title}`,
     labels,
   );
   if (choice === undefined) {
-    return concludePermission(recorder, title, fallback, "dismissed");
+    return concludePermission(run, title, fallback, "dismissed");
   }
 
   const selected = request.options[labels.indexOf(choice)];
-  return concludePermission(recorder, title, selected, selected?.name ?? choice);
+  return concludePermission(run, title, selected, selected?.name ?? choice);
 }
 
 function concludePermission(
-  recorder: TranscriptRecorder,
+  run: AcpRun,
   title: string,
   option: PermissionOption | undefined,
   decision: string,
 ): RequestPermissionResponse {
-  recorder.recordPermission(title, decision);
+  run.recorder.recordPermission(title, decision);
+  run.notify();
   if (!option) return { outcome: { outcome: "cancelled" } };
   return { outcome: { outcome: "selected", optionId: option.optionId } };
+}
+
+async function openSessionViewer(
+  ctx: ExtensionCommandContext,
+  runs: AcpRunRegistry,
+  agentFilter: AcpAgentId | undefined,
+): Promise<void> {
+  if (!ctx.hasUI) {
+    ctx.ui.notify("/acp view requires interactive mode.", "error");
+    return;
+  }
+
+  const candidates = runs.running().filter((run) => !agentFilter || run.agent === agentFilter);
+  if (!candidates.length) {
+    const scope = agentFilter ? `${agentFilter} ` : "";
+    ctx.ui.notify(`No running ${scope}ACP sessions.`, "info");
+    return;
+  }
+
+  let run = candidates[0];
+  if (candidates.length > 1) {
+    const labels = candidates.map((candidate) => {
+      const preview = candidate.prompt.replace(/\s+/g, " ").trim().slice(0, 60);
+      return `${ACP_AGENT_LABELS[candidate.agent]} · ${preview}`;
+    });
+    const choice = await ctx.ui.select("View which ACP session?", labels);
+    if (choice === undefined) return;
+    run = candidates[labels.indexOf(choice)]!;
+  }
+
+  const selected = run!;
+  await ctx.ui.custom<void>(
+    (tui, theme, _keybindings, done) => new AcpSessionViewer(selected, tui, theme, done),
+  );
 }

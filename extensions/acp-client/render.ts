@@ -6,14 +6,14 @@ import type { AcpAgentId, AcpToolDetails, AcpTranscriptEntry } from "./types.js"
 
 const CALL_PREVIEW_LENGTH = 80;
 
-const TOOL_STATUS_ICONS = {
+export const TOOL_STATUS_ICONS = {
   pending: "○",
   in_progress: "◐",
   completed: "●",
   failed: "✗",
 } as const;
 
-const PLAN_STATUS_ICONS = {
+export const PLAN_STATUS_ICONS = {
   pending: "○",
   in_progress: "◐",
   completed: "●",

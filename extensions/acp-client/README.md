@@ -13,10 +13,15 @@ Pi acts as the ACP client: it spawns an agent adapter as a subprocess, speaks JS
 /acp claude refactor the parser to be iterative
 /acp codex why does the build fail on node 24?
 /acp new claude start over with a clean slate
+/acp view claude follow the live transcript
 /acp stop
 ```
 
 Conversations persist per agent across `/acp` invocations until you use `new`, `stop`, or the Pi session ends.
+
+## Viewing a running session
+
+`/acp` prompts run in the background with a one-line status in the footer. To watch the full transcript as it streams — messages, thoughts, tool calls, and plans — open `/acp view` (or `/acp view <agent>` to skip the picker). The viewer tails to the bottom as updates arrive unless you scroll up, and stays open after the turn completes so you can read the final answer. Close it with `Enter` or `Esc`.
 
 ## Agents
 
