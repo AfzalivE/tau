@@ -1735,6 +1735,12 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     return run;
   }
 
+  function withSandboxDefaultEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const baseEnv = env ?? process.env;
+    if (baseEnv.GIT_OPTIONAL_LOCKS !== undefined) return baseEnv;
+    return { ...baseEnv, GIT_OPTIONAL_LOCKS: "0" };
+  }
+
   async function runSandboxAttempt(
     command: string,
     wrappedCommand: string,
@@ -1748,7 +1754,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     return new Promise((resolve, reject) => {
       const child = spawn("bash", ["-c", wrappedCommand], {
         cwd,
-        env,
+        env: withSandboxDefaultEnv(env),
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
