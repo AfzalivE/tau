@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
+- Added an `acp-client` extension to use Claude and Codex agents via the Agent Client Protocol, through an `acp_agent` tool and an `/acp` command.
 - Added a dedicated `/review` security focus.
 - Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
 - Added Matt Pocock's `handoff` skill to the fork-specific skill bundle.

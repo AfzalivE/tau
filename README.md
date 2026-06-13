@@ -36,6 +36,7 @@ pi install -l npm:tau-coding-agent
 
 | Extension           | Command              | Coding | All | Description                                                                                                               |
 | ------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
+| `acp-client`        | `/acp`               |   ✓    |  ✓  | Use Claude and Codex agents via the Agent Client Protocol.                                                                |
 | `answer`            | `/answer`            |   ✓    |  ✓  | Extract and interactively answer agent questions.                                                                         |
 | `branch-term`       | `/branch`            |   ✓    |  ✓  | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |

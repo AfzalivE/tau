@@ -23,6 +23,7 @@
     "lint:fix": "oxlint --fix ."
   },
   "devDependencies": {
+    "@agentclientprotocol/sdk": "^0.25.0",
     "@earendil-works/pi-agent-core": "0.74.0",
     "@earendil-works/pi-ai": "0.74.0",
     "@earendil-works/pi-coding-agent": "0.74.0",

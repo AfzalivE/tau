@@ -4,6 +4,7 @@
   "private": true,
   "description": "Full Tau package for Pi with coding workflows, web search, sandboxing, memory, Telegram, Home Assistant, OpenSCAD, skills, and a theme",
   "keywords": [
+    "acp-client",
     "agent-tools",
     "code-review",
     "coding-agent",
@@ -31,6 +32,7 @@
   },
   "type": "module",
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.25.0",
     "@anthropic-ai/sandbox-runtime": "^0.0.49",
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^29.0.2",
@@ -50,6 +52,7 @@
   },
   "pi": {
     "extensions": [
+      "../../extensions/acp-client/index.ts",
       "../../extensions/answer.ts",
       "../../extensions/branch-term.ts",
       "../../extensions/btw.ts",
