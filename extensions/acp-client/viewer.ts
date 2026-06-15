@@ -129,7 +129,7 @@ export class AcpSessionViewer implements Component {
   }
 
   private headerLines(contentWidth: number): string[] {
-    const label = this.theme.bold(ACP_AGENT_LABELS[this.run.agent]);
+    const label = this.theme.bold(this.run.label ?? ACP_AGENT_LABELS[this.run.agent]);
     const statusColor =
       this.run.status === "error" ? "error" : this.run.status === "done" ? "success" : "accent";
     const status = this.theme.fg(statusColor, STATUS_LABELS[this.run.status]);

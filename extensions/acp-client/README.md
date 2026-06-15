@@ -9,19 +9,25 @@ Pi acts as the ACP client: it spawns an agent adapter as a subprocess, speaks JS
 - **`acp_agent` tool** — Pi's model can delegate tasks to Claude or Codex subagents. Each call returns the agent's final answer plus a session ID the model can pass back to continue the conversation.
 - **`/acp` command** — drive an agent directly. Replies are recorded in the session as custom messages, so they become part of Pi's context.
 
+## Sessions
+
+Multiple sessions can run at once. Prompting an **agent name** starts a new session and gives it a short handle (`claude-1`, `codex-1`, `claude-2`, …); prompting a **handle** continues that specific session. Each reply shows its handle so you know what to continue.
+
 ```
-/acp claude refactor the parser to be iterative
-/acp codex why does the build fail on node 24?
-/acp new claude start over with a clean slate
-/acp view claude follow the live transcript
-/acp stop
+/acp claude refactor the parser to be iterative   # starts claude-1
+/acp codex why does the build fail on node 24?     # starts codex-1
+/acp claude draft a migration plan                 # starts claude-2, runs alongside claude-1
+/acp claude-1 now make it tail-recursive           # continues claude-1
+/acp view claude-2                                 # follow claude-2's live transcript
+/acp stop claude-1                                 # stop one session
+/acp stop                                          # stop everything
 ```
 
-Conversations persist per agent across `/acp` invocations until you use `new`, `stop`, or the Pi session ends.
+All sessions of one agent kind share a single adapter process, so they run concurrently and independently.
 
 ## Viewing a running session
 
-`/acp` prompts run in the background with a one-line status in the footer. To watch the full transcript as it streams — messages, thoughts, tool calls, and plans — open `/acp view` (or `/acp view <agent>` to skip the picker). The viewer tails to the bottom as updates arrive unless you scroll up, and stays open after the turn completes so you can read the final answer. Close it with `Enter` or `Esc`.
+`/acp` prompts run in the background with a one-line status in the footer. To watch the full transcript as it streams — messages, thoughts, tool calls, and plans — open `/acp view`. With more than one session running you get a picker; pass a handle (`/acp view claude-2`) or an agent name (`/acp view codex`) to narrow it. The viewer tails to the bottom as updates arrive unless you scroll up, and stays open after the turn completes so you can read the final answer. Close it with `Enter` or `Esc`.
 
 ## Agents
 

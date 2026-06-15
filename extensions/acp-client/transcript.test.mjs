@@ -52,7 +52,13 @@ test("tool_call_update mutates the matching tool entry in place", () => {
   });
 
   assert.deepEqual(recorder.entries, [
-    { kind: "tool", toolCallId: "t1", title: "Run tests", toolKind: undefined, status: "completed" },
+    {
+      kind: "tool",
+      toolCallId: "t1",
+      title: "Run tests",
+      toolKind: undefined,
+      status: "completed",
+    },
   ]);
 });
 

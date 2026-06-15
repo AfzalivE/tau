@@ -25,6 +25,8 @@ export class AcpRun {
     readonly agent: AcpAgentId,
     readonly source: AcpRunSource,
     readonly prompt: string,
+    /** Display label, e.g. a session handle like "claude-2". Falls back to the agent name. */
+    readonly label?: string,
   ) {}
 
   subscribe(listener: () => void): () => void {
@@ -49,8 +51,8 @@ export class AcpRunRegistry {
   private readonly runs = new Set<AcpRun>();
   private nextId = 1;
 
-  create(agent: AcpAgentId, source: AcpRunSource, prompt: string): AcpRun {
-    const run = new AcpRun(`acp-${this.nextId++}`, agent, source, prompt);
+  create(agent: AcpAgentId, source: AcpRunSource, prompt: string, label?: string): AcpRun {
+    const run = new AcpRun(`acp-${this.nextId++}`, agent, source, prompt, label);
     this.runs.add(run);
     return run;
   }

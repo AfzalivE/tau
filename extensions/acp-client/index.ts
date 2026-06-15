@@ -9,15 +9,20 @@
  * - Agent permission requests (run a command, edit a file, ...) surface as
  *   interactive prompts; without UI they fall back to rejection.
  *
- * Commands:
- * - /acp <claude|codex> <prompt>   prompt the agent (conversation persists per agent)
- * - /acp new <claude|codex> <prompt>   start a fresh conversation, then prompt
- * - /acp view [claude|codex]   tail a running agent's transcript live
- * - /acp stop   stop all running agents and their processes
+ * Multiple sessions can run concurrently. Each is identified by a short handle
+ * like "claude-1" or "codex-2"; prompting an agent name starts a new session,
+ * prompting a handle continues that one.
  *
- * Agent processes are spawned lazily via `npx` adapters and reused for the
- * lifetime of the Pi session. Launch commands can be overridden in
- * ~/.pi/acp.json: { "agents": { "claude": { "command": "...", "args": [...] } } }
+ * Commands:
+ * - /acp <claude|codex> <prompt>   start a new session and prompt it
+ * - /acp <handle> <prompt>   continue an existing session (e.g. /acp claude-2 ...)
+ * - /acp view [handle|agent]   tail a running session's transcript live
+ * - /acp stop [handle]   stop one session, or all sessions and processes
+ *
+ * One agent process is spawned lazily per agent kind via `npx` adapters and
+ * hosts all of that agent's sessions for the lifetime of the Pi session.
+ * Launch commands can be overridden in ~/.pi/acp.json:
+ * { "agents": { "claude": { "command": "...", "args": [...] } } }
  */
 
 import type {
@@ -45,12 +50,28 @@ import type { AcpAgentId, AcpMessageDetails, AcpToolDetails } from "./types.js";
 const CUSTOM_MESSAGE_TYPE = "acp-agent";
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const USAGE = "Usage: /acp [new] <claude|codex> <prompt>, /acp view [agent], /acp stop";
+const USAGE =
+  "Usage: /acp <claude|codex|handle> <prompt>, /acp view [handle|agent], /acp stop [handle]";
+
+/** A named, continuable ACP conversation hosted by an agent connection. */
+interface ManagedSession {
+  handle: string;
+  agent: AcpAgentId;
+  sessionId: string;
+}
+
+/** A resolved /acp prompt target: either a new session or an existing one. */
+interface CommandTarget {
+  agent: AcpAgentId;
+  handle: string;
+  sessionId?: string;
+}
 
 export default function acpExtension(pi: ExtensionAPI): void {
   const connections = new Map<AcpAgentId, AcpConnection>();
-  const commandSessions = new Map<AcpAgentId, string>();
-  const commandRuns = new Map<AcpAgentId, AbortController>();
+  const sessions = new Map<string, ManagedSession>();
+  const sessionCounters = new Map<AcpAgentId, number>();
+  const commandRuns = new Map<string, AbortController>();
   const runs = new AcpRunRegistry();
 
   function getOrCreateConnection(agent: AcpAgentId): AcpConnection {
@@ -58,7 +79,9 @@ export default function acpExtension(pi: ExtensionAPI): void {
     if (connection && !connection.alive) {
       connection.dispose();
       connections.delete(agent);
-      commandSessions.delete(agent);
+      for (const session of sessions.values()) {
+        if (session.agent === agent) sessions.delete(session.handle);
+      }
       connection = undefined;
     }
     if (!connection) {
@@ -68,12 +91,37 @@ export default function acpExtension(pi: ExtensionAPI): void {
     return connection;
   }
 
+  function nextHandle(agent: AcpAgentId): string {
+    const count = (sessionCounters.get(agent) ?? 0) + 1;
+    sessionCounters.set(agent, count);
+    return `${agent}-${count}`;
+  }
+
+  function resolveTarget(token: string): CommandTarget | undefined {
+    if (isAcpAgentId(token)) {
+      return { agent: token, handle: nextHandle(token) };
+    }
+    const session = sessions.get(token);
+    if (session) {
+      return { agent: session.agent, handle: session.handle, sessionId: session.sessionId };
+    }
+    return undefined;
+  }
+
   function disposeAll(): void {
     for (const controller of commandRuns.values()) controller.abort();
     commandRuns.clear();
     for (const connection of connections.values()) connection.dispose();
     connections.clear();
-    commandSessions.clear();
+    sessions.clear();
+  }
+
+  function stopSession(handle: string): boolean {
+    const controller = commandRuns.get(handle);
+    const known = controller !== undefined || sessions.has(handle);
+    controller?.abort();
+    sessions.delete(handle);
+    return known;
   }
 
   pi.registerTool(
@@ -165,11 +213,15 @@ export default function acpExtension(pi: ExtensionAPI): void {
     description: "Prompt a Claude or Codex agent via ACP",
     getArgumentCompletions(argumentPrefix) {
       const items = [
-        { value: "claude ", label: "claude", description: "Prompt the Claude agent" },
-        { value: "codex ", label: "codex", description: "Prompt the Codex agent" },
-        { value: "new ", label: "new", description: "Start a fresh conversation" },
-        { value: "view", label: "view", description: "Tail a running agent's transcript" },
-        { value: "stop", label: "stop", description: "Stop all running agents" },
+        { value: "claude ", label: "claude", description: "Start a new Claude session" },
+        { value: "codex ", label: "codex", description: "Start a new Codex session" },
+        { value: "view", label: "view", description: "Tail a running session's transcript" },
+        { value: "stop", label: "stop", description: "Stop one session, or all" },
+        ...[...sessions.keys()].map((handle) => ({
+          value: `${handle} `,
+          label: handle,
+          description: "Continue this session",
+        })),
       ];
       return items.filter((item) => item.value.startsWith(argumentPrefix));
     },
@@ -180,60 +232,66 @@ export default function acpExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      if (trimmed === "stop") {
-        const hadConnections = connections.size > 0;
-        disposeAll();
-        ctx.ui.notify(hadConnections ? "ACP agents stopped." : "No ACP agents running.", "info");
+      const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+      const keyword = match?.[1] ?? trimmed;
+      const rest = match?.[2]?.trim() ?? "";
+
+      if (keyword === "stop") {
+        if (!rest) {
+          const hadConnections = connections.size > 0;
+          disposeAll();
+          ctx.ui.notify(hadConnections ? "ACP agents stopped." : "No ACP agents running.", "info");
+          return;
+        }
+        ctx.ui.notify(stopSession(rest) ? `Stopped ${rest}.` : `No such session: ${rest}`, "info");
         return;
       }
 
-      if (trimmed === "view" || trimmed.startsWith("view ")) {
-        const filter = trimmed.slice(4).trim();
-        await openSessionViewer(ctx, runs, isAcpAgentId(filter) ? filter : undefined);
+      if (keyword === "view") {
+        await openSessionViewer(ctx, runs, rest || undefined);
         return;
       }
 
-      let rest = trimmed;
-      let reset = false;
-      if (rest === "new" || rest.startsWith("new ")) {
-        reset = true;
-        rest = rest.slice(3).trim();
+      const target = resolveTarget(keyword);
+      if (!target) {
+        ctx.ui.notify(`Unknown agent or session "${keyword}". ${USAGE}`, "warning");
+        return;
       }
-
-      const [agentToken = "", ...promptParts] = rest.split(/\s+/);
-      const prompt = promptParts.join(" ").trim();
-      if (!isAcpAgentId(agentToken) || !prompt) {
-        ctx.ui.notify(USAGE, "warning");
+      if (!rest) {
+        ctx.ui.notify(`Provide a prompt. ${USAGE}`, "warning");
         return;
       }
 
-      runCommandPrompt(agentToken, prompt, reset, ctx);
+      startCommandRun(target, rest, ctx);
     },
   });
 
-  function runCommandPrompt(
-    agent: AcpAgentId,
+  function startCommandRun(
+    target: CommandTarget,
     prompt: string,
-    reset: boolean,
     ctx: ExtensionCommandContext,
   ): void {
-    if (commandRuns.has(agent)) {
-      ctx.ui.notify(`A /acp ${agent} run is already active.`, "warning");
+    const { agent, handle } = target;
+    if (commandRuns.has(handle)) {
+      ctx.ui.notify(`Session ${handle} is already processing a prompt.`, "warning");
       return;
     }
 
-    const statusKey = `0-acp-${agent}`;
+    const statusKey = `0-acp-${handle}`;
     const controller = new AbortController();
-    commandRuns.set(agent, controller);
+    commandRuns.set(handle, controller);
 
-    const run = runs.create(agent, "command", prompt);
+    const run = runs.create(agent, "command", prompt, handle);
     const { recorder } = run;
     let frame = 0;
     const statusTimer = ctx.hasUI
       ? setInterval(() => {
           frame = (frame + 1) % STATUS_SPINNER_FRAMES.length;
           const spinner = STATUS_SPINNER_FRAMES[frame];
-          ctx.ui.setStatus(statusKey, `${spinner} ${agent}: ${recorder.progressLabel} (/acp view)`);
+          ctx.ui.setStatus(
+            statusKey,
+            `${spinner} ${handle}: ${recorder.progressLabel} (/acp view ${handle})`,
+          );
         }, STATUS_SPINNER_INTERVAL_MS)
       : null;
 
@@ -241,13 +299,13 @@ export default function acpExtension(pi: ExtensionAPI): void {
       try {
         const connection = getOrCreateConnection(agent);
 
-        let sessionId = reset ? undefined : commandSessions.get(agent);
+        let sessionId = target.sessionId;
         if (sessionId && !connection.hasSession(sessionId)) sessionId = undefined;
         if (!sessionId) {
           sessionId = await connection.newSession(ctx.cwd);
-          commandSessions.set(agent, sessionId);
         }
         run.sessionId = sessionId;
+        sessions.set(handle, { handle, agent, sessionId });
 
         const response = await connection.prompt(
           sessionId,
@@ -268,6 +326,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
         const answer = recorder.finalText || "(no response)";
         const details: AcpMessageDetails = {
           agent,
+          handle,
           prompt,
           sessionId,
           stopReason: response.stopReason,
@@ -275,7 +334,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
         };
         pi.sendMessage<AcpMessageDetails>({
           customType: CUSTOM_MESSAGE_TYPE,
-          content: `${ACP_AGENT_LABELS[agent]} (via ACP) replied to "${prompt}":\n\n${answer}`,
+          content: `${ACP_AGENT_LABELS[agent]} (${handle}) replied to "${prompt}":\n\n${answer}`,
           display: true,
           details,
         });
@@ -283,13 +342,13 @@ export default function acpExtension(pi: ExtensionAPI): void {
         if (controller.signal.aborted) return;
         const message = error instanceof Error ? error.message : String(error);
         run.finish("error", message);
-        ctx.ui.notify(`/acp ${agent}: ${message}`, "error");
+        ctx.ui.notify(`/acp ${handle}: ${message}`, "error");
       } finally {
         if (run.status === "running") run.finish(controller.signal.aborted ? "done" : "error");
         runs.remove(run);
         if (statusTimer) clearInterval(statusTimer);
         if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
-        commandRuns.delete(agent);
+        commandRuns.delete(handle);
       }
     })();
   }
@@ -301,16 +360,19 @@ export default function acpExtension(pi: ExtensionAPI): void {
     const finalMessage = details.entries.findLast((entry) => entry.kind === "message");
     const answer = finalMessage?.kind === "message" ? finalMessage.text.trim() : "(no response)";
 
+    const label = `${ACP_AGENT_LABELS[details.agent]} · ${details.handle}`;
     const container = new Container();
     container.addChild(
       new Text(
-        `${theme.fg("customMessageLabel", theme.bold(`${ACP_AGENT_LABELS[details.agent]} (ACP)`))} ${theme.fg("dim", details.prompt)}`,
+        `${theme.fg("customMessageLabel", theme.bold(label))} ${theme.fg("dim", details.prompt)}`,
         0,
         0,
       ),
     );
     container.addChild(new Spacer(1));
     container.addChild(new Markdown(answer, 0, 0, getMarkdownTheme()));
+    container.addChild(new Spacer(1));
+    container.addChild(new Text(theme.fg("dim", `Continue with /acp ${details.handle}`), 0, 0));
     return container;
   });
 
@@ -359,16 +421,18 @@ function concludePermission(
 async function openSessionViewer(
   ctx: ExtensionCommandContext,
   runs: AcpRunRegistry,
-  agentFilter: AcpAgentId | undefined,
+  filter: string | undefined,
 ): Promise<void> {
   if (!ctx.hasUI) {
     ctx.ui.notify("/acp view requires interactive mode.", "error");
     return;
   }
 
-  const candidates = runs.running().filter((run) => !agentFilter || run.agent === agentFilter);
+  const candidates = runs
+    .running()
+    .filter((run) => !filter || run.label === filter || run.agent === filter);
   if (!candidates.length) {
-    const scope = agentFilter ? `${agentFilter} ` : "";
+    const scope = filter ? `${filter} ` : "";
     ctx.ui.notify(`No running ${scope}ACP sessions.`, "info");
     return;
   }
@@ -376,8 +440,9 @@ async function openSessionViewer(
   let run = candidates[0];
   if (candidates.length > 1) {
     const labels = candidates.map((candidate) => {
+      const name = candidate.label ?? ACP_AGENT_LABELS[candidate.agent];
       const preview = candidate.prompt.replace(/\s+/g, " ").trim().slice(0, 60);
-      return `${ACP_AGENT_LABELS[candidate.agent]} · ${preview}`;
+      return `${name} · ${preview}`;
     });
     const choice = await ctx.ui.select("View which ACP session?", labels);
     if (choice === undefined) return;

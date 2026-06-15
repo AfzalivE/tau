@@ -43,6 +43,7 @@ export interface AcpToolDetails {
 /** Details payload for /acp custom messages. */
 export interface AcpMessageDetails {
   agent: AcpAgentId;
+  handle: string;
   prompt: string;
   sessionId: string;
   stopReason: StopReason;
