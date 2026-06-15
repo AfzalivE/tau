@@ -248,7 +248,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
       }
 
       if (keyword === "view") {
-        await openSessionViewer(ctx, runs, rest || undefined);
+        await openSessionViewer(ctx, runs, rest || undefined, stopSession);
         return;
       }
 
@@ -422,6 +422,7 @@ async function openSessionViewer(
   ctx: ExtensionCommandContext,
   runs: AcpRunRegistry,
   filter: string | undefined,
+  stopSession: (handle: string) => boolean,
 ): Promise<void> {
   if (!ctx.hasUI) {
     ctx.ui.notify("/acp view requires interactive mode.", "error");
@@ -450,7 +451,10 @@ async function openSessionViewer(
   }
 
   const selected = run!;
+  const handle = selected.label;
+  const onStop =
+    selected.source === "command" && handle ? () => void stopSession(handle) : undefined;
   await ctx.ui.custom<void>(
-    (tui, theme, _keybindings, done) => new AcpSessionViewer(selected, tui, theme, done),
+    (tui, theme, _keybindings, done) => new AcpSessionViewer(selected, tui, theme, done, onStop),
   );
 }

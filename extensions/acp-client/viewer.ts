@@ -34,6 +34,8 @@ export class AcpSessionViewer implements Component {
   private scrollOffset = 0;
   private stickToBottom = true;
   private dirty = true;
+  private confirmingStop = false;
+  private stopRequested = false;
   private cachedWidth?: number;
   private cachedLines: string[] = [];
   private readonly unsubscribe: () => void;
@@ -44,6 +46,8 @@ export class AcpSessionViewer implements Component {
     private readonly tui: TUI,
     private readonly theme: Theme,
     private readonly onDone: () => void,
+    /** Stops the underlying session. Omitted when the run cannot be stopped from here. */
+    private readonly onStop?: () => void,
   ) {
     this.unsubscribe = run.subscribe(() => {
       this.dirty = true;
@@ -64,6 +68,20 @@ export class AcpSessionViewer implements Component {
   }
 
   handleInput(data: string): void {
+    if (this.confirmingStop) {
+      if (data.toLowerCase() === "y") {
+        this.confirmingStop = false;
+        this.stopRequested = true;
+        this.onStop?.();
+      } else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape)) {
+        this.confirmingStop = false;
+      } else {
+        return;
+      }
+      this.tui.requestRender();
+      return;
+    }
+
     if (
       matchesKey(data, Key.enter) ||
       matchesKey(data, Key.escape) ||
@@ -71,6 +89,12 @@ export class AcpSessionViewer implements Component {
       data.toLowerCase() === "q"
     ) {
       this.onDone();
+      return;
+    }
+
+    if (data.toLowerCase() === "s" && this.canStop()) {
+      this.confirmingStop = true;
+      this.tui.requestRender();
       return;
     }
 
@@ -120,12 +144,35 @@ export class AcpSessionViewer implements Component {
     for (let i = visible.length; i < bodyHeight; i += 1) lines.push(this.boxLine("", boxWidth));
 
     lines.push(this.separatorLine(boxWidth));
-    const range = `${Math.min(bodyLines.length, this.scrollOffset + 1)}-${Math.min(bodyLines.length, this.scrollOffset + visible.length)}/${bodyLines.length}`;
-    const follow = this.stickToBottom ? this.theme.fg("success", " following") : "";
-    const controls = `${this.theme.fg("dim", "↑↓ scroll · End follow · Enter/Esc close")}${follow} ${this.theme.fg("muted", range)}`;
-    lines.push(this.boxLine(truncateToWidth(controls, contentWidth), boxWidth));
+    lines.push(
+      this.boxLine(
+        truncateToWidth(this.footer(bodyLines.length, visible.length), contentWidth),
+        boxWidth,
+      ),
+    );
     lines.push(this.borderLine("╰", "╯", boxWidth));
     return lines;
+  }
+
+  private footer(totalLines: number, visibleLines: number): string {
+    if (this.confirmingStop) {
+      return (
+        this.theme.fg("warning", `Stop ${this.run.label ?? this.run.agent}? `) +
+        this.theme.fg("dim", "y / n")
+      );
+    }
+
+    const range = `${Math.min(totalLines, this.scrollOffset + 1)}-${Math.min(totalLines, this.scrollOffset + visibleLines)}/${totalLines}`;
+    const hints = ["↑↓ scroll", "End follow"];
+    if (this.canStop()) hints.push("s stop");
+    if (this.stopRequested && this.run.status === "running") hints.push("stopping…");
+    hints.push("Enter/Esc close");
+    const follow = this.stickToBottom ? this.theme.fg("success", " following") : "";
+    return `${this.theme.fg("dim", hints.join(" · "))}${follow} ${this.theme.fg("muted", range)}`;
+  }
+
+  private canStop(): boolean {
+    return this.onStop !== undefined && this.run.status === "running" && !this.stopRequested;
   }
 
   private headerLines(contentWidth: number): string[] {

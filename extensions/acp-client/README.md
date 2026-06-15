@@ -29,6 +29,8 @@ All sessions of one agent kind share a single adapter process, so they run concu
 
 `/acp` prompts run in the background with a one-line status in the footer. To watch the full transcript as it streams — messages, thoughts, tool calls, and plans — open `/acp view`. With more than one session running you get a picker; pass a handle (`/acp view claude-2`) or an agent name (`/acp view codex`) to narrow it. The viewer tails to the bottom as updates arrive unless you scroll up, and stays open after the turn completes so you can read the final answer. Close it with `Enter` or `Esc`.
 
+While viewing a running session, press `s` to stop it; the footer asks to confirm (`y`/`n`) before cancelling the turn. The stop key only appears for `/acp` sessions you started, not for `acp_agent` tool runs the model drives.
+
 ## Agents
 
 | Agent    | Adapter                                                                                                        | Auth                                   |
