@@ -52,9 +52,9 @@ test("does not block non-command mentions", () => {
 });
 
 test("parses a single simple command for bypass execution", () => {
-  assert.deepEqual(parseSingleSimpleCommand('FOO=1 tw search "hello world"'), {
-    executable: "tw",
-    rawExecutable: "tw",
+  assert.deepEqual(parseSingleSimpleCommand('FOO=1 tdc search "hello world"'), {
+    executable: "tdc",
+    rawExecutable: "tdc",
     args: ["search", "hello world"],
     env: { FOO: "1" },
   });
@@ -70,10 +70,10 @@ test("expands tilde paths for excluded command execution", () => {
 });
 
 test("matches excluded commands by executable and glob patterns", () => {
-  assert.equal(findExcludedCommand("tw", ["tw"])?.pattern, "tw");
-  assert.equal(findExcludedCommand("tw auth status", ["tw"])?.pattern, "tw");
-  assert.equal(findExcludedCommand("tw auth status", ["tw *"])?.pattern, "tw *");
-  assert.equal(findExcludedCommand("/opt/homebrew/bin/tw auth status", ["tw"])?.pattern, "tw");
+  assert.equal(findExcludedCommand("tdc", ["tdc"])?.pattern, "tdc");
+  assert.equal(findExcludedCommand("tdc auth status", ["tdc"])?.pattern, "tdc");
+  assert.equal(findExcludedCommand("tdc auth status", ["tdc *"])?.pattern, "tdc *");
+  assert.equal(findExcludedCommand("/opt/homebrew/bin/tdc auth status", ["tdc"])?.pattern, "tdc");
   assert.equal(
     findExcludedCommand("node scripts/check-updates.js", ["node scripts/*"])?.pattern,
     "node scripts/*",
@@ -87,13 +87,13 @@ test("matches excluded commands by executable and glob patterns", () => {
 });
 
 test("does not exclude compound shell commands", () => {
-  assert.equal(findExcludedCommand("tw auth status && node steal.js", ["tw *"]), null);
-  assert.equal(findExcludedCommand("tw auth status | cat", ["tw *"]), null);
-  assert.equal(findExcludedCommand("bash -lc 'tw auth status'", ["tw *"]), null);
+  assert.equal(findExcludedCommand("tdc auth status && node steal.js", ["tdc *"]), null);
+  assert.equal(findExcludedCommand("tdc auth status | cat", ["tdc *"]), null);
+  assert.equal(findExcludedCommand("bash -lc 'tdc auth status'", ["tdc *"]), null);
 });
 
 test("does not exclude commands with shell redirection or substitution", () => {
-  assert.equal(findExcludedCommand("tw auth status > /tmp/out", ["tw *"]), null);
-  assert.equal(findExcludedCommand("tw search $(cat /tmp/query)", ["tw *"]), null);
-  assert.equal(findExcludedCommand("tw search `cat /tmp/query`", ["tw *"]), null);
+  assert.equal(findExcludedCommand("tdc auth status > /tmp/out", ["tdc *"]), null);
+  assert.equal(findExcludedCommand("tdc search $(cat /tmp/query)", ["tdc *"]), null);
+  assert.equal(findExcludedCommand("tdc search `cat /tmp/query`", ["tdc *"]), null);
 });

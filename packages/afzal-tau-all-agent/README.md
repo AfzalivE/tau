@@ -80,7 +80,7 @@ pi install -l npm:afzal-tau-all-agent
 | `pup/datadog/dashboards`       | Manage Datadog dashboards through the pup CLI and Datadog API.                                |
 | `review-breaker`               | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.      |
 | `td`                           | Todoist CLI for task and project management.                                                  |
-| `tw`                           | Twist CLI for team messaging, threads, DMs, and search.                                      |
+| `tdc`                          | Comms CLI for Twist team messaging, threads, DMs, and search.                               |
 
 ## Themes
 

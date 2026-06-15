@@ -113,7 +113,7 @@
       "../../skills/pup/datadog/dashboards",
       "../../skills/review-breaker",
       "../../skills/td",
-      "../../skills/tw"
+      "../../skills/tdc"
     ],
     "themes": [
       "../../themes/tau-dark.json"

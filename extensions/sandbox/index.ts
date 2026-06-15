@@ -21,7 +21,7 @@
  *   "mode": "interactive",
  *   "commands": {
  *     "blocked": ["npx"],
- *     "excluded": ["tw"]
+ *     "excluded": ["tdc"]
  *   },
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],

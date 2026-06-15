@@ -77,7 +77,7 @@ export function findBlockedCommand(
  * whole shell input must be a single simple command. A command containing shell
  * separators, pipelines, redirections, command substitution, or shell wrappers
  * should stay sandboxed so that a trusted executable prefix cannot unsandbox an
- * arbitrary process tree (for example: `tw auth status && node steal.js`).
+ * arbitrary process tree (for example: `tdc auth status && node steal.js`).
  */
 export function findExcludedCommand(
   command: string,
