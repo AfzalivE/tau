@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Let `/fix` mark valid out-of-scope findings as deferred follow-up for the project backlog.
 - Renamed the `interlude` extension and keybinding config to `stash`.
 - Improved `/review` prompts to focus on locally verifiable issues.
+- Expanded `/review` reuse and quality prompts with Ponytail-inspired lean-code checks.
 - Included duration in review result table.
 - Included short invalid-output excerpts when review focuses fail.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains.

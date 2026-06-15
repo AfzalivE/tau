@@ -63,10 +63,11 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
     suffix: " specializing in reuse analysis",
     qualifier: " reuse",
     context: `Review the changes for potential reuse issues, such as:
-1. Search for existing utilities and helpers that could replace newly written code. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
-2. Flag any new function that duplicates existing functionality. Suggest the existing function to use instead.
-3. Flag any inline logic that could use an existing utility — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
-4. Flag duplicate modules, thin pass-through wrappers, and manual registries when they duplicate an existing source of truth or local pattern. Prefer deleting, consolidating, or reusing the existing path.`,
+1. Search for existing capabilities that could replace newly written code: standard library APIs, native platform features, already-installed dependencies, and existing utilities/helpers. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
+2. Flag any new function that duplicates existing functionality. Suggest the existing function, API, or feature to use instead.
+3. Flag any inline logic that could use an existing capability — hand-rolled standard-library behavior, string manipulation, manual path handling, custom environment checks, ad-hoc type guards, native platform features, and similar patterns are common candidates.
+4. Flag new dependencies when the standard library, runtime/platform, or an already-installed dependency provides the same capability or behavior.
+5. Flag duplicate modules, thin pass-through wrappers, and manual registries when they duplicate an existing source of truth or local pattern. Prefer deleting, consolidating, or reusing the existing path.`,
   },
   quality: {
     suffix: " specializing in quality analysis",
@@ -77,13 +78,14 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 3. Copy-paste with slight variation: near-duplicate code blocks that should be unified with a shared abstraction.
 4. Leaky abstractions: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries.
 5. Stringly-typed code: using raw strings where constants, enums (string unions), or branded types already exist in the codebase.
-6. Simplicity: prefer simple, direct solutions over wrappers or abstractions without clear reuse value.
-7. Nested conditionals: ternary chains, deeply nested if/else blocks, or nested switches should be simplified when they obscure distinct cases, duplicate branches, or make error/edge paths easy to miss.
-8. Over-defensive code: broad try/catch blocks, fallback/null guard/logging paths, or safe wrappers that are not tied to a real trust boundary or documented failure mode.
-9. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
-10. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.
-11. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.
-12. Tautological or coupled tests: tests that mirror implementation internals instead of behavior.`,
+6. Simplicity/YAGNI: prefer simple, direct solutions over wrappers, abstractions, configuration, options, extensibility, or scaffolding without clear reuse value or explicit need. Prefer deletion or direct code until the second use appears.
+7. Shrinkage: flag code that preserves behavior with fewer branches, lines, moving parts, or custom helpers. Do not shrink away input validation at trust boundaries, data-loss error handling, security measures, or accessibility basics.
+8. Nested conditionals: ternary chains, deeply nested if/else blocks, or nested switches should be simplified when they obscure distinct cases, duplicate branches, or make error/edge paths easy to miss.
+9. Over-defensive code: broad try/catch blocks, fallback/null guard/logging paths, or safe wrappers that are not tied to a real trust boundary or documented failure mode.
+10. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
+11. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.
+12. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.
+13. Tautological or coupled tests: tests that mirror implementation internals instead of behavior.`,
   },
   efficiency: {
     suffix: " specializing in efficiency analysis",
