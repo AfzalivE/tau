@@ -37,7 +37,7 @@ pi install -l npm:afzal-tau-all-agent
 | `review`           | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`          | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
 | `spotlight`        | `/spotlight`         | Mirror a linked worktree into the main worktree while you work elsewhere.                                                 |
-| `telegram`         | `/telegram`          | Interact with Pi via a Telegram bot and local daemon.                                                                     |
+| `telegram`         | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                  |
 | `todoist`          | `/todoist`           | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
 | `usage`            | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`        | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
