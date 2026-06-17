@@ -1,0 +1,43 @@
+{
+  "name": "tau-acp-client",
+  "version": "0.1.5",
+  "private": true,
+  "description": "Standalone Pi package for using Claude and Codex agents via the Agent Client Protocol",
+  "keywords": [
+    "acp-client",
+    "agent-client-protocol",
+    "agent-tools",
+    "claude",
+    "codex",
+    "pi",
+    "pi-extension",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/goncalossilva/tau#readme",
+  "bugs": {
+    "url": "https://github.com/goncalossilva/tau/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goncalossilva/tau.git",
+    "directory": "packages/tau-acp-client"
+  },
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.25.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "../../extensions/acp-client/index.ts"
+    ]
+  }
+}

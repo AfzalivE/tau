@@ -7,7 +7,12 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const packagesDir = path.join(rootDir, "packages");
 const distDir = path.join(rootDir, "dist");
 
-const packageNames = ["tau-coding-agent", "tau-all-agent", "afzal-tau-all-agent"];
+const packageNames = [
+  "tau-acp-client",
+  "tau-coding-agent",
+  "tau-all-agent",
+  "afzal-tau-all-agent",
+];
 const resourceTypes = ["extensions", "skills", "prompts", "themes"];
 
 await rm(distDir, { recursive: true, force: true });

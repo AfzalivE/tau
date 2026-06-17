@@ -4,11 +4,12 @@ Tau is a batteries-included distribution for [Pi](https://pi.dev), a brilliant c
 
 It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding a `websearch` tool to complement the four default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
 
-| Package               | Purpose                                                |
-| --------------------- | ------------------------------------------------------ |
-| `tau-coding-agent`    | Coding package.                                                     |
-| `tau-all-agent`       | Full package.                                                       |
-| `afzal-tau-all-agent` | Full fork-specific package except the `memory` extension.           |
+| Package               | Purpose                                                        |
+| --------------------- | -------------------------------------------------------------- |
+| `tau-acp-client`      | Standalone ACP client package for Claude and Codex agents.     |
+| `tau-coding-agent`    | Coding package.                                                |
+| `tau-all-agent`       | Full package.                                                  |
+| `afzal-tau-all-agent` | Full fork-specific package except the `memory` extension.      |
 
 Fork-specific package/configuration details are grouped under [Fork-specific additions](#fork-specific-additions) below.
 
@@ -17,6 +18,8 @@ Fork-specific package/configuration details are grouped under [Fork-specific add
 [Install Pi](https://pi.dev/docs/latest#quick-start), and then:
 
 ```bash
+pi install npm:tau-acp-client
+# or
 pi install npm:tau-coding-agent
 # or
 pi install npm:tau-all-agent
@@ -34,9 +37,10 @@ pi install -l npm:tau-coding-agent
 
 ## Extensions
 
+The standalone `tau-acp-client` package provides the `acp-client` extension; the Tau bundle packages below do not include it.
+
 | Extension           | Command              | Coding | All | Description                                                                                                               |
 | ------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
-| `acp-client`        | `/acp`               |   ✓    |  ✓  | Use Claude and Codex agents via the Agent Client Protocol.                                                                |
 | `answer`            | `/answer`            |   ✓    |  ✓  | Extract and interactively answer agent questions.                                                                         |
 | `branch-term`       | `/branch`            |   ✓    |  ✓  | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |
@@ -85,6 +89,7 @@ pi install -l npm:tau-coding-agent
 npm install
 npm run check
 
+pi -e ./packages/tau-acp-client
 pi -e ./packages/tau-coding-agent
 pi -e ./packages/tau-all-agent
 pi -e ./packages/afzal-tau-all-agent
@@ -98,9 +103,10 @@ All publishable packages share the same version. Release tags use the plain vers
 
 The GitHub Actions publish workflow stages packages under `dist/` and publishes in this order:
 
-1. `tau-coding-agent`
-2. `tau-all-agent`
-3. `afzal-tau-all-agent`
+1. `tau-acp-client`
+2. `tau-coding-agent`
+3. `tau-all-agent`
+4. `afzal-tau-all-agent`
 
 Published packages are self-contained copies of their selected Tau resources.
 

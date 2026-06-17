@@ -15,7 +15,7 @@
   "scripts": {
     "check": "npm run check:compile && npm run check:pack",
     "check:compile": "tsc -p tsconfig.json --noEmit",
-    "check:pack": "npm run package && (cd dist/tau-coding-agent && npm pack --dry-run) && (cd dist/tau-all-agent && npm pack --dry-run) && (cd dist/afzal-tau-all-agent && npm pack --dry-run)",
+    "check:pack": "npm run package && (cd dist/tau-acp-client && npm pack --dry-run) && (cd dist/tau-coding-agent && npm pack --dry-run) && (cd dist/tau-all-agent && npm pack --dry-run) && (cd dist/afzal-tau-all-agent && npm pack --dry-run)",
     "package": "node scripts/package.mjs",
     "format": "oxfmt --check .",
     "format:fix": "oxfmt --write .",
