@@ -372,6 +372,37 @@ function rankPreferredModelCandidates<T extends { id: string; provider: string }
   ];
 }
 
+function resolveExplicitProvider(
+  modelPattern: string,
+  availableModels: Array<Model<Api>>,
+  modelRegistry: ExtensionContext["modelRegistry"],
+): string | undefined {
+  const slash = modelPattern.indexOf("/");
+  if (slash <= 0) return undefined;
+
+  const providerPrefix = modelPattern.slice(0, slash);
+  const provider = availableModels.find(
+    (model) => model.provider.toLowerCase() === providerPrefix.toLowerCase(),
+  )?.provider;
+  if (!provider) return undefined;
+
+  const providerModel = availableModels.find(
+    (model) =>
+      model.provider.toLowerCase() === provider.toLowerCase() &&
+      model.id.toLowerCase() === modelPattern.slice(slash + 1).toLowerCase(),
+  );
+  const rawModelMatches = availableModels.filter(
+    (model) => model.id.toLowerCase() === modelPattern.toLowerCase(),
+  );
+  if (rawModelMatches.length === 0) return provider;
+  if (!providerModel) return undefined;
+  if (modelRegistry.hasConfiguredAuth(providerModel)) return provider;
+
+  return rawModelMatches.some((model) => modelRegistry.hasConfiguredAuth(model))
+    ? undefined
+    : provider;
+}
+
 function rankModelCandidatesByProviderAuth<T extends { id: string; provider: string }>(
   candidates: T[],
   modelRegistry: ExtensionContext["modelRegistry"],
@@ -490,8 +521,7 @@ export async function resolveModels(
     const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
     const thinkingSource: ReviewThinkingSource = thinkingSuffix ? "explicit" : "inherited";
     const requestedThinkingLevel = thinkingSuffix ?? currentThinkingLevel;
-    const slash = basePattern.indexOf("/");
-    const explicitProvider = slash > 0 ? basePattern.slice(0, slash).trim() : "";
+    const explicitProvider = resolveExplicitProvider(basePattern, allModels, ctx.modelRegistry);
     if (explicitProvider) {
       const exactCandidate = allModels.find(
         (model) => `${model.provider}/${model.id}`.toLowerCase() === basePattern.toLowerCase(),

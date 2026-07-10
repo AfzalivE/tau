@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Fixed `/review` resolving OpenRouter model IDs containing `/` to the wrong provider.
 - Fixed Oracle model checks loading unrelated telegram extension resources.
 - Fixed sandbox prompts when traversal commands skip protected read-denied directories.
 - Fixed loop, notify, telegram, ghostty, and review extensions acting before retries or continuations had fully finished.
