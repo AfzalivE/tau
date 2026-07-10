@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   BorderedLoader,
   getAgentDir,
@@ -456,7 +457,6 @@ export default function (pi: ExtensionAPI) {
     compacting: false,
     awaitingRetry: false,
     pendingInjectedTexts: [] as PendingInject[],
-    lastAgentEndMessages: undefined as unknown,
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
     compactionResetTimer: null as ReturnType<typeof setTimeout> | null,
@@ -465,6 +465,7 @@ export default function (pi: ExtensionAPI) {
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
   };
 
+  let lastAgentEndMessages: AgentMessage[] | undefined;
   const daemonMessageHandlers = new Set<(msg: DaemonToClientMessage) => void>();
 
   function clearPendingInjectedFlushTimer() {
@@ -874,7 +875,6 @@ export default function (pi: ExtensionAPI) {
       applyCompactingState(false, ctx);
     }
 
-    state.awaitingRetry = false;
     state.busy = true;
     if (isSocketConnected()) {
       updateMeta(ctx);
@@ -889,18 +889,13 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_end", async (event, ctx) => {
-    state.lastAgentEndMessages = event.messages;
-    if (isSocketConnected()) {
-      updateMeta(ctx);
-      return;
-    }
-    void tryAutoConnect();
+  pi.on("agent_end", async (event) => {
+    lastAgentEndMessages = event.messages;
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    const result = formatTelegramAssistantResultFromMessages(state.lastAgentEndMessages);
-    state.lastAgentEndMessages = undefined;
+    const result = formatTelegramAssistantResultFromMessages(lastAgentEndMessages);
+    lastAgentEndMessages = undefined;
     state.awaitingRetry = false;
     state.busy = false;
     if (isSocketConnected()) {
@@ -942,7 +937,7 @@ export default function (pi: ExtensionAPI) {
     state.busy = false;
     state.compacting = false;
     state.awaitingRetry = false;
-    state.lastAgentEndMessages = undefined;
+    lastAgentEndMessages = undefined;
     state.pendingInjectedTexts = [];
     disconnect(false);
     state.lastCtx = null;
