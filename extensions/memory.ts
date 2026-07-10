@@ -1,10 +1,5 @@
-import {
-  complete,
-  StringEnum,
-  type Api,
-  type Model,
-  type UserMessage,
-} from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import { StringEnum, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import {
   defineTool,
   withFileMutationQueue,

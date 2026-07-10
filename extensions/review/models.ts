@@ -15,6 +15,7 @@ export type ResolvedReviewProviderCandidate = {
   baseModelArg?: string;
   supportsThinking?: boolean;
   supportsXhigh?: boolean;
+  supportsMax?: boolean;
 };
 
 export type ResolvedReviewModel = {
@@ -107,6 +108,7 @@ const REVIEW_THINKING_LEVEL_ORDER: ReviewThinkingLevel[] = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ];
 const REVIEW_THINKING_LEVELS = new Set<ReviewThinkingLevel>(REVIEW_THINKING_LEVEL_ORDER);
 
@@ -144,8 +146,12 @@ function clampInheritedThinkingLevel(
   thinkingLevel: ReviewThinkingLevel,
   supportsThinking: boolean | undefined,
   supportsXhighThinking: boolean | undefined,
+  supportsMaxThinking: boolean | undefined,
 ): ReviewThinkingLevel {
   if (supportsThinking === false) return "off";
+  if (thinkingLevel === "max" && supportsMaxThinking === false) {
+    return supportsXhighThinking === false ? "high" : "xhigh";
+  }
   if (thinkingLevel === "xhigh" && supportsXhighThinking === false) return "high";
   return thinkingLevel;
 }
@@ -197,12 +203,14 @@ function createResolvedReviewProviderCandidate(options: {
   baseModelArg?: string;
   supportsThinking?: boolean;
   supportsXhigh?: boolean;
+  supportsMax?: boolean;
 }): ResolvedReviewProviderCandidate {
   return {
     modelArg: options.modelArg,
     baseModelArg: options.baseModelArg,
     supportsThinking: options.supportsThinking,
     supportsXhigh: options.supportsXhigh,
+    supportsMax: options.supportsMax,
   };
 }
 
@@ -222,6 +230,7 @@ export function getResolvedReviewCurrentThinkingLevel(
         model.requestedThinkingLevel,
         providerCandidate.supportsThinking,
         providerCandidate.supportsXhigh,
+        providerCandidate.supportsMax,
       )
     : model.requestedThinkingLevel;
 }
@@ -399,10 +408,12 @@ function rankModelCandidatesByProviderAuth<T extends { id: string; provider: str
 function createResolvedReviewProviderCandidateFromModel(
   model: Model<Api>,
 ): ResolvedReviewProviderCandidate {
+  const supportedThinkingLevels = getSupportedThinkingLevels(model);
   return createResolvedReviewProviderCandidate({
     baseModelArg: `${model.provider}/${model.id}`,
     supportsThinking: model.reasoning,
-    supportsXhigh: getSupportedThinkingLevels(model).includes("xhigh"),
+    supportsXhigh: supportedThinkingLevels.includes("xhigh"),
+    supportsMax: supportedThinkingLevels.includes("max"),
   });
 }
 
@@ -535,6 +546,9 @@ export async function resolveModels(
           supportsThinking: ctx.model?.reasoning,
           supportsXhigh: ctx.model
             ? getSupportedThinkingLevels(ctx.model).includes("xhigh")
+            : undefined,
+          supportsMax: ctx.model
+            ? getSupportedThinkingLevels(ctx.model).includes("max")
             : undefined,
         }),
       ],

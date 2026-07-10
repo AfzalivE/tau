@@ -492,6 +492,9 @@ function getExplicitThinkingSupportError(attempt: FocusTaskAttempt): string | un
   ) {
     return `Reasoning level '${attempt.currentThinkingLevel}' is not supported by this model.`;
   }
+  if (attempt.currentThinkingLevel === "max" && attempt.providerCandidate.supportsMax === false) {
+    return "Reasoning level 'max' is not supported by this model.";
+  }
   if (
     attempt.currentThinkingLevel === "xhigh" &&
     attempt.providerCandidate.supportsXhigh === false

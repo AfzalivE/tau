@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
   "name": "tau-dark",
   "vars": {
     "accent": "#8abeb7",
@@ -74,6 +74,7 @@
     "thinkingMedium": "#6f9bb3",
     "thinkingHigh": "#78a8a1",
     "thinkingXhigh": "accent",
+    "thinkingMax": "#a8d8d1",
 
     "bashMode": "green"
   },

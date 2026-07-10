@@ -18,7 +18,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
-- Updated Pi to 0.75.5.
+- Updated Pi to 0.80.6.
+- Oracle checks now use the strongest available thinking setting by default.
 - Improved websearch responsiveness when using browser sessions.
 - Made `/fix` use findings from partial reviews instead of failing the whole run.
 - Let `/fix` mark valid out-of-scope findings as deferred follow-up for the project backlog.
