@@ -9,7 +9,9 @@
  *   - todoist:<id>   -> remote Todoist task id
  */
 import {
+  CONFIG_DIR_NAME,
   defineTool,
+  getAgentDir,
   keyHint,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -21,7 +23,6 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 // --- Constants ---
@@ -31,10 +32,10 @@ const TODOIST_API_V1_PREFIX = "/api/v1";
 const TODOIST_TOKEN_ENV = "TODOIST_API_TOKEN";
 const TODOIST_KEYCHAIN_SERVICE = "pi.todoist";
 const TODOIST_KEYCHAIN_ACCOUNT = "api-token";
-const TODOIST_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "todoist");
+const TODOIST_CONFIG_DIR = path.join(getAgentDir(), "todoist");
 const TODOIST_CONFIG_PATH = path.join(TODOIST_CONFIG_DIR, "config.json");
 
-const TODOIST_OUTBOX_DIR = ".pi/todoist";
+const TODOIST_OUTBOX_DIR = path.join(CONFIG_DIR_NAME, "todoist");
 const TODOIST_OUTBOX_FILE = "outbox.jsonl";
 
 const PI_PROJECT_NAME = "Pi 🤖";

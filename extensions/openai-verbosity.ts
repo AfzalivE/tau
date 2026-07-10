@@ -1,7 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "openai-verbosity";
 const SUPPORTED_APIS = new Set([
@@ -23,8 +26,7 @@ function emptyConfig(): VerbosityConfig {
 }
 
 function getConfigPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
-  return path.join(agentDir, "openai-verbosity.json");
+  return path.join(getAgentDir(), "openai-verbosity.json");
 }
 
 function isObject(value: unknown): value is JsonObject {

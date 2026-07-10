@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Updated Pi to 0.80.6.
 - Oracle checks now use the strongest available thinking setting by default.
+- Moved extension config lookups to Pi's configured agent directory; `websearch.json` now lives under `~/.pi/agent` by default.
+- Project sandbox config is now ignored until the project is trusted.
 - Improved websearch responsiveness when using browser sessions.
 - Made `/fix` use findings from partial reviews instead of failing the whole run.
 - Let `/fix` mark valid out-of-scope findings as deferred follow-up for the project backlog.
@@ -37,6 +39,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed Oracle subprocesses loading package resources such as Telegram while running model-only checks.
 - Fixed sandbox prompts when traversal commands skip protected read-denied directories.
 - Fixed loop, notify, telegram, ghostty, and review extensions acting before retries or continuations had fully finished.
+- Fixed TUI-only extension commands to avoid opening unsupported custom UI in RPC mode.
 - Fixed Telegram sessions going silent when Pi ended with an error.
 - Fixed rare `/review` runs that could finish without usable findings and leave stray result files.
 - Fixed `/sandbox off` still prompting for network access.

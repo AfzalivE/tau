@@ -1,11 +1,11 @@
 import {
   BorderedLoader,
+  getAgentDir,
   type ExtensionAPI,
   type ExtensionContext,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fsp from "node:fs/promises";
@@ -15,7 +15,7 @@ import {
   type TelegramAssistantResultTone,
 } from "./assistant-result.mjs";
 
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const AGENT_DIR = getAgentDir();
 const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
@@ -120,16 +120,12 @@ function throwIfAborted(signal?: AbortSignal) {
   }
 }
 
-function getAgentEndWillRetry(event: unknown): boolean {
-  return Boolean((event as { willRetry?: boolean }).willRetry);
-}
-
 async function runWithLoader<T>(
   ctx: ExtensionContext,
   message: string,
   task: (signal: AbortSignal) => Promise<T>,
 ): Promise<{ cancelled: boolean; value?: T; error?: string }> {
-  if (!ctx.hasUI) {
+  if (ctx.mode !== "tui") {
     const controller = new AbortController();
     try {
       const value = await task(controller.signal);
@@ -460,6 +456,7 @@ export default function (pi: ExtensionAPI) {
     compacting: false,
     awaitingRetry: false,
     pendingInjectedTexts: [] as PendingInject[],
+    lastAgentEndMessages: undefined as unknown,
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
     compactionResetTimer: null as ReturnType<typeof setTimeout> | null,
@@ -877,6 +874,7 @@ export default function (pi: ExtensionAPI) {
       applyCompactingState(false, ctx);
     }
 
+    state.awaitingRetry = false;
     state.busy = true;
     if (isSocketConnected()) {
       updateMeta(ctx);
@@ -892,24 +890,29 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (event, ctx) => {
-    const willRetry = getAgentEndWillRetry(event);
-    const result = willRetry ? null : formatTelegramAssistantResultFromMessages(event.messages);
-    state.awaitingRetry = willRetry;
-    state.busy = willRetry;
+    state.lastAgentEndMessages = event.messages;
+    if (isSocketConnected()) {
+      updateMeta(ctx);
+      return;
+    }
+    void tryAutoConnect();
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    const result = formatTelegramAssistantResultFromMessages(state.lastAgentEndMessages);
+    state.lastAgentEndMessages = undefined;
+    state.awaitingRetry = false;
+    state.busy = false;
     if (isSocketConnected()) {
       updateMeta(ctx);
       if (result) {
         send({ type: "assistant_result", ...result });
       }
-      if (!willRetry) {
-        void flushPendingInjectedTexts();
-      }
+      void flushPendingInjectedTexts();
       return;
     }
     void tryAutoConnect();
-    if (!willRetry) {
-      void flushPendingInjectedTexts();
-    }
+    void flushPendingInjectedTexts();
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -921,7 +924,9 @@ export default function (pi: ExtensionAPI) {
     );
   });
 
-  pi.on("session_compact", async (_event, ctx) => {
+  pi.on("session_compact", async (event, ctx) => {
+    state.awaitingRetry = event.willRetry;
+    if (event.willRetry) state.busy = true;
     clearCompactionResetTimer();
     state.compactionResetTimer = setTimeout(() => {
       state.compactionResetTimer = null;
@@ -937,6 +942,7 @@ export default function (pi: ExtensionAPI) {
     state.busy = false;
     state.compacting = false;
     state.awaitingRetry = false;
+    state.lastAgentEndMessages = undefined;
     state.pendingInjectedTexts = [];
     disconnect(false);
     state.lastCtx = null;

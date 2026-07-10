@@ -1,11 +1,14 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_SHORTCUTS = ["alt+x"] as const;
 const STATUS_KEY = "stash";
-const KEYBINDINGS_PATH = path.join(os.homedir(), ".pi", "agent", "keybindings.json");
+const KEYBINDINGS_PATH = path.join(getAgentDir(), "keybindings.json");
 
 type ShortcutConfig = string | string[] | undefined;
 

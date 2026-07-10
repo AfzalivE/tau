@@ -7,9 +7,10 @@ import process from "node:process";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { formatTelegramAssistantResultFromMessages } from "./assistant-result.mjs";
 
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const AGENT_DIR = getAgentDir();
 const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
@@ -1385,6 +1386,7 @@ async function createHeadlessSession(cwd) {
       : 0,
     retryAfterCompactionUntil: 0,
     awaitingRetry: false,
+    lastAgentEndMessages: undefined,
     lastTurnResult: undefined,
     lastTurnSeq: 0,
     unreadTurns: [],
@@ -1478,15 +1480,22 @@ async function createHeadlessSession(cwd) {
     }
 
     if (event.type === "agent_end") {
-      const willRetry = Boolean(event.willRetry);
-      session.awaitingRetry = willRetry;
-      session.busy = willRetry;
+      session.lastAgentEndMessages = event.messages;
+      session.awaitingRetry = Boolean(event.willRetry);
+      session.busy = true;
+      updateTypingIndicator();
+      return;
+    }
+
+    if (event.type === "agent_settled") {
+      const result = formatTelegramAssistantResultFromMessages(session.lastAgentEndMessages);
+      session.lastAgentEndMessages = undefined;
+      session.awaitingRetry = false;
+      session.retryAfterCompactionUntil = 0;
+      session.busy = false;
       updateTypingIndicator();
 
-      if (!willRetry) {
-        const result = formatTelegramAssistantResultFromMessages(event.messages);
-        if (result) void recordAssistantResult(session, result).catch(() => {});
-      }
+      if (result) void recordAssistantResult(session, result).catch(() => {});
       return;
     }
   });

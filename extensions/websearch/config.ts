@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import type { WebsearchConfig, WebsearchRouteId } from "./types.js";
 
-const WEBSEARCH_CONFIG_PATH = path.join(homedir(), ".pi", "websearch.json");
+const WEBSEARCH_CONFIG_PATH = path.join(getAgentDir(), "websearch.json");
 
 const DEFAULT_ROUTES: WebsearchRouteId[] = [
   "pi:openai-codex",

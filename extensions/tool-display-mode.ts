@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import {
+  getAgentDir,
   type AppKeybinding,
   CustomEditor,
   createBashToolDefinition,
@@ -77,8 +77,7 @@ function emptyConfig(): ToolDisplayModeConfig {
 }
 
 function getConfigPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
-  return path.join(agentDir, CONFIG_FILE);
+  return path.join(getAgentDir(), CONFIG_FILE);
 }
 
 function isObject(value: unknown): value is JsonObject {

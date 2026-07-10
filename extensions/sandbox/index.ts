@@ -63,12 +63,20 @@ import {
   globToRegex,
   normalizePathForSandbox,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type BashOperations, createBashTool } from "@earendil-works/pi-coding-agent";
+import {
+  CONFIG_DIR_NAME,
+  createBashTool,
+  getAgentDir,
+  type BashOperations,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 // --- Constants ---
 
 const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
 const DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
@@ -152,7 +160,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       ".",
       "~/.cache",
       "~/Library/Caches",
-      "~/.pi/agent/*.lock",
+      join(getAgentDir(), "*.lock"),
       "~/**/__pycache__",
       "~/**/__pycache__/*",
       "~/.npm",
@@ -239,7 +247,7 @@ type SandboxEventReason =
   | "already-approved-still-failed"
   | "unknown";
 type SandboxEventOutcome = "blocked" | "allowed";
-type SandboxConfigPathStatus = "loaded" | "parse-error";
+type SandboxConfigPathStatus = "loaded" | "parse-error" | "skipped-untrusted";
 type SandboxConfigPathLabel = "Global" | "Project" | "Override";
 
 type PromptStatus = "completed" | "error";
@@ -766,13 +774,17 @@ function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSand
   };
 }
 
-function loadConfig(cwd: string, overrideConfigPath?: string): LoadedSandboxConfig {
+function loadConfig(
+  cwd: string,
+  overrideConfigPath?: string,
+  options: { projectTrusted?: boolean } = {},
+): LoadedSandboxConfig {
   if (overrideConfigPath) {
     return loadOverrideConfig(cwd, overrideConfigPath);
   }
 
-  const projectConfigPath = join(cwd, ".pi", "sandbox.json");
-  const globalConfigPath = join(homedir(), ".pi", "agent", "sandbox.json");
+  const projectConfigPath = join(cwd, CONFIG_DIR_NAME, "sandbox.json");
+  const globalConfigPath = join(getAgentDir(), "sandbox.json");
 
   let globalConfig: Partial<SandboxConfig> = {};
   let projectConfig: Partial<SandboxConfig> = {};
@@ -789,12 +801,16 @@ function loadConfig(cwd: string, overrideConfigPath?: string): LoadedSandboxConf
   }
 
   if (existsSync(projectConfigPath)) {
-    try {
-      projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
-      paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
-    } catch (e) {
-      paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
-      console.error(`Warning: Could not parse ${projectConfigPath}: ${e}`);
+    if (options.projectTrusted !== true) {
+      paths.push({ label: "Project", path: projectConfigPath, status: "skipped-untrusted" });
+    } else {
+      try {
+        projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
+        paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
+      } catch (e) {
+        paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
+        console.error(`Warning: Could not parse ${projectConfigPath}: ${e}`);
+      }
     }
   }
 
@@ -1868,6 +1884,16 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     });
   }
 
+  function validateTimeout(timeout: number | undefined): void {
+    if (timeout === undefined) return;
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new Error("Invalid timeout: must be a finite number of seconds");
+    }
+    if (timeout * 1000 > MAX_TIMEOUT_MS) {
+      throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
+    }
+  }
+
   function getRemainingTimeout(timeout: number | undefined, startedAt: number): number | undefined {
     if (timeout === undefined) return undefined;
 
@@ -1984,6 +2010,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
+      validateTimeout(timeout);
       return runSerially(async () => {
         if (!existsSync(cwd)) {
           throw new Error(`Working directory does not exist: ${cwd}`);
@@ -2224,7 +2251,12 @@ function renderSandboxDoctorReport(options: {
   } else {
     lines.push("- Config paths:");
     for (const configPath of configPaths) {
-      const status = configPath.status === "loaded" ? "loaded" : "parse error";
+      const status =
+        configPath.status === "loaded"
+          ? "loaded"
+          : configPath.status === "skipped-untrusted"
+            ? "skipped (project not trusted)"
+            : "parse error";
       lines.push(`  - ${configPath.label}: ${configPath.path} (${status})`);
     }
   }
@@ -2281,7 +2313,7 @@ function loadSandboxConfigForContext(
   const { exitOnError = false } = options;
 
   try {
-    return loadConfig(cwd, overrideConfigPath);
+    return loadConfig(cwd, overrideConfigPath, { projectTrusted: ctx.isProjectTrusted() });
   } catch (error) {
     if (!(error instanceof SandboxConfigLoadError)) throw error;
 

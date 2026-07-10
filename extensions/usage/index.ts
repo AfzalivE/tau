@@ -1,5 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader } from "@earendil-works/pi-coding-agent";
+import {
+  BorderedLoader,
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   Key,
   matchesKey,
@@ -31,7 +35,7 @@ import type {
 } from "./types.js";
 
 const ALL_TAB_ID = "all";
-const SESSION_ROOT = path.join(os.homedir(), ".pi", "agent", "sessions");
+const SESSION_ROOT = path.join(getAgentDir(), "sessions");
 const RANGE_DAYS = [7, 30, 90] as const;
 const FILE_PARSE_CONCURRENCY = 16;
 
@@ -2205,7 +2209,7 @@ export default function usageBreakdownExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx: ExtensionContext) => {
       const liveUsageAvailability = await getLiveUsageAvailabilityMap(ctx);
 
-      if (!ctx.hasUI) {
+      if (ctx.mode !== "tui") {
         const [data, liveUsage] = await Promise.all([
           computeBreakdown(liveUsageAvailability, undefined),
           fetchLiveUsage(SUPPORTED_PROVIDERS, liveUsageAvailability, ctx, undefined),
