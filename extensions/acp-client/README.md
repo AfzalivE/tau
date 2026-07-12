@@ -9,6 +9,8 @@ Pi acts as the ACP client: it spawns an agent adapter as a subprocess, speaks JS
 - **`acp_agent` tool** — Pi's model can delegate tasks to Claude or Codex subagents. Each call returns the agent's final answer plus a session ID the model can pass back to continue the conversation.
 - **`/acp` command** — drive an agent directly. Replies are recorded in the session as custom messages, so they become part of Pi's context.
 
+While `acp_agent` is active, it tells Pi to use ACP only as a capability bridge when a required tool or integration is unavailable in Pi—for example, a Codex Figma plugin. If Pi has suitable tools, Pi should do the work directly. Delegated prompts should still be self-contained, verified, and continued through the same session when appropriate.
+
 ## Sessions
 
 Multiple sessions can run at once. Prompting an **agent name** starts a new session and gives it a short handle (`claude-1`, `codex-1`, `claude-2`, …); prompting a **handle** continues that specific session. Each reply shows its handle so you know what to continue.

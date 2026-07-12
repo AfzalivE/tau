@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
 - Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
 - Grounded `/review` efficiency findings in locally provable runtime costs.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.

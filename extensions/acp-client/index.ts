@@ -134,6 +134,13 @@ export default function acpExtension(pi: ExtensionAPI): void {
         "returns its final answer. To continue a conversation, pass the sessionId returned by a " +
         "previous call; omit it to start fresh.",
       promptSnippet: "Delegate tasks to external Claude/Codex agents",
+      promptGuidelines: [
+        "Use acp_agent only when the task requires a capability unavailable through Pi's active tools, such as a Codex plugin or integration (for example, Figma).",
+        "Do not use acp_agent when Pi already has suitable tools for the task; perform the work directly with those tools instead.",
+        "Do not use acp_agent merely for delegation, parallelism, or a second opinion when the current Pi agent can complete the task with its available tools.",
+        "When acp_agent is necessary, give it a self-contained prompt with the objective, relevant context and paths, constraints, expected deliverables, and verification steps; verify its answer and workspace changes before relying on them.",
+        "Reuse the sessionId returned by acp_agent for follow-up work on the same task instead of starting a new session.",
+      ],
       parameters: Type.Object({
         agent: Type.Union([Type.Literal("claude"), Type.Literal("codex")], {
           description: "Which agent to use",
