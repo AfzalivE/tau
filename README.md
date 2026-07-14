@@ -95,7 +95,7 @@ pi -e ./packages/tau-all-agent
 pi -e ./packages/afzal-tau-all-agent
 ```
 
-The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`.
+The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`. An extension manifest entry ending in `index.ts` includes its containing directory and sibling modules; direct-file entries must be updated when upstream renames their source file.
 
 ## Publishing
 
@@ -185,7 +185,6 @@ Bundled in `afzal-tau-all-agent`.
 | `write-a-skill`                 | Create new agent skills with proper structure and bundled resources.                         |
 | `zoom-out`                      | Give broader codebase context and a higher-level perspective for unfamiliar areas.           |
 | `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
-| `daily-agenda`                  | Retrieve the active daily agenda against the current local time.                             |
 | `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |
 | `gh`                            | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                             |
 | `git-rebase-check`              | Verify that a rebased branch preserved the same cumulative patch.                            |

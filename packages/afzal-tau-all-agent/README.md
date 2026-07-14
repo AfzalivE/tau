@@ -16,6 +16,10 @@ Project-local install lets a repository pin the full fork package for everyone w
 pi install -l npm:afzal-tau-all-agent
 ```
 
+## Migration from `interlude`
+
+The bundled draft-stashing extension is now named `stash`. Its default `alt+x` shortcut is unchanged. If you configured it in `keybindings.json`, rename the `interlude` key to `stash`.
+
 ## Extensions
 
 | Extension          | Command              | Description                                                                                                               |
@@ -30,7 +34,7 @@ pi install -l npm:afzal-tau-all-agent
 | `git-diff-stats`   | —                    | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`    | —                    | Status bar PR number and link for the current branch.                                                                     |
 | `insights`         | `/insights`          | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
-| `interlude`        | `alt+x`              | Stash the current message draft, send one interlude message, then restore the draft.                                      |
+| `stash`            | `alt+x`              | Stash the current message draft, send one message, then restore it.                                                        |
 | `loop`             | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
 | `notify`           | —                    | Terminal notification when the agent is waiting for input.                                                                |
 | `openai-fast`      | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
@@ -71,7 +75,6 @@ pi install -l npm:afzal-tau-all-agent
 | `write-a-skill`                | Create new agent skills with proper structure and bundled resources.                          |
 | `zoom-out`                     | Give broader codebase context and a higher-level perspective for unfamiliar areas.            |
 | `cald`                         | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.   |
-| `daily-agenda`                 | Retrieve the active daily agenda against the current local time.                              |
 | `dream`                        | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.       |
 | `gh`                           | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                              |
 | `git-rebase-check`             | Verify that a rebased branch preserved the same cumulative patch.                             |
