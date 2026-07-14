@@ -1,4 +1,4 @@
-import type { FocusName } from "./schema.js";
+import { REVIEW_FOCUS_NAMES, type ReviewFocus } from "./schema.js";
 
 type FocusDefinition = { suffix: string; qualifier: string; context: string };
 
@@ -14,35 +14,32 @@ Flag issues that:
 1. Meaningfully impact the accuracy, performance, security, or maintainability of the code.
 2. Are discrete and actionable (not general issues or multiple combined issues).
 3. Don't demand rigor inconsistent with the rest of the codebase.
-4. Were introduced in the changes being reviewed (not pre-existing bugs).
+4. Were introduced in the changes being reviewed and related to the original intent, not adjacent cleanup or opportunistic refactoring.
 5. The author would likely fix if aware of them.
-6. Don't rely on unstated assumptions about the codebase or author's intent.
-7. Have provable impact on other parts of the code — it is not enough to speculate that a change may disrupt another part, you must identify the parts that are provably affected.
-8. Are clearly not intentional changes by the author.
-9. Call out newly added dependencies explicitly and explain why they're needed.
-10. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
+6. Have provable impact. It is not enough to speculate that a change may disrupt another part, you must identify the parts that are provably affected.
+7. Are clearly not intentional changes by the author.
+8. Call out newly added dependencies explicitly and explain why they're needed.
+9. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
 
-## Comment guidelines
+If an issue is valid and worth tracking but out of scope for the reviewed change, pre-existing, or merely adjacent, report it only as P3 and clearly frame it as follow-up work. Omit unrelated issues that are speculative, vague, or not worth tracking.
 
-1. Be clear about why the issue is a problem.
-2. Communicate severity appropriately - don't exaggerate.
-3. Be brief - at most 1 paragraph.
-4. Keep code snippets under 3 lines, wrapped in inline code or code blocks.
-5. Use suggestion blocks ONLY for concrete replacement code (minimal lines; no commentary inside the block). Preserve the exact leading whitespace of the replaced lines.
-6. Explicitly state scenarios/environments where the issue arises.
-7. Use a matter-of-fact tone - helpful AI assistant, not accusatory.
-8. Write for quick comprehension without close reading.
-9. Avoid excessive flattery or unhelpful phrases like "Great job...".
+## Finding field guidelines
+
+1. Explain why the issue matters and the concrete scenario/environment where it fails.
+2. Keep each finding brief, matter-of-fact, and easy to understand.
+3. Keep suggestions specific and actionable.
+4. Avoid flattery or filler phrases like "Great job...".
 
 ## Priority levels
 
-Tag each finding with a priority level in the title:
-- [P0] - Drop everything to fix. Blocking release/operations. Only for universal issues that do not depend on assumptions about inputs.
-- [P1] - Urgent. Should be addressed in the next cycle.
-- [P2] - Normal. To be fixed eventually.
-- [P3] - Low. Nice to have.`;
+- P0: critical/blocking.
+- P1: urgent.
+- P2: normal.
+- P3: low/nice-to-have/out-of-scope.
 
-export const REVIEW_FOCUSES: Record<FocusName, FocusDefinition> = {
+If an issue is valid but out of scope for the reviewed change, pre-existing, or merely adjacent, report it as P3 and frame it as follow-up work.`;
+
+export const REVIEW_FOCUSES: Record<ReviewFocus, FocusDefinition> = {
   general: {
     suffix: "",
     qualifier: "",
@@ -66,10 +63,11 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
     suffix: " specializing in reuse analysis",
     qualifier: " reuse",
     context: `Review the changes for potential reuse issues, such as:
-1. Search for existing utilities and helpers that could replace newly written code. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
-2. Flag any new function that duplicates existing functionality. Suggest the existing function to use instead.
-3. Flag any inline logic that could use an existing utility — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
-4. Flag duplicate modules, thin pass-through wrappers, and manual registries when they duplicate an existing source of truth or local pattern. Prefer deleting, consolidating, or reusing the existing path.`,
+1. Search for existing capabilities that could replace newly written code: standard library APIs, native platform features, already-installed dependencies, and existing utilities/helpers. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
+2. Flag any new function that duplicates existing functionality. Suggest the existing function, API, or feature to use instead.
+3. Flag any inline logic that could use an existing capability — hand-rolled standard-library behavior, string manipulation, manual path handling, custom environment checks, ad-hoc type guards, native platform features, and similar patterns are common candidates.
+4. Flag new dependencies when the standard library, runtime/platform, or an already-installed dependency provides the same capability or behavior.
+5. Flag duplicate modules, thin pass-through wrappers, and manual registries when they duplicate an existing source of truth or local pattern. Prefer deleting, consolidating, or reusing the existing path.`,
   },
   quality: {
     suffix: " specializing in quality analysis",
@@ -80,13 +78,27 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 3. Copy-paste with slight variation: near-duplicate code blocks that should be unified with a shared abstraction.
 4. Leaky abstractions: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries.
 5. Stringly-typed code: using raw strings where constants, enums (string unions), or branded types already exist in the codebase.
-6. Simplicity: prefer simple, direct solutions over wrappers or abstractions without clear reuse value.
-7. Nested conditionals: ternary chains, deeply nested if/else blocks, or nested switches should be simplified when they obscure distinct cases, duplicate branches, or make error/edge paths easy to miss.
-8. Over-defensive code: broad try/catch blocks, fallback/null guard/logging paths, or safe wrappers that are not tied to a real trust boundary or documented failure mode.
-9. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
-10. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.
-11. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.
-12. Tautological or coupled tests: tests that mirror implementation internals instead of behavior.`,
+6. Simplicity/YAGNI: prefer simple, direct solutions over wrappers, abstractions, configuration, options, extensibility, or scaffolding without clear reuse value or explicit need. Prefer deletion or direct code until the second use appears.
+7. Shrinkage: flag code that preserves behavior with fewer branches, lines, moving parts, or custom helpers. Do not shrink away input validation at trust boundaries, data-loss error handling, security measures, or accessibility basics.
+8. Nested conditionals: ternary chains, deeply nested if/else blocks, or nested switches should be simplified when they obscure distinct cases, duplicate branches, or make error/edge paths easy to miss.
+9. Over-defensive code: broad try/catch blocks, fallback/null guard/logging paths, or safe wrappers that are not tied to a real trust boundary or documented failure mode.
+10. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
+11. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.
+12. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.`,
+  },
+  testing: {
+    suffix: " specializing in test analysis",
+    qualifier: " testing",
+    context: `Review the changes for potential testing issues, such as:
+1. High-signal suite: favor a smaller test suite over exhaustive coverage. Treat tests as carrying maintenance cost. Each test should protect important behavior, a realistic failure mode, or a stable shared contract.
+2. Low-value coverage: flag tests added only to cover implementation trivia. Examples include trivial getters/wrappers/constants, exact internal formatting, incidental telemetry/log details or events, timer internals, framework wiring with no behavior of its own, synthetic edge cases with no realistic breakage story, or behavior already covered by a higher-value test.
+3. Test bloat: redundant cases, copy-paste matrices, excessive or repeated setup that should use or extract a fixture/helper, gratuitous snapshots, or unparameterized variations that increase maintenance cost without clear regression signal. Suggest consolidation or deletion in these cases.
+4. Missing coverage: important behavior that can break without a test failing. Only ask for new tests when you can name the public/user-visible contract, security/privacy boundary, data-loss risk, serialization/wire contract, state transition, permission check, concurrency issue, or prior regression being protected.
+5. Weak assertions: tests that do not check observable behavior or invariants.
+6. Implementation-coupled tests: tests that assert private details, internal calls, or branch structure instead of behavior. Logs are worth testing only when logging itself is required behavior.
+7. Over-mocking: mocks that erase the behavior under test, hide integration behavior, or only prove mocks were called/configured. Prefer real fixtures or recorded external-service interactions when local practice supports them.
+8. Flaky patterns: time, random data, network calls, ordering, concurrency, or shared state that is not controlled by fixtures, clocks, cleanup, or deterministic assertions.
+Do not ask for tests just because code changed. Only flag a missing test when you can name the important behavior or failure mode that could break. Only flag test removal/simplification when the remaining suite still protects the important intended behavior.`,
   },
   efficiency: {
     suffix: " specializing in efficiency analysis",
@@ -99,8 +111,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 5. Memory: unbounded data structures, missing cleanup, event listener leaks.
 6. Overly broad operations: reading entire files when only a portion is needed, loading all items when filtering for one.
 7. Accidental indirection: wrapper chains, adapters, or registries that add repeated runtime work without hiding real complexity. Prefer deletion or consolidation when the local code shows the extra work.
-8. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.
-Flag efficiency issues when the scoped code shows concrete extra work, such as repeated I/O, network/API calls, parsing, allocation, blocking hot-path work, or unbounded growth. Avoid theoretical speedups for tiny or one-time work.`,
+8. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.`,
   },
 };
 
@@ -112,30 +123,34 @@ export const REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT = `Project-specific review
 {PROJECT_GUIDELINES}
 `;
 
-export const REVIEW_JSON_OUTPUT_CONTRACT_PROMPT = `Output requirements:
-- Return valid JSON only (no markdown, no prose outside JSON).
-- Do not wrap output in code fences.
-- Use this exact shape:
-  {
-    "findings": [
-      {
-        "priority": "P0|P1|P2|P3",
-        "location": "path/to/file:line or path/to/file",
-        "finding": "what is wrong and why it matters",
-        "suggestion": "actionable suggestion"
-      }
-    ],
-    "note": "optional"
-  }
-- If no issues are found, return { "findings": [] }.
-- If uncertain, return { "findings": [], "note": "..." } with a note instead of prose.
-- Before sending, self-check that JSON.parse(output) would succeed.`;
+export function buildAdditionalContextSection(additionalContext: string | undefined): string {
+  const trimmed = additionalContext?.trim();
+  if (!trimmed) return "";
+  return ADDITIONAL_CONTEXT_SECTION_PROMPT.replace("{ADDITIONAL_CONTEXT}", () => trimmed);
+}
+
+export function buildProjectReviewGuidelinesSection(projectGuidelines: string | null): string {
+  return projectGuidelines
+    ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace(
+        "{PROJECT_GUIDELINES}",
+        () => projectGuidelines,
+      )
+    : "";
+}
+
+export const SUBMIT_TOOL_RETRY_PROMPT = `You did not call {SUBMIT_TOOL} as instructed. You must call that tool exactly once with the final payload. Do not output any text, only call the {SUBMIT_TOOL} when you're done.`;
+
+export const REVIEW_OUTPUT_CONTRACT_PROMPT = `Requirements:
+- Never output findings or notes as text or write them to files.
+- Always call submit_review exactly once as your final action.
+- If no issues are found, pass an empty array of findings to submit_review.
+- If uncertain, pass a note to submit_review.`;
 
 export const REVIEW_FOCUS_PROMPT = `You are an expert code reviewer{FOCUS_SUFFIX}.
 
 Objective:
 - Find concrete, high-confidence{FOCUS_QUALIFIER} issues introduced by the scoped changes.
-- Output every finding the author would fix if they were made aware of it. Do not stop at the first qualifying finding — continue until you have listed every qualifying finding.
+- Submit every finding the author would fix if they were made aware of it. Do not stop at the first qualifying finding — continue until you have listed every qualifying finding.
 - Do not flag issues the author would not fix. If there is no finding that a person would definitely want to see and fix, prefer outputting no findings.
 
 {SCOPE_INSTRUCTIONS}
@@ -143,9 +158,7 @@ Objective:
 {FOCUS_CONTEXT}
 
 Important:
-- Focus only on issues introduced in the reviewed scope.
-- Keep each finding independent, discrete, and actionable.
-- Assign each finding a priority P0..P3.
+- Submit only issues introduced by the scoped changes, locally provable from the repository or diff, discrete, actionable, and likely worth fixing. Do not report speculative, stylistic, or pre-existing issues.
 - This is a read-only review focus. Do not modify files or repository state; do not run mutating commands.
 
 {ADDITIONAL_CONTEXT_SECTION}{PROJECT_GUIDELINES_SECTION}
@@ -155,17 +168,22 @@ export const FIX_PROMPT = `You are an expert software engineer applying fixes an
 
 Use ONLY the findings in the review payload below as your worklist.
 
-You are the decision-maker: if a finding is invalid, duplicate, too risky, or clearly not worth fixing, skip it with a brief reason and continue.
+You are the decision-maker:
+
+- For each finding that is valid, worthwhile, and within the reviewed change's intent, fix it.
+- For each finding that is valid but fixing it would broaden the changeset beyond the reviewed change's goal and scope, defer with a brief explainer.
+- For each finding that is invalid, duplicate, too risky, speculative, vague, or not worth tracking, skip it with a brief reason.
 
 Process:
 
 1) Work findings one by one in priority order: P0, P1, P2, P3.
 2) For each finding:
    - Validate against current code.
-   - If valid and worthwhile, implement the minimal correct fix.
-   - If not, skip with a short reason.
+   - If valid, worthwhile, and within scope, implement the minimal correct fix.
+   - If valid but outside scope, defer with a short explainer.
+   - If invalid, skip with a short reason.
 3) Run relevant verification for touched code (targeted tests/checks preferred; avoid unnecessary full-suite runs).
-4) Keep changes focused; avoid unrelated refactors.
+4) Keep changes focused; avoid unrelated refactors, adjacent cleanup, pre-existing issues, and low-value tests.
 5) Do not stop at first fix; continue through the whole list.
 
 Output formatting requirements:
@@ -174,7 +192,7 @@ Output formatting requirements:
 - In Notes, use plain prose. Use inline backticks sparingly when they improve clarity, such as for exact identifiers, paths, or command snippets.
 - Do not use code fences.
 - Do not include the pipe character in any cell text (including inside backticks). Avoid regex alternation patterns like (a|b); rewrite checks without pipes and separate multiple checks with semicolons.
-- Decision values must be exactly fixed or skipped.
+- Decision values must be exactly fixed, deferred, or skipped.
 
 {FIX_ADDITIONAL_CONTEXT_SECTION}Review findings:
 
@@ -208,23 +226,11 @@ Process:
 PR feedback payload (authoritative JSON):
 {TRIAGE_INPUT_JSON}
 
-Output JSON only, with this exact shape:
-{
-  "items": [
-    {
-      "id": "feedback-1",
-      "decision": "address",
-      "summary": "brief description of the feedback",
-      "rationale": "why this decision is correct",
-      "action": "what to do next"
-    }
-  ]
-}
-
 Requirements:
-- Return exactly one item per input feedback id.
-- Keep summary, rationale, and action concise and specific.
-- Before sending, self-check that JSON.parse(output) would succeed.`;
+- Never output triage items as text or write them to files.
+- Always call submit_triage exactly once as your final action.
+- Pass exactly one item per input feedback id to submit_triage.
+- Keep summary, rationale, and action concise and specific.`;
 
 export const REVIEW_DEDUP_PROMPT = `You are identifying duplicate findings from multiple independent code review passes.
 
@@ -328,4 +334,4 @@ export const TRIAGE_THREADS_QUERY = `query($owner: String!, $name: String!, $num
   }
 }`;
 
-export const REVIEW_FOCUS_NAMES = Object.keys(REVIEW_FOCUSES) as FocusName[];
+export { REVIEW_FOCUS_NAMES };

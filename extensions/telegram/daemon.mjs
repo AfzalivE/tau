@@ -7,9 +7,10 @@ import process from "node:process";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { extractTextFromMessage } from "./message-text.mjs";
+import { formatTelegramAssistantResultFromMessages } from "./assistant-result.mjs";
 
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const AGENT_DIR = process.env.PI_TELEGRAM_AGENT_DIR;
+if (!AGENT_DIR) throw new Error("PI_TELEGRAM_AGENT_DIR is required");
 const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
@@ -904,7 +905,7 @@ function getWindowSessionRef(update) {
 }
 
 function resetWindowSessionTurns(session) {
-  session.lastTurnText = undefined;
+  session.lastTurnResult = undefined;
   session.lastTurnSeq = 0;
   session.unreadTurns = [];
   session.droppedUnreadTurns = 0;
@@ -1001,12 +1002,9 @@ async function waitForHeadlessSessionPromptWindow(session) {
 
     const pendingMessageCount =
       typeof session.pendingMessageCount === "number" ? session.pendingMessageCount : 0;
-    const waitingForRetryStart = !session.busy && session.retryAfterCompactionUntil > Date.now();
-    if (
-      !session.compacting &&
-      !waitingForRetryStart &&
-      (session.busy || pendingMessageCount === 0)
-    ) {
+    const retrying =
+      Boolean(session.awaitingRetry) || session.retryAfterCompactionUntil > Date.now();
+    if (!session.compacting && !retrying && (session.busy || pendingMessageCount === 0)) {
       return;
     }
 
@@ -1300,10 +1298,32 @@ async function botSendAssistant(chatId, text) {
   await botSend(chatId, text);
 }
 
+async function botSendResult(chatId, result) {
+  const text = typeof result?.text === "string" ? result.text : "";
+  if (!text.trim()) return;
+
+  const tone = normalizeResultTone(result?.tone);
+  if (tone === "assistant") {
+    await botSendAssistant(chatId, text);
+    return;
+  }
+
+  if (tone === "system") {
+    await botSendSystem(chatId, text);
+    return;
+  }
+
+  await botSend(chatId, text);
+}
+
 async function botSendSystem(chatId, text) {
   if (!bot) return;
   const safe = escapeHtml(text);
   await bot.sendMessage(chatId, `<i>${safe}</i>`, { parse_mode: "HTML" });
+}
+
+function normalizeResultTone(tone) {
+  return tone === "error" || tone === "system" ? tone : "assistant";
 }
 
 async function syncBotCommands() {
@@ -1360,15 +1380,15 @@ async function replayUnreadOrLatest(session, chatId) {
 
   if (session.unreadTurns.length > 0) {
     for (const turn of session.unreadTurns) {
-      await botSendAssistant(chatId, turn.text);
+      await botSendResult(chatId, turn);
     }
     markSessionSeen(session);
     return;
   }
 
-  if (session.lastTurnText) {
+  if (session.lastTurnResult) {
     markSessionSeen(session);
-    await botSendAssistant(chatId, session.lastTurnText);
+    await botSendResult(chatId, session.lastTurnResult);
     return;
   }
 
@@ -1416,7 +1436,10 @@ async function refreshHeadlessSessionState(session) {
   }
 
   if (typeof data.isStreaming === "boolean") {
-    session.busy = data.isStreaming;
+    session.busy = session.awaitingRetry ? true : data.isStreaming;
+    if (data.isStreaming) {
+      session.retryAfterCompactionUntil = 0;
+    }
     updateTypingIndicator();
   }
 
@@ -1437,10 +1460,12 @@ async function refreshHeadlessSessionStates(targets) {
   );
 }
 
-async function recordCompletedTurn(session, text) {
+async function recordAssistantResult(session, result) {
+  const text = typeof result?.text === "string" ? result.text : "";
   if (!text.trim()) return;
 
-  session.lastTurnText = text;
+  const storedResult = { text, tone: normalizeResultTone(result?.tone) };
+  session.lastTurnResult = storedResult;
   session.lastTurnSeq += 1;
 
   if (!pairedChatId) return;
@@ -1448,11 +1473,11 @@ async function recordCompletedTurn(session, text) {
   if (chatState.activeSessionKey === session.key) {
     markSessionSeen(session);
     updateTypingIndicator();
-    await botSendAssistant(pairedChatId, text);
+    await botSendResult(pairedChatId, storedResult);
     return;
   }
 
-  session.unreadTurns.push({ seq: session.lastTurnSeq, text });
+  session.unreadTurns.push({ seq: session.lastTurnSeq, ...storedResult });
   while (session.unreadTurns.length > MAX_UNREAD_TURNS_PER_SESSION) {
     session.unreadTurns.shift();
     session.droppedUnreadTurns += 1;
@@ -1518,7 +1543,9 @@ async function createHeadlessSession(cwd) {
       ? stateResponse.data.pendingMessageCount
       : 0,
     retryAfterCompactionUntil: 0,
-    lastTurnText: undefined,
+    awaitingRetry: false,
+    lastAgentEndMessages: undefined,
+    lastTurnResult: undefined,
     lastTurnSeq: 0,
     unreadTurns: [],
     droppedUnreadTurns: 0,
@@ -1583,16 +1610,22 @@ async function createHeadlessSession(cwd) {
     if (!sessions.has(session.key)) return;
 
     if (event.type === "compaction_start") {
+      session.awaitingRetry = false;
       session.retryAfterCompactionUntil = 0;
       setSessionCompacting(session, true);
       return;
     }
 
     if (event.type === "compaction_end") {
+      session.awaitingRetry = Boolean(event.willRetry);
       session.retryAfterCompactionUntil = event.willRetry
         ? Date.now() + POST_COMPACTION_RETRY_GRACE_MS
         : 0;
+      if (event.willRetry) {
+        session.busy = true;
+      }
       setSessionCompacting(session, false);
+      updateTypingIndicator();
       return;
     }
 
@@ -1605,15 +1638,23 @@ async function createHeadlessSession(cwd) {
     }
 
     if (event.type === "agent_end") {
-      session.busy = false;
+      session.lastAgentEndMessages = event.messages;
+      session.awaitingRetry = Boolean(event.willRetry);
+      session.busy = true;
       updateTypingIndicator();
       return;
     }
 
-    if (event.type === "turn_end") {
-      const text = extractTextFromMessage(event.message);
-      if (!text) return;
-      void recordCompletedTurn(session, text).catch(() => {});
+    if (event.type === "agent_settled") {
+      const result = formatTelegramAssistantResultFromMessages(session.lastAgentEndMessages);
+      session.lastAgentEndMessages = undefined;
+      session.awaitingRetry = false;
+      session.retryAfterCompactionUntil = 0;
+      session.busy = false;
+      updateTypingIndicator();
+
+      if (result) void recordAssistantResult(session, result).catch(() => {});
+      return;
     }
   });
 
@@ -2008,7 +2049,7 @@ async function startServer() {
             compacting: !!existing?.compacting,
             piSessionId: existing?.piSessionId,
             piSessionFile: existing?.piSessionFile,
-            lastTurnText: existing?.lastTurnText,
+            lastTurnResult: existing?.lastTurnResult,
             lastTurnSeq: existing?.lastTurnSeq ?? 0,
             unreadTurns: existing?.unreadTurns ?? [],
             droppedUnreadTurns: existing?.droppedUnreadTurns ?? 0,
@@ -2133,13 +2174,14 @@ async function startServer() {
           break;
         }
 
-        case "turn_end": {
+        case "assistant_result": {
           if (!sessionKey) break;
           const session = sessions.get(sessionKey);
           if (!session) break;
-          const text = typeof msg.text === "string" ? msg.text : "";
-          if (!text.trim()) break;
-          void recordCompletedTurn(session, text).catch(() => {});
+          void recordAssistantResult(session, {
+            text: msg.text,
+            tone: msg.tone,
+          }).catch(() => {});
           break;
         }
 

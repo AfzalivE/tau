@@ -1,11 +1,13 @@
-import { execFileSync } from "node:child_process";
-import { createDecipheriv, createHash, pbkdf2Sync } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { createDecipheriv, createHash, pbkdf2 } from "node:crypto";
+import { readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import type { BrowserCookie, BrowserProfile } from "../types.js";
+import { pathExists } from "./fs.js";
 import { withSqliteSnapshot } from "./sqlite.js";
 
 const MACOS_BROWSER_CONFIGS: ChromiumBrowserConfig[] = [
@@ -72,6 +74,8 @@ interface ChromiumBrowserConfig {
   secretToolApp?: string;
 }
 
+const execFileAsync = promisify(execFile);
+const pbkdf2Async = promisify(pbkdf2);
 const passwordCache = new Map<string, string | null>();
 
 function browserConfigs(): ChromiumBrowserConfig[] {
@@ -80,13 +84,15 @@ function browserConfigs(): ChromiumBrowserConfig[] {
   return [];
 }
 
-export function discoverChromiumProfiles(preferredProfileName?: string): BrowserProfile[] {
+export async function discoverChromiumProfiles(
+  preferredProfileName?: string,
+): Promise<BrowserProfile[]> {
   const profiles: BrowserProfile[] = [];
 
   for (const config of browserConfigs()) {
-    if (!existsSync(config.baseDir)) continue;
+    if (!(await pathExists(config.baseDir))) continue;
 
-    const candidates = ["Default", ...discoverProfileDirectories(config.baseDir)];
+    const candidates = ["Default", ...(await discoverProfileDirectories(config.baseDir))];
     const seen = new Set<string>();
     for (const directoryName of candidates) {
       if (!directoryName || seen.has(directoryName)) continue;
@@ -94,7 +100,7 @@ export function discoverChromiumProfiles(preferredProfileName?: string): Browser
 
       const profilePath = path.join(config.baseDir, directoryName);
       const cookiesPath = path.join(profilePath, "Cookies");
-      if (!existsSync(cookiesPath)) continue;
+      if (!(await pathExists(cookiesPath))) continue;
 
       profiles.push({
         family: "chromium",
@@ -136,9 +142,9 @@ function isPreferredChromiumProfile(
   return profile.profileName === preferredProfileName;
 }
 
-function discoverProfileDirectories(baseDir: string): string[] {
+async function discoverProfileDirectories(baseDir: string): Promise<string[]> {
   try {
-    return readdirSync(baseDir, { withFileTypes: true })
+    return (await readdir(baseDir, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .filter((name) => name === "Default" || /^Profile\s+\d+$/.test(name));
@@ -147,27 +153,28 @@ function discoverProfileDirectories(baseDir: string): string[] {
   }
 }
 
-export function loadChromiumCookies(profile: BrowserProfile): BrowserCookie[] {
+export async function loadChromiumCookies(profile: BrowserProfile): Promise<BrowserCookie[]> {
   const browserConfig = browserConfigs().find((config) =>
     profile.profilePath.startsWith(config.baseDir),
   );
   if (!browserConfig) return [];
 
-  const password = readBrowserPassword(browserConfig);
+  const cookiesPath = path.join(profile.profilePath, "Cookies");
+  if (!(await pathExists(cookiesPath))) return [];
+
+  const password = await readBrowserPassword(browserConfig);
   if (!password) return [];
 
-  const keyMaterial = pbkdf2Sync(
+  const keyMaterial = await pbkdf2Async(
     password,
     "saltysalt",
     process.platform === "darwin" ? 1003 : 1,
     16,
     "sha1",
   );
-  const cookiesPath = path.join(profile.profilePath, "Cookies");
-  if (!existsSync(cookiesPath)) return [];
 
   try {
-    return withSqliteSnapshot(cookiesPath, "websearch-chromium", (tempDbPath) => {
+    return await withSqliteSnapshot(cookiesPath, "websearch-chromium", (tempDbPath) => {
       const db = new DatabaseSync(tempDbPath, { readOnly: true });
       try {
         const rows = db
@@ -277,7 +284,7 @@ function stripHostKeyDigest(buffer: Buffer, hostKey: string | null): Buffer {
   return buffer.subarray(0, 32).equals(digest) ? buffer.subarray(32) : buffer;
 }
 
-function readBrowserPassword(config: ChromiumBrowserConfig): string | null {
+async function readBrowserPassword(config: ChromiumBrowserConfig): Promise<string | null> {
   const cacheKey = `${config.name}:${config.baseDir}`;
   if (passwordCache.has(cacheKey)) {
     return passwordCache.get(cacheKey) ?? null;
@@ -286,9 +293,13 @@ function readBrowserPassword(config: ChromiumBrowserConfig): string | null {
   let password: string | null = null;
   if (process.platform === "darwin") {
     if (!config.keychainAccount || !config.keychainService) return null;
-    password = readMacKeychainPassword(config.name, config.keychainAccount, config.keychainService);
+    password = await readMacKeychainPassword(
+      config.name,
+      config.keychainAccount,
+      config.keychainService,
+    );
   } else if (process.platform === "linux") {
-    password = readLinuxPassword(config.secretToolApp);
+    password = await readLinuxPassword(config.secretToolApp);
   }
 
   if (password) {
@@ -297,33 +308,33 @@ function readBrowserPassword(config: ChromiumBrowserConfig): string | null {
   return password;
 }
 
-function readMacKeychainPassword(
+async function readMacKeychainPassword(
   browserName: string,
   account: string,
   service: string,
-): string | null {
+): Promise<string | null> {
   try {
-    return (
-      execFileSync("security", ["find-generic-password", "-w", "-a", account, "-s", service], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim() || null
+    const { stdout } = await execFileAsync(
+      "security",
+      ["find-generic-password", "-w", "-a", account, "-s", service],
+      { encoding: "utf8" },
     );
+    return stdout.trim() || null;
   } catch {
     throw new Error(`Could not read ${browserName} cookie decryption password from Keychain.`);
   }
 }
 
-function readLinuxPassword(secretToolApp?: string): string | null {
+async function readLinuxPassword(secretToolApp?: string): Promise<string | null> {
   if (!secretToolApp) return "peanuts";
 
   try {
-    return (
-      execFileSync("secret-tool", ["lookup", "application", secretToolApp], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim() || "peanuts"
+    const { stdout } = await execFileAsync(
+      "secret-tool",
+      ["lookup", "application", secretToolApp],
+      { encoding: "utf8" },
     );
+    return stdout.trim() || "peanuts";
   } catch {
     return "peanuts";
   }

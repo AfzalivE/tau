@@ -1,16 +1,19 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_SHORTCUTS = ["alt+x"] as const;
-const STATUS_KEY = "interlude";
-const KEYBINDINGS_PATH = path.join(os.homedir(), ".pi", "agent", "keybindings.json");
+const STATUS_KEY = "stash";
+const KEYBINDINGS_PATH = path.join(getAgentDir(), "keybindings.json");
 
 type ShortcutConfig = string | string[] | undefined;
 
 type KeybindingsConfig = {
-  interlude?: ShortcutConfig;
+  stash?: ShortcutConfig;
   [key: string]: unknown;
 };
 
@@ -37,9 +40,9 @@ function normalizeShortcuts(value: ShortcutConfig): string[] {
   return normalized.length > 0 ? [...new Set(normalized)] : [...DEFAULT_SHORTCUTS];
 }
 
-export default function interludeExtension(pi: ExtensionAPI): void {
+export default function stashExtension(pi: ExtensionAPI): void {
   const keybindings = readKeybindings(KEYBINDINGS_PATH);
-  const shortcuts = normalizeShortcuts(keybindings.interlude);
+  const shortcuts = normalizeShortcuts(keybindings.stash);
 
   let stashedDraft: string | null = null;
   let armed = false;
@@ -52,7 +55,7 @@ export default function interludeExtension(pi: ExtensionAPI): void {
     if (!ctx.hasUI) return;
 
     if (armed && stashedDraft !== null) {
-      ctx.ui.setStatus(STATUS_KEY, `interlude (${shortcutLabel()})`);
+      ctx.ui.setStatus(STATUS_KEY, `stash (${shortcutLabel()})`);
       return;
     }
 
@@ -80,7 +83,7 @@ export default function interludeExtension(pi: ExtensionAPI): void {
 
     if (armed && stashedDraft !== null) {
       restoreDraft(ctx);
-      ctx.ui.notify("Interlude draft restored", "info");
+      ctx.ui.notify("Stashed draft restored", "info");
       return;
     }
 
@@ -101,8 +104,7 @@ export default function interludeExtension(pi: ExtensionAPI): void {
 
   for (const shortcut of shortcuts) {
     pi.registerShortcut(shortcut as never, {
-      description:
-        "Stash the current message draft, send one interlude message, then restore the draft",
+      description: "Stash the current message draft, send one message, then restore it",
       handler: async (ctx) => {
         stashOrRestore(ctx);
       },

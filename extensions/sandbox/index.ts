@@ -70,8 +70,14 @@ import {
   globToRegex,
   normalizePathForSandbox,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type BashOperations, createBashTool } from "@earendil-works/pi-coding-agent";
+import {
+  CONFIG_DIR_NAME,
+  createBashTool,
+  getAgentDir,
+  type BashOperations,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
 import {
   getMachErrorFallback,
@@ -104,6 +110,8 @@ const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
 const SANDBOX_DEBUG_ENV = "SRT_DEBUG";
 const DEFAULT_SANDBOX_DEBUG_VALUE = "1";
 const INHERITED_SANDBOX_DEBUG_VALUE = process.env[SANDBOX_DEBUG_ENV];
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
 const DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
@@ -121,6 +129,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.npmjs.org",
       "npmjs.com",
       "*.npmjs.com",
+      "registry.yarnpkg.com",
       "nodejs.org",
       "*.nodejs.org",
       "pypi.org",
@@ -169,6 +178,8 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.openai.com",
       "chatgpt.com",
       "*.chatgpt.com",
+      "openrouter.ai",
+      "*.openrouter.ai",
       "google.com",
       "*.google.com",
       "googleapis.com",
@@ -181,6 +192,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.doist.com",
     ],
     deniedDomains: [],
+    allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
     allowMachLookup: [],
   },
@@ -191,7 +203,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       ".",
       "~/.cache",
       "~/Library/Caches",
-      "~/.pi/agent/*.lock",
+      join(getAgentDir(), "*.lock"),
       "~/**/__pycache__",
       "~/**/__pycache__/*",
       "~/.npm",
@@ -204,11 +216,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "~/go/pkg",
       "~/.m2/repository",
       "~/.m2/wrapper/dists",
-      "~/.gradle/.tmp",
-      "~/.gradle/caches",
-      "~/.gradle/wrapper/dists",
-      "~/.gradle/daemon",
-      "~/.gradle/jdks",
+      "~/.gradle",
+      "~/Library/Application Support/kotlin",
+      "~/.android",
       "~/.bundle/cache",
       "~/.gem/cache",
       "~/.gem/specs",
@@ -216,10 +226,23 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "~/.local/share/NuGet/*-cache",
       "~/.local/share/NuGet/*-cache/**",
     ],
-    denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+    denyWrite: [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "~/.gradle/gradle.properties",
+      "~/.gradle/init.gradle",
+      "~/.gradle/init.gradle.kts",
+      "~/.gradle/init.d",
+      "~/.android/adbkey",
+    ],
     allowTempDirs: true,
     allowGitConfig: true,
     allowGitCommonDir: true,
+  },
+  ignoreViolations: {
+    "*": ["/__pycache__"],
   },
 };
 
@@ -227,8 +250,9 @@ const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
 const SANDBOX_DEBUG_LINE_LIMIT = 50;
 const SANDBOX_DEBUG_PREFIX = "[SandboxDebug]";
-const METADATA_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
+const READ_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
 const GIT_FILESYSTEM_PATHS_CACHE = new Map<string, GitFilesystemPaths | null>();
+const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 // --- Types ---
 
@@ -277,7 +301,7 @@ type SandboxEventReason =
   | "blocked-command"
   | "excluded-command"
   | "unknown";
-type SandboxConfigPathStatus = "loaded" | "parse-error";
+type SandboxConfigPathStatus = "loaded" | "parse-error" | "skipped-untrusted";
 type SandboxConfigPathLabel = "Global" | "Project" | "Override";
 
 type PromptStatus = "completed" | "error";
@@ -288,6 +312,7 @@ type FilesystemList = "deny-read" | "allow-write" | "deny-write";
 
 type FilesystemViolationKind = "read" | "write" | "unknown";
 type FilesystemReadAccess = "metadata" | "data" | "unknown";
+type FilesystemWriteAccess = "unlink" | "unknown";
 export type FilesystemViolationResolutionKind = SharedViolationResolutionKind;
 
 interface SandboxEvent extends SandboxEventBase<SandboxEventKind, SandboxEventReason> {}
@@ -332,6 +357,7 @@ interface FilesystemViolation {
   path?: string;
   processName?: string;
   readAccess?: FilesystemReadAccess;
+  writeAccess?: FilesystemWriteAccess;
 }
 
 type FilesystemViolationResolution = SharedViolationResolution;
@@ -701,12 +727,7 @@ function formatSandboxConfigLoadErrorMessage(
   return `Could not read sandbox override config ${path}: ${detail ?? "unknown error"}`;
 }
 
-function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
-  if (!Array.isArray(value)) {
-    console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
-    return [...fallback];
-  }
-
+function cleanStringArray(value: unknown[], field: string): string[] {
   const cleaned = value
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
@@ -718,6 +739,30 @@ function coerceStringArray(value: unknown, fallback: string[], field: string): s
   }
 
   return cleaned;
+}
+
+function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
+  if (!Array.isArray(value)) {
+    console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
+    return [...fallback];
+  }
+
+  return cleanStringArray(value, field);
+}
+
+function coerceOptionalStringArray(
+  value: unknown,
+  fallback: string[] | undefined,
+  field: string,
+): string[] | undefined {
+  if (value === undefined) return fallback ? [...fallback] : undefined;
+
+  if (!Array.isArray(value)) {
+    console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
+    return fallback ? [...fallback] : undefined;
+  }
+
+  return cleanStringArray(value, field);
 }
 
 function finalizeConfig(config: SandboxConfig): SandboxConfig {
@@ -755,6 +800,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         DEFAULT_CONFIG.network.allowMachLookup ?? [],
         "network.allowMachLookup",
       ),
+      allowUnixSockets: coerceOptionalStringArray(
+        config.network?.allowUnixSockets,
+        DEFAULT_CONFIG.network.allowUnixSockets,
+        "network.allowUnixSockets",
+      ),
     },
     filesystem: {
       ...config.filesystem,
@@ -762,6 +812,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         config.filesystem?.denyRead,
         DEFAULT_CONFIG.filesystem.denyRead,
         "filesystem.denyRead",
+      ),
+      allowRead: coerceOptionalStringArray(
+        config.filesystem?.allowRead,
+        DEFAULT_CONFIG.filesystem.allowRead,
+        "filesystem.allowRead",
       ),
       allowWrite: coerceStringArray(
         config.filesystem?.allowWrite,
@@ -824,13 +879,17 @@ function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSand
   };
 }
 
-function loadConfig(cwd: string, overrideConfigPath?: string): LoadedSandboxConfig {
+function loadConfig(
+  cwd: string,
+  overrideConfigPath?: string,
+  options: { projectTrusted?: boolean } = {},
+): LoadedSandboxConfig {
   if (overrideConfigPath) {
     return loadOverrideConfig(cwd, overrideConfigPath);
   }
 
-  const projectConfigPath = join(cwd, ".pi", "sandbox.json");
-  const globalConfigPath = join(homedir(), ".pi", "agent", "sandbox.json");
+  const projectConfigPath = join(cwd, CONFIG_DIR_NAME, "sandbox.json");
+  const globalConfigPath = join(getAgentDir(), "sandbox.json");
 
   let globalConfig: Partial<SandboxConfig> = {};
   let projectConfig: Partial<SandboxConfig> = {};
@@ -849,12 +908,16 @@ function loadConfig(cwd: string, overrideConfigPath?: string): LoadedSandboxConf
   }
 
   if (existsSync(projectConfigPath)) {
-    try {
-      projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
-      paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
-    } catch (e) {
-      paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
-      console.error(`Warning: Could not parse ${projectConfigPath}: ${e}`);
+    if (options.projectTrusted !== true) {
+      paths.push({ label: "Project", path: projectConfigPath, status: "skipped-untrusted" });
+    } else {
+      try {
+        projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
+        paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
+      } catch (e) {
+        paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
+        console.error(`Warning: Could not parse ${projectConfigPath}: ${e}`);
+      }
     }
   }
 
@@ -926,15 +989,128 @@ function getTemporaryWritePaths(): string[] {
   return cachedTemporaryWritePaths;
 }
 
+function deduplicateStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function deduplicateOptionalStrings(values: string[] | undefined): string[] | undefined {
+  return values ? deduplicateStrings(values) : undefined;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function expandPathConfigEntry(value: string, field: string): string | null {
+  const source = value.trim();
+  if (!source) return null;
+
+  const missingEnvNames = new Set<string>();
+  const expanded = source.replace(
+    ENV_PATH_REFERENCE_PATTERN,
+    (_match, bracedName: string | undefined, bareName: string | undefined) => {
+      const envName = bracedName ?? bareName;
+      const envValue = envName ? (process.env[envName]?.trim() ?? "") : "";
+      if (!envValue) {
+        if (envName) missingEnvNames.add(envName);
+        return "";
+      }
+      return envValue;
+    },
+  );
+
+  if (missingEnvNames.size > 0) {
+    const names = Array.from(missingEnvNames).join(", ");
+    const label = missingEnvNames.size === 1 ? "environment variable" : "environment variables";
+    const verb = missingEnvNames.size === 1 ? "is" : "are";
+    console.error(
+      `Warning: Ignoring ${field} entry because ${label} ${names} ${verb} unset or empty.`,
+    );
+    return null;
+  }
+
+  if (containsControlCharacter(expanded)) {
+    console.error(
+      `Warning: Ignoring ${field} entry because the expanded path contains control characters.`,
+    );
+    return null;
+  }
+
+  return expanded;
+}
+
+function expandPathConfigList(values: string[] | undefined, field: string): string[] | undefined {
+  if (!values) return undefined;
+
+  return values
+    .map((value) => expandPathConfigEntry(value, field))
+    .filter((value): value is string => value !== null);
+}
+
+function expandMitmProxyPathConfig(
+  mitmProxy: SandboxRuntimeConfig["network"]["mitmProxy"],
+): SandboxRuntimeConfig["network"]["mitmProxy"] {
+  if (!mitmProxy) return undefined;
+  if (!isPlainObject(mitmProxy) || typeof mitmProxy.socketPath !== "string") return mitmProxy;
+
+  const socketPath = expandPathConfigEntry(mitmProxy.socketPath, "network.mitmProxy.socketPath");
+  if (!socketPath) {
+    console.error("Warning: Disabling network.mitmProxy because its socketPath did not expand.");
+    return undefined;
+  }
+
+  return { ...mitmProxy, socketPath } as SandboxRuntimeConfig["network"]["mitmProxy"];
+}
+
+function expandNetworkPathConfig(
+  network: SandboxRuntimeConfig["network"],
+): SandboxRuntimeConfig["network"] {
+  return {
+    ...network,
+    allowUnixSockets: expandPathConfigList(network.allowUnixSockets, "network.allowUnixSockets"),
+    mitmProxy: expandMitmProxyPathConfig(network.mitmProxy),
+  };
+}
+
+function expandFilesystemPathConfig(
+  filesystem: SandboxRuntimeConfig["filesystem"],
+): SandboxRuntimeConfig["filesystem"] {
+  return {
+    ...filesystem,
+    denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead") ?? [],
+    allowRead: expandPathConfigList(filesystem.allowRead, "filesystem.allowRead"),
+    allowWrite: expandPathConfigList(filesystem.allowWrite, "filesystem.allowWrite") ?? [],
+    denyWrite: expandPathConfigList(filesystem.denyWrite, "filesystem.denyWrite") ?? [],
+  };
+}
+
 function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
+  const expandedNetwork = expandNetworkPathConfig(config.network);
+  const expandedFilesystem = expandFilesystemPathConfig(filesystem);
   const allowWrite = allowTempDirs
-    ? Array.from(new Set([...filesystem.allowWrite, ...getTemporaryWritePaths()]))
-    : filesystem.allowWrite;
+    ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]
+    : expandedFilesystem.allowWrite;
 
   return {
-    network: config.network,
-    filesystem: { ...filesystem, allowWrite },
+    network: {
+      ...expandedNetwork,
+      allowUnixSockets: deduplicateOptionalStrings(expandedNetwork.allowUnixSockets),
+    },
+    filesystem: {
+      ...expandedFilesystem,
+      denyRead: deduplicateStrings(expandedFilesystem.denyRead),
+      allowRead: deduplicateOptionalStrings(expandedFilesystem.allowRead),
+      allowWrite: deduplicateStrings(allowWrite),
+      denyWrite: deduplicateStrings(expandedFilesystem.denyWrite),
+    },
     ignoreViolations: config.ignoreViolations,
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
@@ -966,6 +1142,19 @@ function matchesSandboxRule(path: string, rule: string, cwd?: string): boolean {
 function inferSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
   for (const rule of rules) {
     if (matchesSandboxRule(path, rule, cwd)) return rule;
+  }
+
+  return null;
+}
+
+function matchesSandboxRuleExactly(path: string, rule: string, cwd?: string): boolean {
+  if (containsGlobChars(rule)) return false;
+  return normalizeSandboxPath(path) === normalizeSandboxPath(rule, cwd);
+}
+
+function inferExactSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
+  for (const rule of rules) {
+    if (matchesSandboxRuleExactly(path, rule, cwd)) return rule;
   }
 
   return null;
@@ -1110,7 +1299,9 @@ function extractPathLikeValue(text: string): string | undefined {
 
 function extractViolationProcessName(line: string): string | undefined {
   const match = line.match(/^([^\s(]+)\(/);
-  return match?.[1]?.trim() || undefined;
+  const processName = match?.[1]?.trim();
+  if (!processName) return undefined;
+  return processName.split("/").pop() || processName;
 }
 
 function detectFilesystemViolationFromLine(line: string): FilesystemViolation | null {
@@ -1119,8 +1310,12 @@ function detectFilesystemViolationFromLine(line: string): FilesystemViolation | 
   const path = extractPathLikeValue(line);
   const processName = extractViolationProcessName(line);
 
+  if (lower.includes("file-write-unlink")) {
+    return { kind: "write", path, processName, writeAccess: "unlink" };
+  }
+
   if (lower.includes("file-write")) {
-    return { kind: "write", path, processName };
+    return { kind: "write", path, processName, writeAccess: "unknown" };
   }
 
   if (lower.includes("file-read-metadata")) {
@@ -1169,19 +1364,30 @@ function detectFilesystemViolations(
   return violations;
 }
 
-function isMetadataTraversalViolation(
+function isTraversalViolation(
   runtimeConfig: SandboxRuntimeConfig | null,
   violation: FilesystemViolation,
   cwd?: string,
 ): boolean {
-  if (!runtimeConfig || violation.kind !== "read" || violation.readAccess !== "metadata")
-    return false;
-  if (!violation.path || !METADATA_TRAVERSAL_PROCESSES.has(violation.processName ?? ""))
-    return false;
-  return inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null;
+  if (!runtimeConfig || !violation.path) return false;
+  if (!READ_TRAVERSAL_PROCESSES.has(violation.processName ?? "")) return false;
+
+  if (violation.kind === "read") {
+    return inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null;
+  }
+
+  if (violation.kind !== "write" || violation.writeAccess !== "unlink") return false;
+
+  // Seatbelt can emit file-write-unlink checks for protected directory roots
+  // while traversal commands enumerate them. Only exact protected roots are
+  // treated as skipped traversal so writes under protected trees still prompt.
+  return (
+    inferExactSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null ||
+    inferExactSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, cwd) !== null
+  );
 }
 
-function getMetadataTraversalPaths(options: {
+function getTraversalPaths(options: {
   runtimeConfig: SandboxRuntimeConfig | null;
   output: string;
   cwd?: string;
@@ -1200,7 +1406,7 @@ function getMetadataTraversalPaths(options: {
   const skippedPaths: string[] = [];
   for (const line of violationLines) {
     const violation = detectFilesystemViolationFromLine(line);
-    if (!violation || !isMetadataTraversalViolation(runtimeConfig, violation, cwd)) {
+    if (!violation || !isTraversalViolation(runtimeConfig, violation, cwd)) {
       return null;
     }
     if (violation.path && !skippedPaths.includes(violation.path)) {
@@ -1211,7 +1417,7 @@ function getMetadataTraversalPaths(options: {
   return skippedPaths.length > 0 ? skippedPaths : null;
 }
 
-function formatMetadataTraversalNotice(paths: string[]): string {
+function formatTraversalNotice(paths: string[]): string {
   if (paths.length === 0) return "";
 
   const visiblePaths = paths.slice(0, 3).join(", ");
@@ -1409,19 +1615,23 @@ function formatFilesystemDeniedMessage(
 }
 
 function formatFilesystemAlreadyAllowedMessage(target: string): string {
-  return `\nSandbox blocked filesystem ${target} again after permission had already been granted. The remaining failure may be unrelated to sandbox policy.`;
+  return `\n${formatFilesystemBlockedTarget(target)} again after permission had already been granted. The remaining failure may be unrelated to sandbox policy.`;
 }
 
 function formatFilesystemRetrySucceededMessage(_target: string): string {
   return "";
 }
 
-function formatFilesystemRetryFailedMessage(_target: string): string {
-  return "\nAccess granted and command retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.";
+function formatFilesystemRetryFailedMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess granted for this session and the command was retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.`;
 }
 
-function formatFilesystemRetrySkippedMessage(_target: string): string {
-  return "\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.";
+function formatFilesystemRetrySkippedMessage(target: string): string {
+  return `\n${formatFilesystemBlockedTarget(target)}\n\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
+}
+
+function formatFilesystemBlockedTarget(target: string): string {
+  return `Sandbox blocked filesystem ${target}.`;
 }
 
 function appendOutputPostamble(postamble: string, addition: string, output: string): string {
@@ -1696,6 +1906,12 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     return run;
   }
 
+  function withSandboxDefaultEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const baseEnv = env ?? process.env;
+    if (baseEnv.GIT_OPTIONAL_LOCKS !== undefined) return baseEnv;
+    return { ...baseEnv, GIT_OPTIONAL_LOCKS: "0" };
+  }
+
   async function runSandboxAttempt(
     command: string,
     wrappedCommand: string,
@@ -1709,7 +1925,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     return new Promise((resolve, reject) => {
       const child = spawn("bash", ["-c", wrappedCommand], {
         cwd,
-        env,
+        env: withSandboxDefaultEnv(env),
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1752,7 +1968,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
               const shouldStop = newViolations.some((violation) => {
                 const filesystemViolation = detectFilesystemViolationFromLine(violation.line);
                 if (!filesystemViolation) return false;
-                return !isMetadataTraversalViolation(runtimeConfig, filesystemViolation, cwd);
+                return !isTraversalViolation(runtimeConfig, filesystemViolation, cwd);
               });
               if (shouldStop) {
                 stopForFilesystemViolation();
@@ -1893,6 +2109,16 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     });
   }
 
+  function validateTimeout(timeout: number | undefined): void {
+    if (timeout === undefined) return;
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new Error("Invalid timeout: must be a finite number of seconds");
+    }
+    if (timeout * 1000 > MAX_TIMEOUT_MS) {
+      throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
+    }
+  }
+
   function getRemainingTimeout(timeout: number | undefined, startedAt: number): number | undefined {
     if (timeout === undefined) return undefined;
 
@@ -1965,13 +2191,13 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       attempt.combinedOutput,
     );
     const runtimeConfig = getRuntimeConfig();
-    const metadataTraversalPaths = getMetadataTraversalPaths({
+    const traversalPaths = getTraversalPaths({
       runtimeConfig,
       output: annotatedOutput,
       cwd,
       skipViolationLines: existingViolationCount,
     });
-    const effectiveExitCode = metadataTraversalPaths ? 0 : attempt.exitCode;
+    const effectiveExitCode = traversalPaths ? 0 : attempt.exitCode;
     let postamble = extractAppendedSandboxAnnotation(
       attempt.combinedOutput,
       annotatedOutput,
@@ -1979,8 +2205,8 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     );
     let resolution: FilesystemViolationResolution | null = null;
 
-    if (metadataTraversalPaths) {
-      const notice = formatMetadataTraversalNotice(metadataTraversalPaths);
+    if (traversalPaths) {
+      const notice = formatTraversalNotice(traversalPaths);
       postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
     } else if (runtimeConfig) {
       resolution = await handleFilesystemViolation({
@@ -2047,6 +2273,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
+      validateTimeout(timeout);
       return runSerially(async () => {
         if (!existsSync(cwd)) {
           throw new Error(`Working directory does not exist: ${cwd}`);
@@ -2318,7 +2545,12 @@ function renderSandboxDoctorReport(options: {
   } else {
     lines.push("- Config paths:");
     for (const configPath of configPaths) {
-      const status = configPath.status === "loaded" ? "loaded" : "parse error";
+      const status =
+        configPath.status === "loaded"
+          ? "loaded"
+          : configPath.status === "skipped-untrusted"
+            ? "skipped (project not trusted)"
+            : "parse error";
       lines.push(`  - ${configPath.label}: ${configPath.path} (${status})`);
     }
   }
@@ -2358,6 +2590,10 @@ function getSandboxConfigParseErrors(paths: SandboxConfigPath[]): SandboxConfigP
   return paths.filter((configPath) => configPath.status === "parse-error");
 }
 
+function getSkippedUntrustedProjectConfigPaths(paths: SandboxConfigPath[]): SandboxConfigPath[] {
+  return paths.filter((configPath) => configPath.status === "skipped-untrusted");
+}
+
 function notifySandboxConfigParseErrors(ctx: ExtensionContext, paths: SandboxConfigPath[]): void {
   const details = paths
     .map((configPath) => `${configPath.label.toLowerCase()} (${configPath.path})`)
@@ -2383,7 +2619,7 @@ function loadSandboxConfigForContext(
   const { exitOnError = false } = options;
 
   try {
-    return loadConfig(cwd, overrideConfigPath);
+    return loadConfig(cwd, overrideConfigPath, { projectTrusted: ctx.isProjectTrusted() });
   } catch (error) {
     if (!(error instanceof SandboxConfigLoadError)) throw error;
 
@@ -2482,6 +2718,7 @@ export default function (pi: ExtensionAPI) {
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
   let sandboxDebugLines: SandboxDebugLine[] = [];
+  const warnedSkippedProjectConfigPaths = new Set<string>();
 
   const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
 
@@ -2557,6 +2794,24 @@ export default function (pi: ExtensionAPI) {
       cwd: sessionCwd,
       summary: `command matched commands.blocked entry \`${blocked}\``,
     });
+  }
+
+  function notifySkippedUntrustedProjectConfigs(ctx: ExtensionContext): void {
+    const skippedConfigs = getSkippedUntrustedProjectConfigPaths(sandboxConfigPaths).filter(
+      (configPath) => !warnedSkippedProjectConfigPaths.has(configPath.path),
+    );
+    if (skippedConfigs.length === 0) return;
+
+    for (const configPath of skippedConfigs) {
+      warnedSkippedProjectConfigPaths.add(configPath.path);
+    }
+
+    const details = skippedConfigs.map((configPath) => configPath.path).join(", ");
+    notify(
+      ctx,
+      `Ignoring project sandbox config because this project is not trusted: ${details}`,
+      "warning",
+    );
   }
 
   function applyRuntimeConfigForSession(
@@ -2825,6 +3080,7 @@ export default function (pi: ExtensionAPI) {
     if (!loadedConfig) return;
 
     sandboxConfigPaths = loadedConfig.paths;
+    notifySkippedUntrustedProjectConfigs(ctx);
     const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
     if (parseErrors.length > 0) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
@@ -2932,6 +3188,7 @@ export default function (pi: ExtensionAPI) {
         if (!loadedConfig) return;
 
         sandboxConfigPaths = loadedConfig.paths;
+        notifySkippedUntrustedProjectConfigs(ctx);
         const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
         if (parseErrors.length > 0) {
           notifySandboxConfigParseErrors(ctx, parseErrors);
@@ -3008,6 +3265,7 @@ export default function (pi: ExtensionAPI) {
           "",
           "  Filesystem:",
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
+          `    Allow Read: ${runtimeConfig.filesystem.allowRead?.join(", ") || "(none)"}`,
           `    Allow Write: ${runtimeConfig.filesystem.allowWrite.join(", ") || "(none)"}`,
           `    Deny Write: ${runtimeConfig.filesystem.denyWrite.join(", ") || "(none)"}`,
           `    allowTempDirs: ${sandboxConfig?.filesystem.allowTempDirs ? "true" : "false"}`,

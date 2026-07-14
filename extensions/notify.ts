@@ -10,6 +10,7 @@
  * - Windows toast: Windows Terminal (WSL)
  */
 
+import { execFile } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const REVIEW_EVENT_START = "review:start";
@@ -39,7 +40,6 @@ function notifyOSC99(title: string, body: string): void {
 }
 
 function notifyWindows(title: string, body: string): void {
-  const { execFile } = require("child_process");
   execFile("powershell.exe", ["-NoProfile", "-Command", windowsToastScript(title, body)]);
 }
 
@@ -92,13 +92,33 @@ export default function (pi: ExtensionAPI) {
   let pendingPromptCount = 0;
   const activeReviewSessions = new Set<string>();
   let currentSessionKey: string | undefined;
+  let pendingReadyNotification: ReturnType<typeof setImmediate> | undefined;
 
   const hasCurrentSessionReviewRun = () => {
     if (!currentSessionKey) return false;
     return activeReviewSessions.has(currentSessionKey);
   };
 
+  const cancelReadyNotification = () => {
+    if (!pendingReadyNotification) return;
+    clearImmediate(pendingReadyNotification);
+    pendingReadyNotification = undefined;
+  };
+
+  const scheduleReadyNotification = (ctx: ExtensionContext) => {
+    cancelReadyNotification();
+    pendingReadyNotification = setImmediate(() => {
+      pendingReadyNotification = undefined;
+      if (!ctx.isIdle()) return;
+      if (pendingPromptCount > 0) return;
+      if (hasCurrentSessionReviewRun()) return;
+      notify("Pi", "Ready for input");
+    });
+    pendingReadyNotification.unref?.();
+  };
+
   pi.on("session_start", async (_event, ctx) => {
+    cancelReadyNotification();
     currentSessionKey = getSessionKey(ctx);
   });
 
@@ -143,14 +163,13 @@ export default function (pi: ExtensionAPI) {
     notify("Pi", "Review failed");
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
     currentSessionKey = getSessionKey(ctx);
-    if (pendingPromptCount > 0) return;
-    if (hasCurrentSessionReviewRun()) return;
-    notify("Pi", "Ready for input");
+    scheduleReadyNotification(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    cancelReadyNotification();
     pendingPromptCount = 0;
     const sessionKey = getSessionKey(ctx);
     activeReviewSessions.delete(sessionKey);

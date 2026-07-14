@@ -57,7 +57,7 @@
       "../../extensions/git-diff-stats.ts",
       "../../extensions/git-pr-status.ts",
       "../../extensions/insights.ts",
-      "../../extensions/interlude.ts",
+      "../../extensions/stash.ts",
       "../../extensions/loop.ts",
       "../../extensions/memory.ts",
       "../../extensions/notify.ts",

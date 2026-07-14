@@ -1,10 +1,5 @@
-import {
-  complete,
-  StringEnum,
-  type Api,
-  type Model,
-  type UserMessage,
-} from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import { StringEnum, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import {
   defineTool,
   withFileMutationQueue,
@@ -1710,7 +1705,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         description: `Update one .agents/memory/core block while enforcing the shared ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character caps`,
         promptSnippet: `Update one core memory block in .agents/memory/core with ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character cap enforcement`,
         promptGuidelines: [
-          "Use this tool when updating .agents/memory/core/directives.md, context.md, focus.md, or pending.md.",
+          "Use memory_update_block when updating .agents/memory/core/directives.md, context.md, focus.md, or pending.md.",
           `If a write would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, run memory_dream or remove content first.`,
         ],
         parameters: MEMORY_UPDATE_BLOCK_PARAMS,
@@ -1741,7 +1736,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         description: "Append an entry to .agents/memory/log.md using the repo memory log format",
         promptSnippet: "Append an entry to the repo memory log at .agents/memory/log.md",
         promptGuidelines: [
-          "Use this tool for important decisions, discoveries, plans, experiments, prompt ingests, and attachment additions worth remembering.",
+          "Use memory_append_log for important decisions, discoveries, plans, experiments, prompt ingests, and attachment additions worth remembering.",
           "Use importance labels high, medium, or low.",
           "If this entry replaces or corrects prior memory, set supersedes and/or invalidates links explicitly.",
           "The memory log is append-only. Do not rewrite or truncate older entries.",
@@ -1779,7 +1774,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         promptSnippet: "Consolidate repo memory with dream-based core compression",
         promptGuidelines: [
           "Dream is the only consolidation mechanism for .agents/memory/core.",
-          "Use this tool when logs have accumulated, core needs compression, or recent compaction context should be folded into memory.",
+          "Use memory_dream when logs have accumulated, core needs compression, or recent compaction context should be folded into memory.",
         ],
         parameters: MEMORY_DREAM_PARAMS,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

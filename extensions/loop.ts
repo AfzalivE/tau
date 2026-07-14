@@ -7,7 +7,8 @@
  */
 
 import { Type } from "typebox";
-import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
   compact,
   defineTool,
@@ -213,6 +214,8 @@ async function loadState(ctx: ExtensionContext): Promise<LoopStateData> {
 
 export default function loopExtension(pi: ExtensionAPI): void {
   let loopState: LoopStateData = { active: false };
+  let lastAgentEndMessages: Array<{ role?: string; stopReason?: string }> = [];
+  let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
 
   function persistState(state: LoopStateData): void {
     pi.appendEntry(LOOP_STATE_ENTRY, state);
@@ -269,6 +272,23 @@ export default function loopExtension(pi: ExtensionAPI): void {
         triggerTurn: true,
       },
     );
+  }
+
+  function scheduleLoopPrompt(ctx: ExtensionContext): void {
+    if (pendingLoopPrompt) return;
+
+    pendingLoopPrompt = setImmediate(() => {
+      pendingLoopPrompt = undefined;
+      if (!loopState.active || !ctx.isIdle()) return;
+      triggerLoopPrompt(ctx);
+    });
+    pendingLoopPrompt.unref?.();
+  }
+
+  function cancelScheduledLoopPrompt(): void {
+    if (!pendingLoopPrompt) return;
+    clearImmediate(pendingLoopPrompt);
+    pendingLoopPrompt = undefined;
   }
 
   async function showLoopSelector(ctx: ExtensionContext): Promise<LoopStateData | null> {
@@ -385,11 +405,11 @@ export default function loopExtension(pi: ExtensionAPI): void {
       name: "signal_loop_success",
       label: "Signal Loop Success",
       description:
-        "Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.",
+        "Stop the active loop when the breakout condition is satisfied. Only call signal_loop_success when explicitly instructed to do so by the user, tool, or system prompt.",
       promptSnippet: "Signal that the active /loop breakout condition has been satisfied",
       promptGuidelines: [
-        "Call this tool only when the active loop's breakout condition is actually satisfied.",
-        "Do not call this tool unless a loop is currently active.",
+        "Call signal_loop_success only when the active loop's breakout condition is actually satisfied.",
+        "Do not call signal_loop_success unless a loop is currently active.",
       ],
       parameters: Type.Object({}),
       async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -416,7 +436,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       let nextState = parseArgs(args);
       if (!nextState) {
-        if (!ctx.hasUI) {
+        if (ctx.mode !== "tui") {
           ctx.ui.notify("Usage: /loop tests | /loop custom <condition> | /loop self", "warning");
           return;
         }
@@ -458,10 +478,14 @@ export default function loopExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("agent_end", async (event, ctx) => {
+  pi.on("agent_end", async (event) => {
+    lastAgentEndMessages = event.messages;
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
     if (!loopState.active) return;
 
-    if (ctx.hasUI && wasLastAssistantAborted(event.messages)) {
+    if (ctx.hasUI && wasLastAssistantAborted(lastAgentEndMessages)) {
       const confirm = await withPromptSignal(pi, () =>
         ctx.ui.confirm("Break active loop?", "Operation aborted. Break out of the loop?"),
       );
@@ -471,13 +495,13 @@ export default function loopExtension(pi: ExtensionAPI): void {
       }
     }
 
-    triggerLoopPrompt(ctx);
+    scheduleLoopPrompt(ctx);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
     if (!loopState.active || !loopState.mode || !ctx.model) return;
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-    if (!auth.ok || !auth.apiKey) return;
+    if (!auth.ok) return;
 
     const instructionParts = [
       event.customInstructions,
@@ -525,5 +549,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     await restoreLoopState(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    cancelScheduledLoopPrompt();
   });
 }

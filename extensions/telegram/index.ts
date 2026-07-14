@@ -1,20 +1,24 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   BorderedLoader,
   defineTool,
+  getAgentDir,
   type ExtensionAPI,
   type ExtensionContext,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fsp from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import { Type } from "typebox";
-import { extractTextFromMessage } from "./message-text.mjs";
+import {
+  formatTelegramAssistantResultFromMessages,
+  type TelegramAssistantResultTone,
+} from "./assistant-result.mjs";
 
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const AGENT_DIR = getAgentDir();
 const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
@@ -71,6 +75,7 @@ type ClientToDaemonMessage =
   | { type: "inject_result"; id: string; status: "accepted" | "rejected"; reason?: string }
   | { type: "request_pin" }
   | { type: "shutdown" }
+  | { type: "assistant_result"; text: string; tone: TelegramAssistantResultTone }
   | {
       type: "send_file";
       id: string;
@@ -78,8 +83,7 @@ type ClientToDaemonMessage =
       mode: TelegramFileMode;
       caption?: string;
       filename?: string;
-    }
-  | { type: "turn_end"; text: string };
+    };
 
 type Config = {
   botToken?: string;
@@ -140,7 +144,7 @@ async function runWithLoader<T>(
   message: string,
   task: (signal: AbortSignal) => Promise<T>,
 ): Promise<{ cancelled: boolean; value?: T; error?: string }> {
-  if (!ctx.hasUI) {
+  if (ctx.mode !== "tui") {
     const controller = new AbortController();
     try {
       const value = await task(controller.signal);
@@ -405,6 +409,7 @@ async function ensureDaemonRunning(daemonPath: string, signal?: AbortSignal): Pr
     stdio: "ignore",
     env: {
       ...process.env,
+      PI_TELEGRAM_AGENT_DIR: AGENT_DIR,
       PI_TELEGRAM_PI_EXECUTABLE: process.execPath,
       PI_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
     },
@@ -536,6 +541,7 @@ export default function (pi: ExtensionAPI) {
     sessionNo: null as number | null,
     busy: false,
     compacting: false,
+    awaitingRetry: false,
     pendingInjectedTexts: [] as PendingInject[],
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
@@ -545,6 +551,7 @@ export default function (pi: ExtensionAPI) {
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
   };
 
+  let lastAgentEndMessages: AgentMessage[] | undefined;
   const daemonMessageHandlers = new Set<(msg: DaemonToClientMessage) => void>();
 
   function clearPendingInjectedFlushTimer() {
@@ -607,7 +614,7 @@ export default function (pi: ExtensionAPI) {
         const ctx = state.lastCtx;
         const inject = state.pendingInjectedTexts[0];
         if (!ctx || !inject) return;
-        if (state.compacting) return;
+        if (state.compacting || state.awaitingRetry) return;
 
         if (!isPendingInjectForCurrentSession(inject, ctx)) {
           state.pendingInjectedTexts.shift();
@@ -1027,17 +1034,31 @@ export default function (pi: ExtensionAPI) {
     state.busy = true;
     if (isSocketConnected()) {
       updateMeta(ctx);
-      void flushPendingInjectedTexts();
+      if (!state.awaitingRetry) {
+        void flushPendingInjectedTexts();
+      }
       return;
     }
     void tryAutoConnect();
-    void flushPendingInjectedTexts();
+    if (!state.awaitingRetry) {
+      void flushPendingInjectedTexts();
+    }
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_end", async (event) => {
+    lastAgentEndMessages = event.messages;
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    const result = formatTelegramAssistantResultFromMessages(lastAgentEndMessages);
+    lastAgentEndMessages = undefined;
+    state.awaitingRetry = false;
     state.busy = false;
     if (isSocketConnected()) {
       updateMeta(ctx);
+      if (result) {
+        send({ type: "assistant_result", ...result });
+      }
       void flushPendingInjectedTexts();
       return;
     }
@@ -1054,7 +1075,9 @@ export default function (pi: ExtensionAPI) {
     );
   });
 
-  pi.on("session_compact", async (_event, ctx) => {
+  pi.on("session_compact", async (event, ctx) => {
+    state.awaitingRetry = event.willRetry;
+    if (event.willRetry) state.busy = true;
     clearCompactionResetTimer();
     state.compactionResetTimer = setTimeout(() => {
       state.compactionResetTimer = null;
@@ -1063,19 +1086,14 @@ export default function (pi: ExtensionAPI) {
     state.compactionResetTimer.unref?.();
   });
 
-  pi.on("turn_end", async (event: any) => {
-    if (!isSocketConnected()) return;
-    const text = extractTextFromMessage(event.message);
-    if (!text) return;
-    send({ type: "turn_end", text });
-  });
-
   pi.on("session_shutdown", async (_event, _ctx) => {
     stopAutoConnectLoop();
     clearPendingInjectedFlushTimer();
     clearCompactionResetTimer();
     state.busy = false;
     state.compacting = false;
+    state.awaitingRetry = false;
+    lastAgentEndMessages = undefined;
     state.pendingInjectedTexts = [];
     disconnect(false);
     state.lastCtx = null;

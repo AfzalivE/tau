@@ -48,7 +48,7 @@ The standalone `tau-acp-client` package provides the `acp-client` extension; the
 | `git-diff-stats`    | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    |   ✓    |  ✓  | Status bar PR number and link for the current branch.                                                                     |
 | `insights`          | `/insights`          |   ✓    |  ✓  | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
-| `interlude`         | `alt+x`              |   ✓    |  ✓  | Stash the current message draft, send one interlude message, then restore the draft.                                      |
+| `stash`             | `alt+x`              |   ✓    |  ✓  | Stash the current message draft, send one message, then restore it.                                                       |
 | `loop`              | `/loop`              |   ✓    |  ✓  | Repeat a prompt until the agent signals success.                                                                          |
 | `memory`            | `/memory`            |   ✓    |  ✓  | Opt-in project-local memory for learning and continuity across sessions.                                                  |
 | `notify`            | —                    |   ✓    |  ✓  | Terminal notification when the agent is waiting for input.                                                                |
@@ -206,7 +206,7 @@ Some extensions and skills were inspired by prior work from other agent setups a
 - [@goncalossilva](https://github.com/goncalossilva) for the original [Tau](https://github.com/goncalossilva/tau) this fork builds on
 - @mitsuhiko for `answer`, `btw`, `loop`, `openscad`, `sentry`, `update-changelog`, and `web-design`
 - @badlogic for `sandbox` and `browser-tools`
-- @mjakl for `interlude`
+- @mjakl for `stash`
 - [@mattpocock](https://github.com/mattpocock) for `diagnose`, `grill-me`, `grill-with-docs`, `handoff`, `improve-codebase-architecture`, `setup-matt-pocock-skills`, `tdd`, `to-issues`, `to-prd`, `triage`, `write-a-skill`, and `zoom-out`
 - [@enricenrich](https://github.com/enricenrich) for [calendar-cli](https://github.com/enricenrich/calendar-cli), which `cald` depends on
 

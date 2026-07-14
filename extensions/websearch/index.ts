@@ -128,15 +128,15 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw signal.reason ?? new Error("The operation was aborted.");
 }
 
-function getBrowserProfiles(
+async function getBrowserProfiles(
   cache: Partial<Record<WebsearchBrowserFamily, BrowserProfile[]>>,
   family: WebsearchBrowserFamily,
   config: WebsearchConfig,
-): BrowserProfile[] {
+): Promise<BrowserProfile[]> {
   const cached = cache[family];
   if (cached) return cached;
 
-  const profiles = discoverProfiles([family], config.profiles);
+  const profiles = await discoverProfiles([family], config.profiles);
   cache[family] = profiles;
   return profiles;
 }
@@ -153,7 +153,7 @@ async function searchBrowserRoute(
     : "chromium";
   const browserProvider = route.endsWith(":gemini") ? browserGemini : browserOpenAICodex;
   const configuredProfileName = config.profiles[profileFamily];
-  const profiles = getBrowserProfiles(profileCache, profileFamily, config);
+  const profiles = await getBrowserProfiles(profileCache, profileFamily, config);
   let lastError: string | null = null;
 
   if (configuredProfileName && profiles.length === 0) {
@@ -164,7 +164,7 @@ async function searchBrowserRoute(
     throwIfAborted(signal);
 
     try {
-      const session = createBrowserSession(profile, browserProvider.domains);
+      const session = await createBrowserSession(profile, browserProvider.domains);
       if (!session) {
         if (configuredProfileName) {
           throw new Error(
@@ -265,7 +265,7 @@ export default function (pi: ExtensionAPI) {
       promptSnippet:
         "Search the web for current or external information unavailable in local files",
       promptGuidelines: [
-        "Use this for recent facts, live service behavior, or external documentation that is not already present in the repo.",
+        "Use websearch for recent facts, live service behavior, or external documentation that is not already present in the repo.",
         "Do not use websearch when repository files or supplied context already answer the question.",
       ],
       parameters: Type.Object({

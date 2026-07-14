@@ -16,7 +16,7 @@ Current routes:
 
 Optional config file:
 
-- `~/.pi/websearch.json`
+- `~/.pi/agent/websearch.json`
 
 Example:
 
