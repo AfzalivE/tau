@@ -19,6 +19,7 @@
  * {
  *   "enabled": true,
  *   "mode": "interactive",
+ *   "debug": false,
  *   "commands": {
  *     "blocked": ["npx"],
  *     "excluded": ["tdc"]
@@ -41,6 +42,7 @@
  * Usage:
  * - `pi -e ./sandbox` - sandbox enabled with default/config settings
  * - `pi -e ./sandbox --no-sandbox` - disable sandboxing
+ * - `pi -e ./sandbox --sandbox-debug` - print sandbox-runtime proxy/network debug logs
  * - `pi -e ./sandbox --sandbox-config ./sandbox.json` - use a custom sandbox config file
  * - `/sandbox` - show command help
  *
@@ -99,10 +101,14 @@ import type {
 // --- Constants ---
 
 const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
+const SANDBOX_DEBUG_ENV = "SRT_DEBUG";
+const DEFAULT_SANDBOX_DEBUG_VALUE = "1";
+const INHERITED_SANDBOX_DEBUG_VALUE = process.env[SANDBOX_DEBUG_ENV];
 
 const DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
+  debug: false,
   commands: {
     blocked: [],
     excluded: [],
@@ -219,6 +225,8 @@ const DEFAULT_CONFIG: SandboxConfig = {
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
+const SANDBOX_DEBUG_LINE_LIMIT = 50;
+const SANDBOX_DEBUG_PREFIX = "[SandboxDebug]";
 const METADATA_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
 const GIT_FILESYSTEM_PATHS_CACHE = new Map<string, GitFilesystemPaths | null>();
 
@@ -245,6 +253,8 @@ type SandboxCommandConfig = {
 type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   enabled?: boolean;
   mode?: PromptMode;
+  /** Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG for this Pi process). */
+  debug?: boolean;
   commands: SandboxCommandConfig;
   filesystem: SandboxRuntimeConfig["filesystem"] & {
     allowTempDirs?: boolean;
@@ -281,6 +291,11 @@ type FilesystemReadAccess = "metadata" | "data" | "unknown";
 export type FilesystemViolationResolutionKind = SharedViolationResolutionKind;
 
 interface SandboxEvent extends SandboxEventBase<SandboxEventKind, SandboxEventReason> {}
+
+interface SandboxDebugLine {
+  timestamp: number;
+  text: string;
+}
 
 interface SandboxConfigPath {
   label: SandboxConfigPathLabel;
@@ -377,6 +392,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox disable|off",
     "  /sandbox show",
     "  /sandbox doctor",
+    "  /sandbox debug <on|off>",
     "  /sandbox mode <interactive|non-interactive>",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
     "  /sandbox mach-lookup <add|remove> <service>",
@@ -384,6 +400,7 @@ function showHelp(ctx: ExtensionContext): void {
     "",
     "Startup flags:",
     "  --no-sandbox",
+    "  --sandbox-debug",
     "  --sandbox-config <path>",
   ];
   notify(ctx, lines.join("\n"), "info");
@@ -420,6 +437,23 @@ function normalizeSubcommand(token?: string): string | undefined {
   }
 }
 
+function parseDebugToggle(token?: string): boolean | null {
+  switch (token?.toLowerCase()) {
+    case "on":
+    case "enable":
+    case "enabled":
+    case "true":
+      return true;
+    case "off":
+    case "disable":
+    case "disabled":
+    case "false":
+      return false;
+    default:
+      return null;
+  }
+}
+
 type CommandCompletionOption = {
   value: string;
   label?: string;
@@ -433,6 +467,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "off", label: "off" },
   { value: "show", label: "show" },
   { value: "doctor", label: "doctor" },
+  { value: "debug ", label: "debug" },
   { value: "mode ", label: "mode" },
   { value: "network ", label: "network" },
   { value: "mach-lookup ", label: "mach-lookup" },
@@ -443,6 +478,11 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
 const SANDBOX_MODE_COMPLETIONS: CommandCompletionOption[] = [
   { value: "interactive", label: "interactive" },
   { value: "non-interactive", label: "non-interactive" },
+];
+
+const SANDBOX_DEBUG_COMPLETIONS: CommandCompletionOption[] = [
+  { value: "on", label: "on" },
+  { value: "off", label: "off" },
 ];
 
 const SANDBOX_NETWORK_LIST_COMPLETIONS: CommandCompletionOption[] = [
@@ -518,6 +558,16 @@ function getSandboxArgumentCompletions(
 
   const subcommand = normalizeSubcommand(tokens[0]);
   if (!subcommand) return null;
+
+  if (subcommand === "debug") {
+    if (tokens.length === 1 && endsWithSpace) {
+      return getCommandCompletions("debug ", "", SANDBOX_DEBUG_COMPLETIONS);
+    }
+    if (tokens.length === 2 && !endsWithSpace) {
+      return getCommandCompletions("debug ", tokens[1] ?? "", SANDBOX_DEBUG_COMPLETIONS);
+    }
+    return null;
+  }
 
   if (subcommand === "mode") {
     if (tokens.length === 1 && endsWithSpace) {
@@ -675,6 +725,7 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
+    debug: typeof config.debug === "boolean" ? config.debug : DEFAULT_CONFIG.debug,
     commands: {
       blocked: coerceStringArray(
         config.commands?.blocked,
@@ -826,6 +877,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   if (overrides.mode !== undefined) {
     result.mode = normalizePromptMode(overrides.mode);
   }
+  if (overrides.debug !== undefined) result.debug = overrides.debug;
   if (isPlainObject(overrides.commands)) {
     result.commands = {
       ...base.commands,
@@ -2252,9 +2304,14 @@ function renderSandboxDoctorReport(options: {
   promptMode: PromptMode;
   configPaths: SandboxConfigPath[];
   events: SandboxEvent[];
+  debugLines: SandboxDebugLine[];
 }): string {
-  const { state, promptMode, configPaths, events } = options;
-  const lines = ["Sandbox doctor", `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`];
+  const { state, promptMode, configPaths, events, debugLines } = options;
+  const lines = [
+    "Sandbox doctor",
+    `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`,
+    `- Runtime debug logs: ${describeSandboxDebugLogging()}`,
+  ];
 
   if (configPaths.length === 0) {
     lines.push("- Config paths: (none loaded)");
@@ -2267,6 +2324,14 @@ function renderSandboxDoctorReport(options: {
   }
 
   lines.push(`- Events: ${events.length}`);
+  lines.push(`- Runtime debug log lines: ${debugLines.length}`);
+
+  if (debugLines.length > 0) {
+    lines.push("", "- Recent runtime debug logs:");
+    for (const line of debugLines.slice(-10).reverse()) {
+      lines.push(`  - [${formatSandboxEventTimestamp(line.timestamp)}] ${line.text}`);
+    }
+  }
 
   if (events.length === 0) {
     lines.push("", "- No sandbox events recorded in this session.");
@@ -2339,6 +2404,57 @@ function formatMissingSandboxDependenciesWarning(errors: string[]): string {
   return `Sandbox disabled: ${errors.join("; ")}`;
 }
 
+function setSandboxDebugLogging(enabled: boolean): void {
+  if (enabled) {
+    process.env[SANDBOX_DEBUG_ENV] ||= DEFAULT_SANDBOX_DEBUG_VALUE;
+    return;
+  }
+
+  if (INHERITED_SANDBOX_DEBUG_VALUE === undefined) {
+    delete process.env[SANDBOX_DEBUG_ENV];
+    return;
+  }
+
+  process.env[SANDBOX_DEBUG_ENV] = INHERITED_SANDBOX_DEBUG_VALUE;
+}
+
+function isSandboxDebugLoggingEnabled(): boolean {
+  return Boolean(process.env[SANDBOX_DEBUG_ENV]);
+}
+
+function describeSandboxDebugLogging(): string {
+  return isSandboxDebugLoggingEnabled() ? `enabled (${SANDBOX_DEBUG_ENV})` : "disabled";
+}
+
+let sandboxDebugLogWriter: ((line: string) => void) | null = null;
+let sandboxDebugConsoleCaptureInstalled = false;
+const originalConsoleError = console.error.bind(console);
+const originalConsoleWarn = console.warn.bind(console);
+
+function stringifyConsoleArgs(args: unknown[]): string {
+  return args.map((arg) => (typeof arg === "string" ? arg : String(arg))).join(" ");
+}
+
+function captureSandboxDebugLine(args: unknown[]): void {
+  const line = stringifyConsoleArgs(args);
+  if (!line.includes(SANDBOX_DEBUG_PREFIX)) return;
+  sandboxDebugLogWriter?.(line);
+}
+
+function installSandboxDebugConsoleCapture(): void {
+  if (sandboxDebugConsoleCaptureInstalled) return;
+
+  console.error = (...args: unknown[]) => {
+    captureSandboxDebugLine(args);
+    originalConsoleError(...args);
+  };
+  console.warn = (...args: unknown[]) => {
+    captureSandboxDebugLine(args);
+    originalConsoleWarn(...args);
+  };
+  sandboxDebugConsoleCaptureInstalled = true;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerFlag("no-sandbox", {
     description: "Disable OS-level sandboxing for bash commands",
@@ -2352,6 +2468,12 @@ export default function (pi: ExtensionAPI) {
     type: "string",
   });
 
+  pi.registerFlag("sandbox-debug", {
+    description: "Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG)",
+    type: "boolean",
+    default: false,
+  });
+
   let sessionCwd = process.cwd();
   let sandboxState: SandboxState = { status: "pending" };
   let sandboxConfig: SandboxConfig | null = null;
@@ -2359,8 +2481,21 @@ export default function (pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | null = null;
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
+  let sandboxDebugLines: SandboxDebugLine[] = [];
 
   const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
+
+  installSandboxDebugConsoleCapture();
+  sandboxDebugLogWriter = (line) => {
+    sandboxDebugLines.push({ timestamp: Date.now(), text: line });
+    if (sandboxDebugLines.length > SANDBOX_DEBUG_LINE_LIMIT) {
+      sandboxDebugLines.splice(0, sandboxDebugLines.length - SANDBOX_DEBUG_LINE_LIMIT);
+    }
+  };
+
+  function shouldEnableSandboxDebug(config: SandboxConfig): boolean {
+    return config.debug === true || (pi.getFlag("sandbox-debug") as boolean) === true;
+  }
 
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
@@ -2598,7 +2733,9 @@ export default function (pi: ExtensionAPI) {
     promptMode = DEFAULT_PROMPT_MODE;
     sandboxConfigPaths = [];
     sandboxEvents = [];
+    sandboxDebugLines = [];
     pendingNetworkApprovals.clear();
+    setSandboxDebugLogging(false);
   };
 
   const isSupportedPlatform = (): boolean =>
@@ -2694,6 +2831,7 @@ export default function (pi: ExtensionAPI) {
     }
     const config = loadedConfig.config;
     sandboxConfig = config;
+    setSandboxDebugLogging(shouldEnableSandboxDebug(config));
 
     if (!config.enabled) {
       sandboxState = { status: "bypassed", reason: "config-disabled" };
@@ -2760,6 +2898,7 @@ export default function (pi: ExtensionAPI) {
             promptMode,
             configPaths: sandboxConfigPaths,
             events: sandboxEvents,
+            debugLines: sandboxDebugLines,
           }),
           "info",
         );
@@ -2798,6 +2937,7 @@ export default function (pi: ExtensionAPI) {
           notifySandboxConfigParseErrors(ctx, parseErrors);
         }
         sandboxConfig = loadedConfig.config;
+        setSandboxDebugLogging(shouldEnableSandboxDebug(loadedConfig.config));
         const runtimeConfig = await initializeSandboxRuntime(ctx, loadedConfig.config);
         if (!runtimeConfig) return;
 
@@ -2854,6 +2994,7 @@ export default function (pi: ExtensionAPI) {
           `  State: enabled`,
           `  Mode: ${promptMode}`,
           `  Runtime state: ${getSandboxRunMode(sandboxState)}`,
+          `  Runtime debug logs: ${describeSandboxDebugLogging()}`,
           "",
           "  Network:",
           `    Allowed: ${runtimeConfig.network.allowedDomains.join(", ") || "(none)"}`,
@@ -2884,6 +3025,23 @@ export default function (pi: ExtensionAPI) {
         ];
 
         notify(ctx, lines.join("\n"), "info");
+        return;
+      }
+
+      if (subcommand === "debug") {
+        if (tokens.length !== 2) {
+          notify(ctx, "Usage: /sandbox debug <on|off>", "warning");
+          return;
+        }
+
+        const enabled = parseDebugToggle(tokens[1]);
+        if (enabled === null) {
+          notify(ctx, "Usage: /sandbox debug <on|off>", "warning");
+          return;
+        }
+
+        setSandboxDebugLogging(enabled);
+        notify(ctx, `Sandbox runtime debug logs ${describeSandboxDebugLogging()}`, "info");
         return;
       }
 
