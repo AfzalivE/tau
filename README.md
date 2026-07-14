@@ -161,6 +161,7 @@ Bundled in `afzal-tau-all-agent`.
 | Extension         | Command      | Description                                                              |
 | ----------------- | ------------ | ------------------------------------------------------------------------ |
 | `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
+| `raw`             | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
 | `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
 | `todoist`         | `/todoist`   | Todoist-backed tasks with offline outbox sync for single or multi-session work. |
 

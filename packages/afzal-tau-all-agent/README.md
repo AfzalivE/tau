@@ -24,6 +24,7 @@ pi install -l npm:afzal-tau-all-agent
 | `branch-term`      | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`              | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                |
+| `raw`              | `/raw`, `alt+r`      | Open the full active-branch transcript in terminal scrollback for copying.                                                |
 | `converge`         | `/converge`          | Run multiple planner personas and synthesize one recommended plan.                                                        |
 | `ghostty`          | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`   | —                    | Status bar diff stats for local changes in the current repo.                                                              |

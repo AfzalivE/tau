@@ -58,6 +58,7 @@
       "../../extensions/branch-term.ts",
       "../../extensions/btw.ts",
       "../../extensions/tool-display-mode.ts",
+      "../../extensions/raw/index.ts",
       "../../extensions/converge.ts",
       "../../extensions/ghostty.ts",
       "../../extensions/git-diff-stats.ts",
