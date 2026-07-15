@@ -62,14 +62,8 @@ import {
   type SandboxAskCallback,
   type SandboxRuntimeConfig,
 } from "@anthropic-ai/sandbox-runtime";
-// Deep import for parity with sandbox-runtime's own path normalization and glob matching.
-// The public package exports do not expose these helpers, but using the same internals keeps
-// the extension's policy checks aligned with the runtime's actual sandbox behavior.
-import {
-  containsGlobChars,
-  globToRegex,
-  normalizePathForSandbox,
-} from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
+// Deep import because the public package does not expose its path normalizer.
+import { normalizePathForSandbox } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import {
   CONFIG_DIR_NAME,
   createBashTool,
@@ -79,6 +73,11 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
+import {
+  inferExactSandboxRuleMatch,
+  inferSandboxRuleMatch,
+  isSandboxWritablePath,
+} from "./utils.ts";
 import {
   getMachErrorFallback,
   getMachLookupArgumentCompletions,
@@ -1119,54 +1118,6 @@ function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
 
 function cloneRuntimeConfig(config: SandboxRuntimeConfig): SandboxRuntimeConfig {
   return structuredClone(config);
-}
-
-function normalizeSandboxPath(value: string, cwd?: string): string {
-  return normalizePathForSandbox(expandPath(value, cwd));
-}
-
-function matchesSandboxRule(path: string, rule: string, cwd?: string): boolean {
-  const normalizedPath = normalizeSandboxPath(path);
-  const normalizedRule = normalizeSandboxPath(rule, cwd);
-
-  if (containsGlobChars(rule)) {
-    return new RegExp(globToRegex(normalizedRule)).test(normalizedPath);
-  }
-
-  if (normalizedPath === normalizedRule) return true;
-
-  const prefix = normalizedRule.endsWith("/") ? normalizedRule : `${normalizedRule}/`;
-  return normalizedPath.startsWith(prefix);
-}
-
-function inferSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
-  for (const rule of rules) {
-    if (matchesSandboxRule(path, rule, cwd)) return rule;
-  }
-
-  return null;
-}
-
-function matchesSandboxRuleExactly(path: string, rule: string, cwd?: string): boolean {
-  if (containsGlobChars(rule)) return false;
-  return normalizeSandboxPath(path) === normalizeSandboxPath(rule, cwd);
-}
-
-function inferExactSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
-  for (const rule of rules) {
-    if (matchesSandboxRuleExactly(path, rule, cwd)) return rule;
-  }
-
-  return null;
-}
-
-function isSandboxWritablePath(
-  runtimeConfig: SandboxRuntimeConfig,
-  path: string,
-  cwd?: string,
-): boolean {
-  if (!inferSandboxRuleMatch(path, runtimeConfig.filesystem.allowWrite, cwd)) return false;
-  return inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, cwd) === null;
 }
 
 function resolveGitFilesystemPaths(cwd: string): GitFilesystemPaths | null {
