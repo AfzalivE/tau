@@ -1,9 +1,10 @@
 /**
- * Sandbox Extension - OS-level sandboxing for bash commands
+ * Sandbox Extension - OS-level bash sandboxing and native file-tool guardrails
  *
  * Uses @anthropic-ai/sandbox-runtime to enforce filesystem and network
  * restrictions on bash commands at the OS level (sandbox-exec on macOS,
- * bubblewrap on Linux).
+ * bubblewrap on Linux), and applies its filesystem policy to native Pi file
+ * tools as a pre-execution guardrail.
  *
  * Config files (merged, project takes precedence):
  * - ~/.pi/agent/sandbox.json (global)
@@ -41,7 +42,7 @@
  *
  * Usage:
  * - `pi -e ./sandbox` - sandbox enabled with default/config settings
- * - `pi -e ./sandbox --no-sandbox` - disable sandboxing
+ * - `pi -e ./sandbox --no-sandbox` - disable sandboxing and file-tool guardrails
  * - `pi -e ./sandbox --sandbox-debug` - print sandbox-runtime proxy/network debug logs
  * - `pi -e ./sandbox --sandbox-config ./sandbox.json` - use a custom sandbox config file
  * - `/sandbox` - show command help
@@ -73,6 +74,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
+import { getFileToolAccesses, guardFileToolCall } from "./file-tool-guard.js";
 import {
   inferExactSandboxRuleMatch,
   inferSandboxRuleMatch,
@@ -357,6 +359,7 @@ interface FilesystemViolation {
   processName?: string;
   readAccess?: FilesystemReadAccess;
   writeAccess?: FilesystemWriteAccess;
+  matchedRule?: string;
 }
 
 type FilesystemViolationResolution = SharedViolationResolution;
@@ -1396,20 +1399,16 @@ function buildFilesystemAllowAction(
   if (!violation.path) return null;
 
   if (violation.kind === "read") {
-    const matchedRule = inferSandboxRuleMatch(
-      violation.path,
-      runtimeConfig.filesystem.denyRead,
-      cwd,
-    );
+    const matchedRule =
+      violation.matchedRule ??
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd);
     return { list: "deny-read", op: "remove", value: matchedRule ?? violation.path };
   }
 
   if (violation.kind === "write") {
-    const matchedDeny = inferSandboxRuleMatch(
-      violation.path,
-      runtimeConfig.filesystem.denyWrite,
-      cwd,
-    );
+    const matchedDeny =
+      violation.matchedRule ??
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, cwd);
     if (matchedDeny) {
       return { list: "deny-write", op: "remove", value: matchedDeny };
     }
@@ -1607,6 +1606,7 @@ async function handleFilesystemViolation(options: {
   output: string;
   rawOutput: string;
   command: string;
+  explicitViolation?: FilesystemViolation;
   cwd?: string;
   pendingPrompts?: Map<string, Promise<FilesystemViolationResolution | null>>;
   applyRuntimeConfigForSession?: (
@@ -1625,6 +1625,7 @@ async function handleFilesystemViolation(options: {
     output,
     rawOutput,
     command,
+    explicitViolation,
     cwd,
     pendingPrompts,
     applyRuntimeConfigForSession,
@@ -1632,7 +1633,9 @@ async function handleFilesystemViolation(options: {
     recordEvent,
     autoRetryAvailable = true,
   } = options;
-  const violations = detectFilesystemViolations(output, rawOutput, existingViolationCount ?? 0);
+  const violations = explicitViolation
+    ? [explicitViolation]
+    : detectFilesystemViolations(output, rawOutput, existingViolationCount ?? 0);
   if (violations.length === 0) return null;
 
   const violation =
@@ -2393,6 +2396,18 @@ function classifyFilesystemEventReason(
   if (alreadyApproved) return "already-approved-still-failed";
 
   if (violation.path) {
+    if (
+      violation.matchedRule &&
+      runtimeConfig.filesystem.denyWrite.includes(violation.matchedRule)
+    ) {
+      return "explicit-deny-write";
+    }
+    if (
+      violation.matchedRule &&
+      runtimeConfig.filesystem.denyRead.includes(violation.matchedRule)
+    ) {
+      return "explicit-deny-read";
+    }
     if (inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, cwd)) {
       return "explicit-deny-write";
     }
@@ -2644,7 +2659,7 @@ function installSandboxDebugConsoleCapture(): void {
 
 export default function (pi: ExtensionAPI) {
   pi.registerFlag("no-sandbox", {
-    description: "Disable OS-level sandboxing for bash commands",
+    description: "Disable OS-level bash sandboxing and native file-tool guardrails",
     type: "boolean",
     default: false,
   });
@@ -2672,6 +2687,7 @@ export default function (pi: ExtensionAPI) {
   const warnedSkippedProjectConfigPaths = new Set<string>();
 
   const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
+  const pendingFileToolPrompts = new Map<string, Promise<FilesystemViolationResolution | null>>();
 
   installSandboxDebugConsoleCapture();
   sandboxDebugLogWriter = (line) => {
@@ -2941,6 +2957,7 @@ export default function (pi: ExtensionAPI) {
     sandboxEvents = [];
     sandboxDebugLines = [];
     pendingNetworkApprovals.clear();
+    pendingFileToolPrompts.clear();
     setSandboxDebugLogging(false);
   };
 
@@ -2980,17 +2997,86 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("tool_call", (event) => {
-    if (event.toolName !== "bash") return undefined;
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName === "bash") {
+      const command = typeof event.input.command === "string" ? event.input.command.trim() : "";
+      if (!command) return undefined;
 
-    const command = typeof event.input.command === "string" ? event.input.command.trim() : "";
-    if (!command) return undefined;
+      const match = findBlockedCommand(command, getBlockedCommands());
+      if (!match) return undefined;
 
-    const match = findBlockedCommand(command, getBlockedCommands());
-    if (!match) return undefined;
+      recordBlockedCommandEvent(command, match.blocked, match.executable);
+      return {
+        block: true,
+        reason: formatBlockedCommandReason(match.rawExecutable, match.blocked),
+      };
+    }
 
-    recordBlockedCommandEvent(command, match.blocked, match.executable);
-    return { block: true, reason: formatBlockedCommandReason(match.rawExecutable, match.blocked) };
+    const lexicalAccesses = getFileToolAccesses(event.toolName, event.input, ctx.cwd);
+    if (!lexicalAccesses) return undefined;
+
+    if (sandboxState.status !== "active") {
+      const allowsUnsandboxed =
+        sandboxState.status === "bypassed" || sandboxState.status === "suspended";
+      if (allowsUnsandboxed) return undefined;
+
+      return {
+        block: true,
+        reason:
+          "Sandbox is not active and native file-tool execution is blocked. Fix sandbox setup and run /sandbox enable, or restart with --no-sandbox.",
+      };
+    }
+
+    return (
+      (await guardFileToolCall({
+        toolName: event.toolName,
+        input: event.input,
+        cwd: ctx.cwd,
+        getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
+        onViolation: async (policyViolation) => {
+          const runtimeConfig = getStateRuntimeConfig(sandboxState);
+          if (!runtimeConfig) {
+            return {
+              allow: false,
+              reason:
+                "Sandbox is no longer active and native file-tool execution is blocked. Re-enable the sandbox before retrying.",
+            };
+          }
+
+          const violation: FilesystemViolation = {
+            kind: policyViolation.access.kind,
+            path: policyViolation.access.path,
+            processName: event.toolName,
+            matchedRule: policyViolation.matchedRule,
+            ...(policyViolation.access.kind === "read"
+              ? { readAccess: policyViolation.access.readAccess ?? "unknown" }
+              : {}),
+          };
+          const resolution = await handleFilesystemViolation({
+            pi,
+            ctx,
+            promptMode,
+            runtimeConfig,
+            output: "",
+            rawOutput: "",
+            command: `${event.toolName} ${policyViolation.access.path}`,
+            explicitViolation: violation,
+            cwd: ctx.cwd,
+            pendingPrompts: pendingFileToolPrompts,
+            applyRuntimeConfigForSession,
+            recordEvent: recordSandboxEvent,
+            autoRetryAvailable: true,
+          });
+
+          return {
+            allow: resolution?.kind === "allow-retry",
+            reason:
+              resolution?.message ??
+              `Sandbox blocked filesystem access to ${policyViolation.access.path}.`,
+          };
+        },
+      })) ?? undefined
+    );
   });
 
   pi.on("user_bash", (event) => {

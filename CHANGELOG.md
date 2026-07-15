@@ -25,6 +25,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
 - Clarified sandbox violation prompts with compact prominent access summaries, targets, and session-only policy changes.
 
+### Security
+
+- Guarded native Pi file tools with the sandbox filesystem policy.
+
 ### Fixed
 
 - Fixed the fork-specific package manifest's `review` extension entry so packaging resolves the extension directory.

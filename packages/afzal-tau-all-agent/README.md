@@ -40,7 +40,7 @@ The bundled draft-stashing extension is now named `stash`. Its default `alt+x` s
 | `openai-fast`      | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
 | `openai-verbosity` | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
 | `review`           | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`          | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `sandbox`          | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
 | `spotlight`        | `/spotlight`         | Mirror a linked worktree into the main worktree while you work elsewhere.                                                 |
 | `telegram`         | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                  |
 | `todoist`          | `/todoist`           | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |

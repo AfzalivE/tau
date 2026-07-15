@@ -34,7 +34,7 @@ pi install -l npm:tau-coding-agent
 | `openai-fast`       | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
 | `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `sandbox`           | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
