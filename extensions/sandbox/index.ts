@@ -76,6 +76,7 @@ import {
 // --- Constants ---
 
 const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
+const IS_MACOS = process.platform === "darwin";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
@@ -390,7 +391,12 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox doctor",
     "  /sandbox mode <interactive|non-interactive>",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
-    "  /sandbox mach-lookup <add|remove> <service>",
+    ...(IS_MACOS
+      ? [
+          "  /sandbox mach-lookup <add|remove> <service>",
+          "    Service rules support one trailing *; use * for all services.",
+        ]
+      : []),
     "  /sandbox filesystem <deny-read|allow-write|deny-write> <add|remove> <path>",
     "",
     "Startup flags:",
@@ -446,7 +452,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "doctor", label: "doctor" },
   { value: "mode ", label: "mode" },
   { value: "network ", label: "network" },
-  { value: "mach-lookup ", label: "mach-lookup" },
+  ...(IS_MACOS ? [{ value: "mach-lookup ", label: "mach-lookup" }] : []),
   { value: "filesystem ", label: "filesystem" },
   { value: "help", label: "help" },
 ];
@@ -606,7 +612,7 @@ function getSandboxArgumentCompletions(
     return null;
   }
 
-  if (subcommand === "mach-lookup") {
+  if (subcommand === "mach-lookup" && IS_MACOS) {
     return getMachLookupArgumentCompletions({ tokens, endsWithSpace, runtimeConfig });
   }
 
@@ -3239,9 +3245,13 @@ export default function (pi: ExtensionAPI) {
           `    allowLocalBinding: ${runtimeConfig.network.allowLocalBinding ? "true" : "false"}`,
           `    allowAllUnixSockets: ${runtimeConfig.network.allowAllUnixSockets ? "true" : "false"}`,
           `    allowUnixSockets: ${runtimeConfig.network.allowUnixSockets?.join(", ") || "(none)"}`,
-          "",
-          "  Mach lookup:",
-          `    Allowed: ${runtimeConfig.network.allowMachLookup?.join(", ") || "(none)"}`,
+          ...(IS_MACOS
+            ? [
+                "",
+                "  macOS service lookup (mach-lookup):",
+                `    Allowed: ${runtimeConfig.network.allowMachLookup?.join(", ") || "(none)"}`,
+              ]
+            : []),
           "",
           "  Filesystem:",
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
@@ -3321,6 +3331,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "mach-lookup") {
+        if (!IS_MACOS) {
+          notify(ctx, "Mach service lookup controls are only available on macOS.", "warning");
+          return;
+        }
+
         const runtimeConfig = requireRuntimeConfig(ctx, sandboxState);
         if (!runtimeConfig) return;
 
