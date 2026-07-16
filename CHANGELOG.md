@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
-- Added paired-session Telegram file sending through `telegram_send_file`. Thanks to @AfzalivE. (#5)
+- Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. (#5)
 
 ### Changed
 
