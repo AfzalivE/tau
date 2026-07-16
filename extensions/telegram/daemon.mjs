@@ -30,6 +30,12 @@ const TELEGRAM_COMMANDS = [
 const TELEGRAM_POLL_TIMEOUT_SEC = 30;
 const TELEGRAM_POLL_RETRY_MS = 1_000;
 const TELEGRAM_HTTP_TIMEOUT_MS = 35_000;
+const TELEGRAM_UPLOAD_TIMEOUT_MS = 5 * 60_000;
+const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+const TELEGRAM_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
+const TELEGRAM_CAPTION_MAX_LENGTH = 1024;
+const TELEGRAM_PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const DAEMON_CAPABILITIES = ["send_file"];
 const POLLING_STOP_TIMEOUT_MS = 4_000;
 const ACTIVITY_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 const UNPAIRED_IDLE_SHUTDOWN_MS = 60_000;
@@ -62,6 +68,7 @@ class TelegramPollingBot extends EventEmitter {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
     this.pollTimeoutSeconds = options.polling?.params?.timeout ?? TELEGRAM_POLL_TIMEOUT_SEC;
     this.httpTimeoutMs = options.request?.timeout ?? TELEGRAM_HTTP_TIMEOUT_MS;
+    this.uploadTimeoutMs = options.request?.uploadTimeout ?? TELEGRAM_UPLOAD_TIMEOUT_MS;
     this.offset = 0;
     this.stopped = false;
     this.pollController = new AbortController();
@@ -132,6 +139,18 @@ class TelegramPollingBot extends EventEmitter {
     return response.result;
   }
 
+  async callFormData(method, formData, options = {}) {
+    const response = await this.fetchFormData(method, formData, options);
+    if (!response || response.ok !== true) {
+      throw new TelegramApiError(
+        method,
+        response?.error_code ?? 200,
+        response?.description || "Unexpected response",
+      );
+    }
+    return response.result;
+  }
+
   async fetchJson(method, payload, options = {}) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.httpTimeoutMs);
@@ -147,6 +166,41 @@ class TelegramPollingBot extends EventEmitter {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      let body;
+      try {
+        body = await response.json();
+      } catch {
+        body = undefined;
+      }
+
+      if (!response.ok) {
+        throw new TelegramApiError(method, response.status, body?.description);
+      }
+
+      return body;
+    } finally {
+      clearTimeout(timeoutId);
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async fetchFormData(method, formData, options = {}) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.uploadTimeoutMs);
+    const onAbort = () => controller.abort();
+    if (options.signal?.aborted) {
+      clearTimeout(timeoutId);
+      throw new DOMException("Aborted", "AbortError");
+    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await fetch(`${this.baseUrl}/${method}`, {
+        method: "POST",
+        body: formData,
         signal: controller.signal,
       });
 
@@ -1117,6 +1171,125 @@ function escapeHtml(text) {
   return String(text).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+function formatBytes(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function inferUploadMimeType(filePath) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function normalizeTelegramUploadCaption(caption) {
+  const trimmed = typeof caption === "string" ? caption.trim() : "";
+  if (!trimmed) return undefined;
+  if (trimmed.length > TELEGRAM_CAPTION_MAX_LENGTH) {
+    throw new Error(`Telegram captions are limited to ${TELEGRAM_CAPTION_MAX_LENGTH} characters.`);
+  }
+  return trimmed;
+}
+
+function normalizeTelegramUploadFilename(filePath, filename) {
+  const override = typeof filename === "string" ? filename.trim() : "";
+  const normalized = override || path.basename(filePath);
+  if (
+    path.basename(normalized) !== normalized ||
+    normalized.includes("/") ||
+    normalized.includes("\\") ||
+    normalized === "." ||
+    normalized === ".." ||
+    [...normalized].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || codePoint === 127;
+    })
+  ) {
+    throw new Error("Telegram filenames must be bare filenames without control characters.");
+  }
+  return normalized;
+}
+
+function resolveTelegramUploadMode(filePath, requestedMode) {
+  if (requestedMode === "document") return "document";
+  return TELEGRAM_PHOTO_EXTENSIONS.has(path.extname(filePath).toLowerCase()) ? "photo" : "document";
+}
+
+function validateTelegramUploadSize(filePath, mode, size) {
+  const maxBytes = mode === "photo" ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_DOCUMENT_MAX_BYTES;
+  if (size <= maxBytes) return;
+
+  throw new Error(
+    `Telegram ${mode} uploads are limited to ${formatBytes(maxBytes)}; ${path.basename(filePath)} is ${formatBytes(size)}.`,
+  );
+}
+
+async function validateTelegramUploadFile(filePath, mode) {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    throw new Error("Missing file path.");
+  }
+
+  const stats = await fsp.stat(filePath);
+  if (!stats.isFile()) {
+    throw new Error(`Not a file: ${filePath}`);
+  }
+  validateTelegramUploadSize(filePath, mode, stats.size);
+
+  if (mode === "photo") {
+    const ext = path.extname(filePath).toLowerCase();
+    if (!TELEGRAM_PHOTO_EXTENSIONS.has(ext)) {
+      throw new Error(
+        `Telegram photo uploads require an image file (${[...TELEGRAM_PHOTO_EXTENSIONS].join(", ")}).`,
+      );
+    }
+  }
+}
+
+async function createTelegramUploadForm(mode, chatId, filePath, options = {}) {
+  if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+  await validateTelegramUploadFile(filePath, mode);
+  const blob = await fs.openAsBlob(filePath, { type: inferUploadMimeType(filePath) });
+  validateTelegramUploadSize(filePath, mode, blob.size);
+  if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append(mode, blob, normalizeTelegramUploadFilename(filePath, options.filename));
+
+  const caption = normalizeTelegramUploadCaption(options.caption);
+  if (caption) form.append("caption", caption);
+
+  return { form, size: blob.size };
+}
+
+async function botSendUpload(chatId, { filePath, requestedMode, caption, filename, signal }) {
+  if (!bot) throw new Error("Telegram bot is not running.");
+
+  const mode = resolveTelegramUploadMode(filePath, requestedMode);
+  const { form, size } = await createTelegramUploadForm(mode, chatId, filePath, {
+    caption,
+    filename,
+    signal,
+  });
+  const method = mode === "document" ? "sendDocument" : "sendPhoto";
+  await bot.callFormData(method, form, { signal });
+  return { mode, size };
+}
+
 async function botSend(chatId, text, opts = {}) {
   if (!bot) return;
   const chunks = chunkText(text);
@@ -1585,6 +1758,49 @@ function broadcastToWindowSessions(msg) {
   }
 }
 
+function sendFileResult(write, id, result) {
+  if (typeof id !== "string" || !id) return;
+  write({ type: "send_file_result", id, ...result });
+}
+
+async function handleSendFileRequest(msg, write, pendingUploads) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  const fail = (message) => sendFileResult(write, id, { ok: false, error: message });
+
+  if (!id || pendingUploads.has(id)) return;
+  if (!pairedChatId) {
+    fail("Telegram is not paired. Run /telegram pair first.");
+    return;
+  }
+
+  const filePath = typeof msg.path === "string" ? msg.path.trim() : "";
+  const requestedMode = msg.mode === "document" ? "document" : "auto";
+  const caption = typeof msg.caption === "string" ? msg.caption : undefined;
+  const filename = typeof msg.filename === "string" ? msg.filename : undefined;
+  const controller = new AbortController();
+  pendingUploads.set(id, controller);
+
+  try {
+    const result = await botSendUpload(pairedChatId, {
+      filePath,
+      requestedMode,
+      caption,
+      filename,
+      signal: controller.signal,
+    });
+    sendFileResult(write, id, { ok: true, ...result });
+  } catch (error) {
+    const message = controller.signal.aborted
+      ? "Telegram file send was cancelled."
+      : error?.name === "AbortError"
+        ? "Telegram upload timed out."
+        : errorMessage(error);
+    fail(message);
+  } finally {
+    pendingUploads.delete(id);
+  }
+}
+
 async function handleSessionQuit(chatId, sessionNo) {
   const target = sessionNo === undefined ? getActiveSession() : getSessionByNo(sessionNo);
   if (!target) {
@@ -1834,6 +2050,7 @@ async function startServer() {
     cancelShutdown();
 
     const send = makeJsonlWriter(socket);
+    const pendingFileUploads = new Map();
     let sessionKey;
 
     attachJsonlReader(socket, (line) => {
@@ -1913,7 +2130,12 @@ async function startServer() {
           sessions.set(sessionKey, session);
           updateWindowSessionRef(session, msg);
           setSessionCompacting(session, !!msg.compacting);
-          send({ type: "registered", sessionNo });
+          send({
+            type: "registered",
+            sessionNo,
+            paired: pairedChatId !== undefined,
+            capabilities: DAEMON_CAPABILITIES,
+          });
           updateTypingIndicator();
           break;
         }
@@ -1979,6 +2201,25 @@ async function startServer() {
           break;
         }
 
+        case "send_file": {
+          if (!sessionKey) {
+            sendFileResult(send, msg.id, {
+              ok: false,
+              error: "Session is not registered.",
+            });
+            break;
+          }
+          void handleSendFileRequest(msg, send, pendingFileUploads);
+          break;
+        }
+
+        case "cancel_send_file": {
+          if (typeof msg.id === "string") {
+            pendingFileUploads.get(msg.id)?.abort();
+          }
+          break;
+        }
+
         case "assistant_result": {
           if (!sessionKey) break;
           const session = sessions.get(sessionKey);
@@ -1996,6 +2237,11 @@ async function startServer() {
     });
 
     socket.on("close", () => {
+      for (const controller of pendingFileUploads.values()) {
+        controller.abort();
+      }
+      pendingFileUploads.clear();
+
       if (!sessionKey) {
         void maybeShutdownSoon();
         return;
@@ -2048,6 +2294,7 @@ bot = new TelegramPollingBot(botTokenInfo.token, {
   },
   request: {
     timeout: TELEGRAM_HTTP_TIMEOUT_MS,
+    uploadTimeout: TELEGRAM_UPLOAD_TIMEOUT_MS,
   },
 });
 
