@@ -1792,7 +1792,7 @@ async function handleSendFileRequest(msg, write, pendingUploads) {
   } catch (error) {
     const message = controller.signal.aborted
       ? "Telegram file send was cancelled."
-      : error instanceof Error && error.name === "AbortError"
+      : error?.name === "AbortError"
         ? "Telegram upload timed out."
         : errorMessage(error);
     fail(message);
