@@ -8,18 +8,13 @@
   "skills": [
     "./skills/browser-tools",
     "./skills/cald",
-    "./skills/diagnose",
     "./skills/dream",
     "./skills/gh",
     "./skills/git-clean-history",
     "./skills/git-commit",
     "./skills/git-rebase-check",
     "./skills/git-worktree",
-    "./skills/grill-me",
-    "./skills/grill-with-docs",
-    "./skills/handoff",
     "./skills/homeassistant-ops",
-    "./skills/improve-codebase-architecture",
     "./skills/material-3",
     "./skills/ms-openapi-explorer",
     "./skills/openscad",
@@ -31,16 +26,9 @@
     "./skills/qmd",
     "./skills/review-breaker",
     "./skills/sentry",
-    "./skills/setup-matt-pocock-skills",
     "./skills/td",
     "./skills/tdc",
-    "./skills/tdd",
-    "./skills/to-issues",
-    "./skills/to-prd",
-    "./skills/triage",
     "./skills/update-changelog",
-    "./skills/web-design",
-    "./skills/write-a-skill",
-    "./skills/zoom-out"
+    "./skills/web-design"
   ]
 }

@@ -171,19 +171,7 @@ Bundled in `afzal-tau-all-agent`.
 
 | Skill                           | Description                                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `diagnose`                      | Disciplined diagnosis loop for hard bugs and performance regressions.                       |
-| `grill-me`                      | Interview the user relentlessly about a plan or design until reaching shared understanding. |
-| `grill-with-docs`               | Stress-test a plan against the project's domain model, terminology, and ADRs.               |
-| `handoff`                       | Compact the current conversation into a handoff document for another agent.                 |
-| `improve-codebase-architecture` | Find deepening opportunities informed by `CONTEXT.md` and `docs/adr/`.                      |
 | `material-3`                    | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.       |
-| `setup-matt-pocock-skills`      | Scaffold repo config for issue tracker, triage labels, and domain doc layout.               |
-| `tdd`                           | Test-driven development with a red-green-refactor loop.                                     |
-| `to-issues`                     | Break a plan, spec, or PRD into independently grabbable issues.                             |
-| `to-prd`                        | Turn the current conversation context into a PRD and publish it to the issue tracker.       |
-| `triage`                        | Triage issues through a state machine driven by triage roles.                               |
-| `write-a-skill`                 | Create new agent skills with proper structure and bundled resources.                         |
-| `zoom-out`                      | Give broader codebase context and a higher-level perspective for unfamiliar areas.           |
 | `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
 | `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |
 | `gh`                            | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                             |
@@ -206,7 +194,6 @@ Some extensions and skills were inspired by prior work from other agent setups a
 - @mitsuhiko for `answer`, `btw`, `loop`, `openscad`, `sentry`, `update-changelog`, and `web-design`
 - @badlogic for `sandbox` and `browser-tools`
 - @mjakl for `stash`
-- [@mattpocock](https://github.com/mattpocock) for `diagnose`, `grill-me`, `grill-with-docs`, `handoff`, `improve-codebase-architecture`, `setup-matt-pocock-skills`, `tdd`, `to-issues`, `to-prd`, `triage`, `write-a-skill`, and `zoom-out`
 - [@enricenrich](https://github.com/enricenrich) for [calendar-cli](https://github.com/enricenrich/calendar-cli), which `cald` depends on
 
 ## License

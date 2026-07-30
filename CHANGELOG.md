@@ -12,7 +12,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Added an `acp-client` extension to use Claude and Codex agents via the Agent Client Protocol, through an `acp_agent` tool and an `/acp` command.
 - Added a dedicated `/review` security focus.
 - Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
-- Added Matt Pocock's `handoff` skill to the fork-specific skill bundle.
 
 ### Changed
 
@@ -21,7 +20,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
 - Grounded `/review` efficiency findings in locally provable runtime costs.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
-- Updated bundled Matt Pocock skills from the local `mattpocock-skills` checkout.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
 - Clarified sandbox violation prompts with compact prominent access summaries, targets, and session-only policy changes.
 

@@ -62,18 +62,6 @@ The bundled draft-stashing extension is now named `stash`. Its default `alt+x` s
 | `homeassistant-ops`            | Operate a Home Assistant instance via REST/WebSocket APIs.                                  |
 | `material-3`                   | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.       |
 | `openscad`                     | Create and render OpenSCAD 3D models, export STL.                                           |
-| `diagnose`                     | Disciplined diagnosis loop for hard bugs and performance regressions.                        |
-| `grill-me`                     | Interview the user relentlessly about a plan or design until reaching shared understanding.  |
-| `grill-with-docs`              | Stress-test a plan against the project's domain model, terminology, and ADRs.                |
-| `handoff`                      | Compact the current conversation into a handoff document for another agent.                  |
-| `improve-codebase-architecture`| Find deepening opportunities informed by `CONTEXT.md` and `docs/adr/`.                       |
-| `setup-matt-pocock-skills`     | Scaffold repo config for issue tracker, triage labels, and domain doc layout.                |
-| `tdd`                          | Test-driven development with a red-green-refactor loop.                                      |
-| `to-issues`                    | Break a plan, spec, or PRD into independently grabbable issues.                              |
-| `to-prd`                       | Turn the current conversation context into a PRD and publish it to the issue tracker.        |
-| `triage`                       | Triage issues through a state machine driven by triage roles.                                |
-| `write-a-skill`                | Create new agent skills with proper structure and bundled resources.                          |
-| `zoom-out`                     | Give broader codebase context and a higher-level perspective for unfamiliar areas.            |
 | `cald`                         | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.   |
 | `dream`                        | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.       |
 | `gh`                           | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                              |
