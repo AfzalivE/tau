@@ -25,7 +25,9 @@
   },
   "type": "module",
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.25.0"
+    "@agentclientprotocol/claude-agent-acp": "^0.60.0",
+    "@agentclientprotocol/codex-acp": "^1.1.5",
+    "@agentclientprotocol/sdk": "^1.2.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

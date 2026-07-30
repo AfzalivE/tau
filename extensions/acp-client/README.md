@@ -38,9 +38,9 @@ While viewing a running session, press `s` to stop it; the footer asks to confir
 | Agent    | Adapter                                                                                                        | Auth                                   |
 | -------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | `claude` | [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp) | `claude /login` or `ANTHROPIC_API_KEY` |
-| `codex`  | [`@zed-industries/codex-acp`](https://www.npmjs.com/package/@zed-industries/codex-acp)                         | `codex login` or `OPENAI_API_KEY`      |
+| `codex`  | [`@agentclientprotocol/codex-acp`](https://www.npmjs.com/package/@agentclientprotocol/codex-acp)               | `codex login` or `OPENAI_API_KEY`      |
 
-Adapters are launched lazily via `npx -y` and reused for the lifetime of the Pi session. The first launch downloads the adapter into the npx cache.
+The package installs both adapters as runtime dependencies. Their installed entry points are launched lazily and reused for the lifetime of the Pi session, with no runtime package download.
 
 ## Permissions
 
@@ -56,16 +56,14 @@ Optional, at `~/.pi/acp.json`:
 {
   "agents": {
     "claude": {
-      "command": "claude-agent-acp",
-      "args": [],
       "env": { "ANTHROPIC_API_KEY": "..." }
     },
     "codex": {
-      "command": "codex-acp",
+      "command": "/path/to/custom/codex-acp",
       "args": []
     }
   }
 }
 ```
 
-`command`/`args` replace the default `npx` launch; `env` is merged over the inherited environment.
+`command`/`args` replace the package-installed adapter launch; `env` is merged over the inherited environment. An `env`-only override keeps the installed adapter default.

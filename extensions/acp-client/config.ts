@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { AcpAgentId, AcpAgentLaunchConfig, AcpConfig } from "./types.js";
 
@@ -19,8 +20,8 @@ export const ACP_AUTH_GUIDANCE: Record<AcpAgentId, string> = {
 };
 
 const DEFAULT_AGENTS: Record<AcpAgentId, AcpAgentLaunchConfig> = {
-  claude: { command: "npx", args: ["-y", "@agentclientprotocol/claude-agent-acp"] },
-  codex: { command: "npx", args: ["-y", "@zed-industries/codex-acp"] },
+  claude: installedAgent("@agentclientprotocol/claude-agent-acp/dist/index.js"),
+  codex: installedAgent("@agentclientprotocol/codex-acp/dist/index.js"),
 };
 
 export function isAcpAgentId(value: string): value is AcpAgentId {
@@ -52,6 +53,13 @@ export function loadConfig(): AcpConfig {
   }
 
   return { agents };
+}
+
+function installedAgent(entryPoint: string): AcpAgentLaunchConfig {
+  return {
+    command: process.execPath,
+    args: [fileURLToPath(import.meta.resolve(entryPoint))],
+  };
 }
 
 function sanitizeLaunchConfig(agentId: AcpAgentId, value: unknown): AcpAgentLaunchConfig {

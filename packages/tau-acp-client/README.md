@@ -41,16 +41,14 @@ Optional, at `~/.pi/acp.json`:
 {
   "agents": {
     "claude": {
-      "command": "claude-agent-acp",
-      "args": [],
       "env": { "ANTHROPIC_API_KEY": "..." }
     },
     "codex": {
-      "command": "codex-acp",
+      "command": "/path/to/custom/codex-acp",
       "args": []
     }
   }
 }
 ```
 
-`command`/`args` replace the default `npx` launch; `env` is merged over the inherited environment.
+Both adapters are installed with this package and launched from their installed entry points. `command`/`args` replace that default launch; `env` is merged over the inherited environment. An `env`-only override keeps the installed adapter default.

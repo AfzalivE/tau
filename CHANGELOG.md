@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Updated Oracle to prefer GPT-5.6 Sol and Claude Fable 5 when available.
 - Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
 - Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
+- Installed the Claude and Codex ACP adapters with `tau-acp-client` instead of downloading them at runtime through `npx`.
 - Grounded `/review` efficiency findings in locally provable runtime costs.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.

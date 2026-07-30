@@ -19,8 +19,8 @@
  * - /acp view [handle|agent]   tail a running session's transcript live
  * - /acp stop [handle]   stop one session, or all sessions and processes
  *
- * One agent process is spawned lazily per agent kind via `npx` adapters and
- * hosts all of that agent's sessions for the lifetime of the Pi session.
+ * One installed adapter process is spawned lazily per agent kind and hosts all
+ * of that agent's sessions for the lifetime of the Pi session.
  * Launch commands can be overridden in ~/.pi/acp.json:
  * { "agents": { "claude": { "command": "...", "args": [...] } } }
  */
