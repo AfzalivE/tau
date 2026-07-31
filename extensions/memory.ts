@@ -1,5 +1,11 @@
 import { complete } from "@earendil-works/pi-ai/compat";
-import { StringEnum, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
+import {
+  StringEnum,
+  type Api,
+  type Model,
+  type Usage,
+  type UserMessage,
+} from "@earendil-works/pi-ai";
 import {
   defineTool,
   withFileMutationQueue,
@@ -171,6 +177,11 @@ type DreamResult = {
   summaryPath: string | null;
 };
 
+type DreamExecution = {
+  result: DreamResult;
+  usage?: Usage;
+};
+
 type AutoDreamStatus = {
   coreLines: number;
   coreChars: number;
@@ -205,12 +216,17 @@ async function toolDream(
   cwd: string,
   ctx: ExtensionContext,
   reason?: string,
-): Promise<{ content: Array<{ type: "text"; text: string }>; details: DreamResult }> {
+): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+  details: DreamResult;
+  usage?: Usage;
+}> {
   try {
-    const result = await runMemoryDream(cwd, ctx, reason);
+    const execution = await runMemoryDream(cwd, ctx, reason);
     return {
-      content: [{ type: "text", text: result.summary }],
-      details: result,
+      content: [{ type: "text", text: execution.result.summary }],
+      details: execution.result,
+      usage: execution.usage,
     };
   } catch (error) {
     if (error instanceof MemoryReadmeMissingError) {
@@ -370,7 +386,7 @@ async function runMemoryDream(
   cwd: string,
   ctx: ExtensionContext,
   reason?: string,
-): Promise<DreamResult> {
+): Promise<DreamExecution> {
   const paths = getMemoryPaths(cwd);
   const lockPaths = [
     paths.readmeFile,
@@ -395,13 +411,15 @@ async function runMemoryDream(
     const summary = "Memory dream: nothing to consolidate.";
     notify(ctx, summary, "info");
     return {
-      summary,
-      updatedBlocks: [],
-      consumedLogs: 0,
-      consumedCompactions: 0,
-      lastDreamAt: snapshot.state?.lastDreamAt ?? nowIso(),
-      lastDreamedLogAt: snapshot.state?.lastDreamedLogAt ?? null,
-      summaryPath: null,
+      result: {
+        summary,
+        updatedBlocks: [],
+        consumedLogs: 0,
+        consumedCompactions: 0,
+        lastDreamAt: snapshot.state?.lastDreamAt ?? nowIso(),
+        lastDreamedLogAt: snapshot.state?.lastDreamedLogAt ?? null,
+        summaryPath: null,
+      },
     };
   }
 
@@ -466,7 +484,7 @@ async function runMemoryDream(
     );
   }
 
-  return withMemoryMutationQueue(lockPaths, async () => {
+  const result = await withMemoryMutationQueue(lockPaths, async () => {
     ensureMemoryInitialized(await pathExists(paths.memoryRoot));
 
     const currentReplay = await collectDreamReplay(cwd);
@@ -514,6 +532,8 @@ async function runMemoryDream(
       summaryPath,
     };
   });
+
+  return { result, usage: response.usage };
 }
 
 async function loadMemoryPrompt(cwd: string): Promise<string | undefined> {
