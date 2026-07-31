@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Changed
 
 - Updated Pi to 0.83.0 and migrated extensions to its model runtime and credential APIs.
+- Enabled provider-side strict JSON Schema sampling for review and triage submissions when supported.
 - Allowed sandboxed macOS tools to query system DNS and network configuration by default.
 - Included `/sandbox enable` and `/sandbox disable` state changes in agent context.
 - Updated Oracle to prefer GPT-5.6 Sol and Claude Fable 5 when available.

@@ -141,10 +141,10 @@ export function buildProjectReviewGuidelinesSection(projectGuidelines: string | 
 export const SUBMIT_TOOL_RETRY_PROMPT = `You did not call {SUBMIT_TOOL} as instructed. You must call that tool exactly once with the final payload. Do not output any text, only call the {SUBMIT_TOOL} when you're done.`;
 
 export const REVIEW_OUTPUT_CONTRACT_PROMPT = `Requirements:
-- Never output findings or notes as text or write them to files.
+- Never output findings as text or write them to files.
 - Always call submit_review exactly once as your final action.
 - If no issues are found, pass an empty array of findings to submit_review.
-- If uncertain, pass a note to submit_review.`;
+- Omit uncertain or speculative findings.`;
 
 export const REVIEW_FOCUS_PROMPT = `You are an expert code reviewer{FOCUS_SUFFIX}.
 
