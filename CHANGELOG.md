@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
-- Output `/insights` report into a temporary file and show the path after closing. (#4)
+- `/insights` now outputs its report into a temporary file and shows the path after closing. (#4)
 - Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. (#5)
 - Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. (#6)
 
@@ -55,7 +55,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
-- Fixed incidental macOS service lookups interrupting otherwise successful sandboxed commands.
+- Incidental macOS service lookups no longer interrupt otherwise successful sandboxed commands.
 - Fixed `/review` resolving OpenRouter model IDs containing `/` to the wrong provider.
 - Fixed Oracle model checks loading unrelated telegram extension resources.
 - Fixed sandbox prompts when traversal commands skip protected read-denied directories.
