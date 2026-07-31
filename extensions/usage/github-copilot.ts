@@ -1,4 +1,5 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { OAuthCredential } from "@earendil-works/pi-ai";
+import { readStoredCredential, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   clampPercent,
   formatCount,
@@ -8,7 +9,12 @@ import {
   readNumber,
   readString,
 } from "./shared.js";
-import type { LiveUsageItem, LiveUsageSnapshot, UsageProviderDefinition } from "./types.js";
+import type {
+  LiveUsageAvailability,
+  LiveUsageItem,
+  LiveUsageSnapshot,
+  UsageProviderDefinition,
+} from "./types.js";
 
 const PROVIDER_ID = "github-copilot";
 
@@ -136,13 +142,18 @@ function buildUsageUrl(enterpriseUrl?: string): string {
   return `https://${host}/copilot_internal/user`;
 }
 
-async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<LiveUsageSnapshot> {
-  const credential = ctx.modelRegistry.authStorage.get(PROVIDER_ID);
-  if (
-    credential?.type !== "oauth" ||
-    typeof credential.refresh !== "string" ||
-    !credential.refresh.trim()
-  ) {
+async function getLiveUsageAvailability(_ctx: ExtensionContext): Promise<LiveUsageAvailability> {
+  return getStoredCopilotCredential()
+    ? { available: true }
+    : { available: false, reason: "not logged in" };
+}
+
+async function fetchUsage(
+  _ctx: ExtensionContext,
+  signal?: AbortSignal,
+): Promise<LiveUsageSnapshot> {
+  const credential = getStoredCopilotCredential();
+  if (!credential) {
     throw new Error("Not logged in to GitHub Copilot.");
   }
 
@@ -193,11 +204,21 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
   };
 }
 
+function getStoredCopilotCredential(): OAuthCredential | undefined {
+  const credential = readStoredCredential(PROVIDER_ID);
+  return credential?.type === "oauth" &&
+    typeof credential.refresh === "string" &&
+    credential.refresh.trim()
+    ? credential
+    : undefined;
+}
+
 const githubCopilotProvider: UsageProviderDefinition = {
   id: PROVIDER_ID,
   label: "GitHub Copilot",
   shortLabel: "copilot",
   color: { r: 168, g: 85, b: 247 },
+  getLiveUsageAvailability,
   fetchLiveUsage: fetchUsage,
 };
 

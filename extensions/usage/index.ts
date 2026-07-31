@@ -1433,7 +1433,7 @@ async function getLiveUsageAvailability(
     return provider.getLiveUsageAvailability(ctx);
   }
 
-  return ctx.modelRegistry.authStorage.hasAuth(provider.id)
+  return ctx.modelRegistry.getProviderAuthStatus(provider.id).configured
     ? { available: true }
     : { available: false, reason: "no auth configured" };
 }

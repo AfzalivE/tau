@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readStoredCredential, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   clampPercent,
   formatCurrency,
@@ -111,7 +111,7 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
   const token = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
   if (!token) throw new LiveUsageUnavailableError("no auth configured");
 
-  const credential = ctx.modelRegistry.authStorage.get(PROVIDER_ID);
+  const credential = readStoredCredential(PROVIDER_ID);
   if (credential?.type === "api_key") {
     throw new LiveUsageUnavailableError("API-key auth does not expose Claude subscription quota");
   }
@@ -170,12 +170,11 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
   };
 }
 
-async function getLiveUsageAvailability(ctx: ExtensionContext) {
-  if (!ctx.modelRegistry.authStorage.hasAuth(PROVIDER_ID)) {
+async function getLiveUsageAvailability(_ctx: ExtensionContext) {
+  const credential = readStoredCredential(PROVIDER_ID);
+  if (!credential) {
     return { available: false as const, reason: "no auth configured" };
   }
-
-  const credential = ctx.modelRegistry.authStorage.get(PROVIDER_ID);
   if (credential?.type === "oauth") {
     return { available: true as const };
   }
