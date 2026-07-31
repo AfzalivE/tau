@@ -55,6 +55,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SandboxManager,
   type SandboxAskCallback,
@@ -81,6 +82,7 @@ import {
 
 const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
 const IS_MACOS = process.platform === "darwin";
+const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", import.meta.url));
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
@@ -2290,7 +2292,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     const attemptRuntimeConfig = runtimeConfig ? cloneRuntimeConfig(runtimeConfig) : null;
     const wrappedCommand = await SandboxManager.wrapWithSandbox(
       command,
-      undefined,
+      IS_MACOS ? MACOS_SANDBOX_SHELL : undefined,
       attemptRuntimeConfig ?? undefined,
     );
     const existingViolationCount =

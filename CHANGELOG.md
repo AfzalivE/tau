@@ -21,6 +21,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Included `/sandbox enable` and `/sandbox disable` state changes in agent context.
 - Updated Oracle to prefer GPT-5.6 Sol and Claude Fable 5 when available.
 
+### Fixed
+
+- Sandboxed Git-over-SSH on macOS now works with the authenticated network proxy. ([upstream #385](https://github.com/anthropic-experimental/sandbox-runtime/pull/385))
+
 ## [0.1.5] - 2026-07-10
 
 ### Added
