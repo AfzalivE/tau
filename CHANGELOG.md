@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-01
+
 ### Added
 
 - `/insights` now outputs its report into a temporary file and shows the path after closing. (#4)
