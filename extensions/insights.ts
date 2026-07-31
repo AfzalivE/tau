@@ -142,6 +142,7 @@ type ConfiguredModelSelection = {
   model: Model<Api>;
   apiKey?: string;
   headers?: Record<string, string>;
+  env?: Record<string, string>;
 };
 
 type ReadonlySessionManager = Pick<
@@ -778,7 +779,12 @@ async function getConfiguredModelSelection(
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
   if (!auth.ok) return null;
-  return { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers };
+  return {
+    model: ctx.model,
+    apiKey: auth.apiKey,
+    headers: auth.headers,
+    env: auth.env,
+  };
 }
 
 async function listTargets(
@@ -1371,6 +1377,7 @@ async function extractFacet(
     {
       apiKey: selection.apiKey,
       headers: selection.headers,
+      env: selection.env,
       signal,
     },
   );
@@ -1543,6 +1550,7 @@ async function synthesizeReport(
     {
       apiKey: selection.apiKey,
       headers: selection.headers,
+      env: selection.env,
       signal,
     },
   );

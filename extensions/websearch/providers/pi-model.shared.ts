@@ -5,6 +5,7 @@ export interface PiModelSelection {
   model: Model<Api>;
   apiKey?: string;
   headers?: Record<string, string>;
+  env?: Record<string, string>;
 }
 
 export async function selectCurrentPiModel(
@@ -42,7 +43,24 @@ async function resolvePiModelSelection(
   ctx: Pick<ExtensionContext, "modelRegistry">,
 ): Promise<PiModelSelection | null> {
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers } : null;
+  return auth.ok
+    ? {
+        model: resolveModelEnv(model, auth.env),
+        apiKey: auth.apiKey,
+        headers: auth.headers,
+        env: auth.env,
+      }
+    : null;
+}
+
+function resolveModelEnv(model: Model<Api>, env?: Record<string, string>): Model<Api> {
+  if (!model.baseUrl || !env) return model;
+
+  let baseUrl = model.baseUrl;
+  for (const [name, value] of Object.entries(env)) {
+    baseUrl = baseUrl.replaceAll(`{${name}}`, value);
+  }
+  return baseUrl === model.baseUrl ? model : { ...model, baseUrl };
 }
 
 function rankPiModels(models: Model<Api>[]): Model<Api>[] {

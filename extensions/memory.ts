@@ -189,6 +189,7 @@ type ModelSelection = {
   model: Model<Api>;
   apiKey?: string;
   headers?: Record<string, string>;
+  env?: Record<string, string>;
 };
 
 class MemoryReadmeMissingError extends Error {
@@ -414,6 +415,7 @@ async function runMemoryDream(
     {
       apiKey: selection.apiKey,
       headers: selection.headers,
+      env: selection.env,
       signal: ctx.signal,
     },
   );
@@ -962,6 +964,7 @@ async function selectDreamModel(ctx: ExtensionContext): Promise<ModelSelection> 
     model: ctx.model,
     apiKey: auth.apiKey,
     headers: auth.headers,
+    env: auth.env,
   };
 }
 
