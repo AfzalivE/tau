@@ -15,7 +15,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
-- Updated Oracle to prefer GPT-5.6 Sol and Claude Fable 5 when available.
 - Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
 - Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
 - Installed the Claude and Codex ACP adapters with `tau-acp-client` instead of downloading them at runtime through `npx`.
@@ -31,7 +30,27 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Fixed
 
 - Fixed the fork-specific package manifest's `review` extension entry so packaging resolves the extension directory.
-- Fixed `/sandbox off` still prompting for network access.
+
+## [0.1.6] - 2026-08-01
+
+### Added
+
+- `/insights` now outputs its report into a temporary file and shows the path after closing. (#4)
+- Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. (#5)
+- Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. (#6)
+
+### Changed
+
+- Updated Pi to 0.83.0 and migrated extensions to its model runtime and credential APIs.
+- Enabled provider-side strict JSON Schema sampling for review and triage submissions when supported.
+- Included nested model usage from the memory dream tool in Pi session totals.
+- Allowed sandboxed macOS tools to query system DNS and network configuration by default.
+- Included `/sandbox enable` and `/sandbox disable` state changes in agent context.
+- Updated Oracle to prefer GPT-5.6 Sol and Claude Fable 5 when available.
+
+### Fixed
+
+- Sandboxed Git-over-SSH on macOS now works with the authenticated network proxy. ([upstream #385](https://github.com/anthropic-experimental/sandbox-runtime/pull/385))
 
 ## [0.1.5] - 2026-07-10
 
@@ -63,6 +82,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Incidental macOS service lookups no longer interrupt otherwise successful sandboxed commands.
 - Fixed `/review` resolving OpenRouter model IDs containing `/` to the wrong provider.
 - Fixed Oracle model checks loading unrelated telegram extension resources.
 - Fixed sandbox prompts when traversal commands skip protected read-denied directories.

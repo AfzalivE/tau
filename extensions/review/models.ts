@@ -510,7 +510,7 @@ export async function resolveModels(
   requestedModels: string[],
   currentThinkingLevel: ReviewThinkingLevel,
 ): Promise<ResolvedReviewModel[]> {
-  ctx.modelRegistry.refresh();
+  await ctx.modelRegistry.refresh();
   const currentProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
   const currentModelId = ctx.model?.id;
   const allModels = ctx.modelRegistry.getAll();
