@@ -3425,6 +3425,24 @@ export default function (pi: ExtensionAPI) {
             };
           }
 
+          if (policyViolation.reason === "runtime-protected-write") {
+            const rule = policyViolation.matchedRule ?? "mandatory write policy";
+            recordSandboxEvent({
+              timestamp: Date.now(),
+              kind: "filesystem",
+              outcome: "blocked",
+              reason: "runtime-protected-write",
+              target: policyViolation.access.path,
+              command: `${event.toolName} ${policyViolation.access.path}`,
+              cwd: ctx.cwd,
+              summary: "native file-tool write is protected by the sandbox runtime",
+            });
+            return {
+              allow: false,
+              reason: `Sandbox blocked filesystem write to ${policyViolation.access.path}: ${rule} is protected by sandbox-runtime and cannot be allowed for this session.`,
+            };
+          }
+
           const violation: FilesystemViolation = {
             kind: policyViolation.access.kind,
             path: policyViolation.access.path,
