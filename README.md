@@ -4,12 +4,13 @@ Tau is a batteries-included distribution for [Pi](https://pi.dev), a brilliant c
 
 It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding a `websearch` tool to complement the four default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
 
-| Package               | Purpose                                                        |
-| --------------------- | -------------------------------------------------------------- |
-| `tau-acp-client`      | Standalone ACP client package for Claude and Codex agents.     |
-| `tau-coding-agent`    | Coding package.                                                |
-| `tau-all-agent`       | Full package.                                                  |
-| `afzal-tau-all-agent` | Full fork-specific package except the `memory` extension.      |
+| Package                      | Purpose                                                                |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `tau-acp-client`             | Standalone ACP client package for Claude and Codex agents.             |
+| `tau-coding-agent`           | Coding package.                                                        |
+| `tau-all-agent`              | Full package.                                                          |
+| `afzal-tau-all-agent`        | Full fork-specific package except the `memory` extension.              |
+| `afzal-tau-non-coding-agent` | Local-model knowledge-work package for insights from non-code sources. |
 
 Fork-specific package/configuration details are grouped under [Fork-specific additions](#fork-specific-additions) below.
 
@@ -25,6 +26,8 @@ pi install npm:tau-coding-agent
 pi install npm:tau-all-agent
 # or
 pi install npm:afzal-tau-all-agent
+# or
+pi install npm:afzal-tau-non-coding-agent
 ```
 
 Need the full fork-specific package? `afzal-tau-all-agent` bundles the base Tau package contents plus the fork-specific extensions and skills listed below, but intentionally excludes the `memory` extension.
@@ -93,6 +96,7 @@ pi -e ./packages/tau-acp-client
 pi -e ./packages/tau-coding-agent
 pi -e ./packages/tau-all-agent
 pi -e ./packages/afzal-tau-all-agent
+pi -e ./packages/afzal-tau-non-coding-agent
 ```
 
 The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`. An extension manifest entry ending in `index.ts` includes its containing directory and sibling modules; direct-file entries must be updated when upstream renames their source file.
@@ -107,6 +111,7 @@ The GitHub Actions publish workflow stages packages under `dist/` and publishes 
 2. `tau-coding-agent`
 3. `tau-all-agent`
 4. `afzal-tau-all-agent`
+5. `afzal-tau-non-coding-agent`
 
 Published packages are self-contained copies of their selected Tau resources.
 
@@ -131,6 +136,24 @@ pi -e ./packages/afzal-tau-all-agent
 ```
 
 When publishing this fork, `afzal-tau-all-agent` is published after `tau-coding-agent` and `tau-all-agent`.
+
+### Non-coding agent package
+
+`afzal-tau-non-coding-agent` is a knowledge-work profile for using Pi with non-code sources, such as a personal Obsidian vault, and then running `/insights` over those sessions. It is intended for locally hosted models and bundles the same extensions as `afzal-tau-all-agent`, with only the focused `browser-tools` skill.
+
+Install it with:
+
+```bash
+pi install npm:afzal-tau-non-coding-agent
+```
+
+For local development/testing:
+
+```bash
+pi -e ./packages/afzal-tau-non-coding-agent
+```
+
+Configure a local provider such as Ollama, LM Studio, or vLLM in `~/.pi/agent/models.json`, select it with `/model`, and run `/insights scope=project` from the source root. The package does not bundle model configuration.
 
 ### Agent configuration
 

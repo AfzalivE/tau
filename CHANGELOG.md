@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Added
 
 - Added a standalone `tau-acp-client` package for the ACP client extension.
+- Added `afzal-tau-non-coding-agent`, a local-model knowledge-work profile for running `/insights` over sessions rooted in non-code sources such as Obsidian vaults.
 - Added an `acp-client` extension to use Claude and Codex agents via the Agent Client Protocol, through an `acp_agent` tool and an `/acp` command.
 - Added a dedicated `/review` security focus.
 - Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.

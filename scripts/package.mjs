@@ -12,6 +12,7 @@ const packageNames = [
   "tau-coding-agent",
   "tau-all-agent",
   "afzal-tau-all-agent",
+  "afzal-tau-non-coding-agent",
 ];
 const resourceTypes = ["extensions", "skills", "prompts", "themes"];
 
