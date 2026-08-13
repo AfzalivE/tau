@@ -54,6 +54,7 @@ type ModelRequestAuth = {
   model: Model<Api>;
   apiKey?: string;
   headers?: Record<string, string>;
+  env?: Record<string, string>;
 };
 
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
@@ -137,13 +138,20 @@ async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelRequestAu
 
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate);
       if (auth.ok) {
-        return { model: candidate, apiKey: auth.apiKey, headers: auth.headers };
+        return {
+          model: candidate,
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+          env: auth.env,
+        };
       }
     }
   }
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-  return auth.ok ? { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers } : null;
+  return auth.ok
+    ? { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env }
+    : null;
 }
 
 async function summarizeBreakoutCondition(
@@ -165,7 +173,7 @@ async function summarizeBreakoutCondition(
   const response = await complete(
     selection.model,
     { systemPrompt: SUMMARY_SYSTEM_PROMPT, messages: [userMessage] },
-    { apiKey: selection.apiKey, headers: selection.headers },
+    { apiKey: selection.apiKey, headers: selection.headers, env: selection.env },
   );
 
   if (response.stopReason === "aborted" || response.stopReason === "error") {
@@ -518,6 +526,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
         auth.headers,
         instructionParts,
         event.signal,
+        ctx.thinkingLevel,
+        undefined, // Use Pi's default summarization stream.
+        auth.env,
       );
       return { compaction };
     } catch (error) {

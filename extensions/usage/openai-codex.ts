@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readStoredCredential, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   clampPercent,
   formatCurrency,
@@ -112,7 +112,7 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
   const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
   if (!apiKey) throw new Error("Not logged in to OpenAI Codex.");
 
-  const credential = ctx.modelRegistry.authStorage.get(PROVIDER_ID);
+  const credential = readStoredCredential(PROVIDER_ID);
   const accountId =
     credential?.type === "oauth" && typeof credential.accountId === "string"
       ? credential.accountId

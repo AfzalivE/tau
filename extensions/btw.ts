@@ -1,7 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ThinkingLevel } from "@earendil-works/pi-ai";
+import {
+  InMemoryCredentialStore,
+  type AssistantMessage,
+  type Provider,
+  type ThinkingLevel,
+} from "@earendil-works/pi-ai";
 import {
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   buildSessionContext,
   createAgentSession,
@@ -58,6 +64,15 @@ type ActiveBtwRequest = {
   sessionKey: string;
   abort?: () => Promise<void>;
 };
+
+type BtwModelRegistry = ExtensionCommandContext["modelRegistry"];
+
+type BtwModelRuntimeState = {
+  runtime: ModelRuntime;
+  providers: Map<string, Provider>;
+};
+
+const btwModelRuntimes = new WeakMap<BtwModelRegistry, Promise<BtwModelRuntimeState>>();
 
 export default function btwExtension(pi: ExtensionAPI): void {
   let activeRequest: ActiveBtwRequest | null = null;
@@ -227,11 +242,12 @@ async function runBtwRequest(
   });
   await resourceLoader.reload();
 
+  const modelRuntime = await createBtwModelRuntime(snapshot.modelRegistry, snapshot.model.provider);
   const { session } = await createAgentSession({
     cwd: snapshot.cwd,
     model: snapshot.model,
     thinkingLevel: snapshot.thinkingLevel,
-    modelRegistry: snapshot.modelRegistry,
+    modelRuntime,
     resourceLoader,
     tools: BTW_TOOL_NAMES,
     sessionManager,
@@ -267,6 +283,61 @@ async function runBtwRequest(
     }
     session.dispose();
   }
+}
+
+async function createBtwModelRuntime(
+  modelRegistry: BtwModelRegistry,
+  providerId: string,
+): Promise<ModelRuntime> {
+  const provider = modelRegistry.getProvider(providerId);
+  if (!provider) {
+    throw new Error(`Model provider is unavailable: ${providerId}`);
+  }
+
+  const state = await getBtwModelRuntimeState(modelRegistry);
+  if (state.providers.get(providerId) !== provider) {
+    state.runtime.registerNativeProvider(withParentAuth(provider, modelRegistry));
+    state.providers.set(providerId, provider);
+  }
+  return state.runtime;
+}
+
+async function getBtwModelRuntimeState(
+  modelRegistry: BtwModelRegistry,
+): Promise<BtwModelRuntimeState> {
+  let state = btwModelRuntimes.get(modelRegistry);
+  if (!state) {
+    state = ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    }).then((runtime) => ({ runtime, providers: new Map() }));
+    btwModelRuntimes.set(modelRegistry, state);
+  }
+
+  try {
+    return await state;
+  } catch (error) {
+    if (btwModelRuntimes.get(modelRegistry) === state) {
+      btwModelRuntimes.delete(modelRegistry);
+    }
+    throw error;
+  }
+}
+
+function withParentAuth(provider: Provider, modelRegistry: BtwModelRegistry): Provider {
+  return {
+    ...provider,
+    refreshModels: undefined, // The parent runtime owns model catalog refreshes.
+    auth: {
+      ...provider.auth,
+      apiKey: {
+        name: `${provider.name} session authentication`,
+        async resolve() {
+          return modelRegistry.getProviderAuth(provider.id);
+        },
+      },
+    },
+  };
 }
 
 function seedSessionManager(sessionManager: SessionManager, messages: AgentMessage[]): void {

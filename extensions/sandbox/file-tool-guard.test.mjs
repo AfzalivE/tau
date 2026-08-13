@@ -87,6 +87,35 @@ test("uses sandbox read and write precedence", () => {
   );
 });
 
+test("blocks sandbox-runtime mandatory write paths", () => {
+  const config = runtimeConfig({ allowWrite: ["."] });
+
+  for (const path of [".git/hooks/pre-commit", ".bashrc", ".vscode/settings.json"]) {
+    const write = getFileToolAccesses("write", { path }, cwd);
+    assert.equal(
+      findFileToolPolicyViolation(write, config, cwd)?.reason,
+      "runtime-protected-write",
+    );
+  }
+});
+
+test("honors allowGitConfig for native writes", () => {
+  const write = getFileToolAccesses("write", { path: ".git/config" }, cwd);
+
+  assert.equal(
+    findFileToolPolicyViolation(write, runtimeConfig({ allowWrite: ["."] }), cwd)?.reason,
+    "runtime-protected-write",
+  );
+  assert.equal(
+    findFileToolPolicyViolation(
+      write,
+      runtimeConfig({ allowWrite: ["."], allowGitConfig: true }),
+      cwd,
+    ),
+    null,
+  );
+});
+
 test("blocks recursive file tools that could traverse into denied paths", () => {
   const grep = getFileToolAccesses("grep", { path: "/workspace" }, cwd);
   assert.deepEqual(

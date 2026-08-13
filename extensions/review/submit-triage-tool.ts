@@ -44,6 +44,7 @@ const submitTriageTool = defineTool({
   promptSnippet: "Submit the final PR feedback triage",
   promptGuidelines: ["Use submit_triage exactly once as your final action."],
   parameters: SUBMIT_TRIAGE_PARAMS,
+  constrainedSampling: { type: "json_schema", strict: "prefer" },
 
   async execute(_toolCallId, params) {
     return {

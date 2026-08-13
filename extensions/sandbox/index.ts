@@ -28,7 +28,11 @@
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
  *     "deniedDomains": [],
- *     "allowMachLookup": []
+ *     "allowMachLookup": [
+ *       "com.apple.dnssd.service",
+ *       "com.apple.SystemConfiguration.configd",
+ *       "com.apple.SystemConfiguration.DNSConfiguration"
+ *     ]
  *   },
  *   "filesystem": {
  *     "denyRead": ["~/.ssh", "~/.aws"],
@@ -58,6 +62,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SandboxManager,
   type SandboxAskCallback,
@@ -76,18 +81,14 @@ import {
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
 import { getFileToolAccesses, guardFileToolCall } from "./file-tool-guard.js";
 import {
+  getRuntimeProtectedWriteViolations,
+  isRuntimeProtectedWriteViolation,
+} from "./runtime-protected-write.js";
+import {
   inferExactSandboxRuleMatch,
   inferSandboxRuleMatch,
   isSandboxWritablePath,
 } from "./utils.ts";
-import {
-  getMachErrorFallback,
-  getMachLookupArgumentCompletions,
-  handleMachLookupViolation,
-  isValidMachLookupRule,
-  mutateMachLookupAllowList,
-  type MachViolationResolution,
-} from "./mach-violation.js";
 import {
   formatSandboxPermissionApprovalMessage,
   formatSandboxPermissionDeniedMessage,
@@ -108,6 +109,8 @@ import type {
 // --- Constants ---
 
 const DEFAULT_PROMPT_MODE: PromptMode = "interactive";
+const IS_MACOS = process.platform === "darwin";
+const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", import.meta.url));
 const SANDBOX_DEBUG_ENV = "SRT_DEBUG";
 const DEFAULT_SANDBOX_DEBUG_VALUE = "1";
 const INHERITED_SANDBOX_DEBUG_VALUE = process.env[SANDBOX_DEBUG_ENV];
@@ -195,7 +198,11 @@ const DEFAULT_CONFIG: SandboxConfig = {
     deniedDomains: [],
     allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
-    allowMachLookup: [],
+    allowMachLookup: [
+      "com.apple.dnssd.service",
+      "com.apple.SystemConfiguration.configd",
+      "com.apple.SystemConfiguration.DNSConfiguration",
+    ],
   },
   filesystem: {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
@@ -243,7 +250,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowGitCommonDir: true,
   },
   ignoreViolations: {
-    "*": ["/__pycache__"],
+    "*": ["/__pycache__", "mach-lookup com.apple.usymptomsd"],
   },
 };
 
@@ -287,7 +294,7 @@ type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   };
 };
 
-type SandboxEventKind = "command" | "filesystem" | "network" | "mach" | "init" | "runtime";
+type SandboxEventKind = "command" | "filesystem" | "network" | "mach-lookup" | "init" | "runtime";
 type SandboxEventReason =
   | "explicit-deny-read"
   | "explicit-deny-write"
@@ -298,6 +305,7 @@ type SandboxEventReason =
   | "missing-dependencies"
   | "unsupported-platform"
   | "init-failed"
+  | "runtime-protected-write"
   | "already-approved-still-failed"
   | "blocked-command"
   | "excluded-command"
@@ -362,7 +370,12 @@ interface FilesystemViolation {
   matchedRule?: string;
 }
 
-type FilesystemViolationResolution = SharedViolationResolution;
+interface MachLookupViolation {
+  service: string;
+}
+
+type ViolationResolution = SharedViolationResolution;
+type FilesystemViolationResolution = ViolationResolution;
 
 // --- Helpers ---
 
@@ -413,6 +426,19 @@ function notify(ctx: ExtensionContext, text: string, level: UiLevel = "info"): v
   else console.log(text);
 }
 
+function announceSandboxState(pi: ExtensionAPI, ctx: ExtensionContext, enabled: boolean): void {
+  const text = `Sandbox ${enabled ? "enabled" : "disabled"}`;
+  notify(ctx, text, "info");
+  pi.sendMessage(
+    {
+      customType: "sandbox-state",
+      content: text,
+      display: false,
+    },
+    { triggerTurn: false },
+  );
+}
+
 function showHelp(ctx: ExtensionContext): void {
   const lines = [
     "Usage:",
@@ -423,7 +449,12 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox debug <on|off>",
     "  /sandbox mode <interactive|non-interactive>",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
-    "  /sandbox mach-lookup <add|remove> <service>",
+    ...(IS_MACOS
+      ? [
+          "  /sandbox mach-lookup <add|remove> <service>",
+          "    Service rules support one trailing *; use * for all services.",
+        ]
+      : []),
     "  /sandbox filesystem <deny-read|allow-write|deny-write> <add|remove> <path>",
     "",
     "Startup flags:",
@@ -498,7 +529,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "debug ", label: "debug" },
   { value: "mode ", label: "mode" },
   { value: "network ", label: "network" },
-  { value: "mach-lookup ", label: "mach-lookup" },
+  ...(IS_MACOS ? [{ value: "mach-lookup ", label: "mach-lookup" }] : []),
   { value: "filesystem ", label: "filesystem" },
   { value: "help", label: "help" },
 ];
@@ -567,6 +598,37 @@ function getStringValueCompletions(
     value: `${base}${escapeSlashCommandArg(value)}`,
     label: value,
   }));
+}
+
+function getMachLookupArgumentCompletions(options: {
+  tokens: string[];
+  endsWithSpace: boolean;
+  runtimeConfig: SandboxRuntimeConfig | null;
+}): Array<{ value: string; label: string; description?: string }> | null {
+  const { tokens, endsWithSpace, runtimeConfig } = options;
+
+  if (tokens.length === 1 && endsWithSpace) {
+    return getCommandCompletions("mach-lookup ", "", SANDBOX_LIST_OPERATION_COMPLETIONS);
+  }
+  if (tokens.length === 2 && !endsWithSpace) {
+    return getCommandCompletions(
+      "mach-lookup ",
+      tokens[1] ?? "",
+      SANDBOX_LIST_OPERATION_COMPLETIONS,
+    );
+  }
+
+  if (tokens[1]?.toLowerCase() !== "remove") return null;
+
+  const values = runtimeConfig?.network.allowMachLookup ?? [];
+  const valueBase = "mach-lookup remove ";
+  if (tokens.length === 2 && endsWithSpace) {
+    return getStringValueCompletions(valueBase, "", values);
+  }
+  if (tokens.length === 3 && !endsWithSpace) {
+    return getStringValueCompletions(valueBase, tokens[2] ?? "", values);
+  }
+  return null;
 }
 
 function getSandboxArgumentCompletions(
@@ -642,15 +704,8 @@ function getSandboxArgumentCompletions(
     return null;
   }
 
-  if (subcommand === "mach-lookup") {
-    return getMachLookupArgumentCompletions({
-      tokens,
-      endsWithSpace,
-      runtimeConfig,
-      operationOptions: SANDBOX_LIST_OPERATION_COMPLETIONS,
-      getCommandCompletions,
-      getStringValueCompletions,
-    });
+  if (subcommand === "mach-lookup" && IS_MACOS) {
+    return getMachLookupArgumentCompletions({ tokens, endsWithSpace, runtimeConfig });
   }
 
   if (subcommand === "filesystem") {
@@ -1258,6 +1313,57 @@ function extractViolationProcessName(line: string): string | undefined {
   return processName.split("/").pop() || processName;
 }
 
+function detectMachLookupViolationFromLine(line: string): MachLookupViolation | null {
+  const match = line.match(/\bdeny\(\d+\)\s+mach-lookup\s+([^\s()"'*]+)/i);
+  const service = match?.[1];
+  return service ? { service } : null;
+}
+
+function detectMachLookupViolations(lines: string[]): MachLookupViolation[] {
+  const violationsByService = new Map<string, MachLookupViolation>();
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const violation = detectMachLookupViolationFromLine(lines[index]);
+    if (violation && !violationsByService.has(violation.service)) {
+      violationsByService.set(violation.service, violation);
+    }
+  }
+
+  return Array.from(violationsByService.values());
+}
+
+function isValidMachLookupRule(rule: string): boolean {
+  const trimmed = rule.trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+
+  const prefix = trimmed.endsWith("*") ? trimmed.slice(0, -1) : trimmed;
+  return !prefix.includes("*");
+}
+
+function matchesMachLookupRule(service: string, rule: string): boolean {
+  if (rule === "*") return true;
+  if (rule.endsWith("*")) return service.startsWith(rule.slice(0, -1));
+  return service === rule;
+}
+
+function mutateMachLookupAllowList(
+  runtimeConfig: SandboxRuntimeConfig,
+  op: ListOp,
+  service: string,
+): boolean {
+  runtimeConfig.network.allowMachLookup ??= [];
+  return mutateStringList(runtimeConfig.network.allowMachLookup, op, service);
+}
+
+function isMachLookupAlreadyAllowed(
+  runtimeConfig: SandboxRuntimeConfig | null,
+  service: string,
+): boolean {
+  return (runtimeConfig?.network.allowMachLookup ?? []).some((rule) =>
+    matchesMachLookupRule(service, rule),
+  );
+}
+
 function detectFilesystemViolationFromLine(line: string): FilesystemViolation | null {
   // Runtime emits concrete op variants (e.g. file-write-create/unlink, file-read-data).
   const lower = line.toLowerCase();
@@ -1291,6 +1397,7 @@ function detectFilesystemViolations(
   output: string,
   fallbackOutput: string = output,
   skipViolationLines = 0,
+  allowOutputFallback = true,
 ): FilesystemViolation[] {
   const violations: FilesystemViolation[] = [];
   const allViolationLines = extractSandboxViolationLines(output);
@@ -1304,7 +1411,7 @@ function detectFilesystemViolations(
     if (violation) violations.push(violation);
   }
 
-  if (violations.length > 0) return violations;
+  if (violations.length > 0 || !allowOutputFallback) return violations;
 
   const hasEperm = /\bEPERM\b/i.test(fallbackOutput);
   const hasOperationNotPermitted = /(?:^|\n)[^\n]*Operation not permitted(?:$|\n)/i.test(
@@ -1378,6 +1485,22 @@ function formatTraversalNotice(paths: string[]): string {
   const suffix = paths.length > 3 ? ", ..." : "";
   const label = paths.length === 1 ? "path" : "paths";
   return `[sandbox] Continued after skipping protected ${label}: ${visiblePaths}${suffix}`;
+}
+
+function formatRuntimeProtectedWriteNotice(
+  violations: FilesystemViolation[],
+  continued: boolean,
+): string {
+  const paths = violations
+    .map((violation) => violation.path)
+    .filter((path): path is string => path !== undefined);
+  if (paths.length === 0) return "";
+
+  const visiblePaths = paths.slice(0, 3).join(", ");
+  const suffix = paths.length > 3 ? ", ..." : "";
+  const label = paths.length === 1 ? "write" : "writes";
+  const prefix = continued ? "Continued after blocking" : "Blocked";
+  return `[sandbox] ${prefix} runtime-protected ${label} that sandbox config cannot override: ${visiblePaths}${suffix}`;
 }
 
 function escapeSlashCommandArg(value: string): string {
@@ -1616,6 +1739,8 @@ async function handleFilesystemViolation(options: {
   existingViolationCount?: number;
   recordEvent?: (event: SandboxEvent) => void;
   autoRetryAvailable?: boolean;
+  allowOutputFallback?: boolean;
+  runtimeProtectedWriteViolations?: FilesystemViolation[];
 }): Promise<FilesystemViolationResolution | null> {
   const {
     pi,
@@ -1632,18 +1757,33 @@ async function handleFilesystemViolation(options: {
     existingViolationCount,
     recordEvent,
     autoRetryAvailable = true,
+    allowOutputFallback = true,
+    runtimeProtectedWriteViolations = [],
   } = options;
   const violations = explicitViolation
     ? [explicitViolation]
-    : detectFilesystemViolations(output, rawOutput, existingViolationCount ?? 0);
-  if (violations.length === 0) return null;
+    : detectFilesystemViolations(
+        output,
+        rawOutput,
+        existingViolationCount ?? 0,
+        allowOutputFallback,
+      );
+  const runtimeProtectedWritePaths = new Set(
+    runtimeProtectedWriteViolations.map((violation) => violation.path).filter(Boolean),
+  );
+  const actionableViolations = violations.filter((violation) => {
+    const isRuntimeProtectedWrite =
+      violation.kind !== "read" && runtimeProtectedWritePaths.has(violation.path);
+    return !isRuntimeProtectedWrite && !isTraversalViolation(runtimeConfig, violation, cwd);
+  });
+  if (actionableViolations.length === 0) return null;
 
   const violation =
-    violations.find((candidate) => {
+    actionableViolations.find((candidate) => {
       const candidateAction = buildFilesystemAllowAction(runtimeConfig, candidate, cwd);
       if (!candidateAction) return false;
       return !isFilesystemAllowActionAlreadyApplied(runtimeConfig, candidateAction);
-    }) ?? violations[0];
+    }) ?? actionableViolations[0];
 
   const summary = formatFilesystemViolationSummary(violation);
   const target = describeFilesystemViolationTarget(violation);
@@ -1753,6 +1893,183 @@ async function handleFilesystemViolation(options: {
   }
 }
 
+function formatViolationAllowRetryMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nGranting access and retrying the command per user request...\n\n`;
+}
+
+function formatViolationAllowAdaptMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nAccess granted for this session. Retry the command manually if appropriate.`;
+}
+
+function formatViolationDeniedMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nAccess remains denied for this session.`;
+}
+
+function formatViolationAlreadyAllowedMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nAccess had already been granted for this session. The remaining failure may be unrelated to sandbox policy.`;
+}
+
+function formatViolationRetrySucceededMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nAccess granted for this session and the command was retried successfully.`;
+}
+
+function formatViolationRetryFailedMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nAccess granted for this session and the command was retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.`;
+}
+
+function formatViolationRetrySkippedMessage(blockedTarget: string): string {
+  return `\n${blockedTarget}\n\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
+}
+
+function formatMachLookupBlockedTarget(service: string): string {
+  return `Sandbox blocked access to macOS service ${service}.`;
+}
+
+function buildMachLookupAllowCommand(service: string): string {
+  return `/sandbox mach-lookup add ${escapeSlashCommandArg(service)}`;
+}
+
+function formatMachLookupViolationSummary(service: string): string {
+  return `[sandbox] Blocked macOS service lookup: ${service}`;
+}
+
+function describeMachLookupEventSummary(
+  reason: SandboxEventReason,
+  outcome: SandboxEventOutcome,
+): string {
+  if (outcome === "allowed") return "user allowed macOS service lookup for this session";
+  if (reason === "already-approved-still-failed") {
+    return "macOS service lookup was previously allowed for this session but is still failing";
+  }
+  return "macOS service lookup is not in the allowed service list";
+}
+
+async function handleMachLookupViolation(options: {
+  pi: ExtensionAPI;
+  ctx: ExtensionContext | null;
+  promptMode: PromptMode;
+  runtimeConfig: SandboxRuntimeConfig;
+  violations: MachLookupViolation[];
+  command: string;
+  cwd?: string;
+  pendingPrompts?: Map<string, Promise<ViolationResolution | null>>;
+  applyRuntimeConfigForSession?: (
+    ctx: ExtensionContext,
+    runtimeConfig: SandboxRuntimeConfig,
+  ) => void;
+  recordEvent?: (event: SandboxEvent) => void;
+  autoRetryAvailable?: boolean;
+}): Promise<ViolationResolution | null> {
+  const {
+    pi,
+    ctx,
+    promptMode,
+    runtimeConfig,
+    violations,
+    command,
+    cwd,
+    pendingPrompts,
+    applyRuntimeConfigForSession,
+    recordEvent,
+    autoRetryAvailable = true,
+  } = options;
+  if (violations.length === 0) return null;
+
+  const violation =
+    violations.find((candidate) => !isMachLookupAlreadyAllowed(runtimeConfig, candidate.service)) ??
+    violations[0];
+  const { service } = violation;
+  const blockedTarget = formatMachLookupBlockedTarget(service);
+  const allowCommand = buildMachLookupAllowCommand(service);
+  const alreadyApproved = isMachLookupAlreadyAllowed(runtimeConfig, service);
+  const eventReason: SandboxEventReason = alreadyApproved
+    ? "already-approved-still-failed"
+    : "missing-mach-lookup";
+
+  const recordMachLookupEvent = (outcome: SandboxEventOutcome): void => {
+    recordEvent?.({
+      timestamp: Date.now(),
+      kind: "mach-lookup",
+      outcome,
+      reason: eventReason,
+      target: service,
+      command,
+      cwd,
+      summary: describeMachLookupEventSummary(eventReason, outcome),
+      suggestedCommand: outcome === "blocked" && !alreadyApproved ? allowCommand : undefined,
+    });
+  };
+
+  if (promptMode === "non-interactive" || !ctx?.hasUI) {
+    recordMachLookupEvent("blocked");
+    return {
+      kind: "deny",
+      message: `${formatMachLookupViolationSummary(service)}\n[sandbox] To temporarily allow for this session, run: ${allowCommand}`,
+    };
+  }
+
+  if (alreadyApproved) {
+    recordMachLookupEvent("blocked");
+    return { kind: "allow-adapt", message: formatViolationAlreadyAllowedMessage(blockedTarget) };
+  }
+
+  const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
+  const existingPrompt = pendingPrompts?.get(promptKey);
+  if (existingPrompt) return existingPrompt;
+
+  const promptTask: Promise<ViolationResolution | null> = (async () => {
+    try {
+      const selection = await withPromptSignal(pi, () =>
+        ctx.ui.select(
+          `Sandbox blocked access to macOS service ${service}`,
+          getViolationPromptOptions(autoRetryAvailable),
+        ),
+      );
+      const decision = parseViolationPromptSelection(selection, autoRetryAvailable);
+      if (decision === "deny") {
+        recordMachLookupEvent("blocked");
+        return { kind: "deny", message: formatViolationDeniedMessage(blockedTarget) };
+      }
+
+      const nextConfig = cloneRuntimeConfig(runtimeConfig);
+      const changed = mutateMachLookupAllowList(nextConfig, "add", service);
+      if (changed) {
+        applyRuntimeConfigForSession?.(ctx, nextConfig);
+      }
+
+      recordMachLookupEvent("allowed");
+
+      if (decision === "allow-retry") {
+        return {
+          kind: "allow-retry",
+          message: formatViolationAllowRetryMessage(blockedTarget),
+          retrySuccessMessage: formatViolationRetrySucceededMessage(blockedTarget),
+          retryFailureMessage: formatViolationRetryFailedMessage(blockedTarget),
+          retrySkippedMessage: formatViolationRetrySkippedMessage(blockedTarget),
+        };
+      }
+
+      return {
+        kind: "allow-adapt",
+        message: changed
+          ? formatViolationAllowAdaptMessage(blockedTarget)
+          : formatViolationAlreadyAllowedMessage(blockedTarget),
+      };
+    } catch {
+      return null;
+    }
+  })();
+
+  if (!pendingPrompts) return promptTask;
+
+  pendingPrompts.set(promptKey, promptTask);
+  try {
+    return await promptTask;
+  } finally {
+    pendingPrompts.delete(promptKey);
+  }
+}
+
 interface SandboxedBashOpsOptions {
   pi: ExtensionAPI;
   getContext: () => ExtensionContext | null;
@@ -1770,17 +2087,20 @@ interface BashAttemptResult {
   exitCode: number | null;
   combinedOutput: string;
   interruptedByFilesystemViolation: boolean;
+  runtimeProtectedWriteViolations: FilesystemViolation[];
 }
 
 interface ProcessedSandboxAttempt {
   exitCode: number | null;
   postamble: string;
   resolution: FilesystemViolationResolution | null;
+  runtimeProtectedWriteViolations: FilesystemViolation[];
 }
 
 interface PreparedSandboxAttempt {
   attempt: BashAttemptResult;
   existingViolationCount: number;
+  runtimeConfig: SandboxRuntimeConfig | null;
 }
 
 function killProcessGroup(
@@ -1847,7 +2167,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     recordEvent,
   } = options;
   const pendingFilesystemPrompts = new Map<string, Promise<FilesystemViolationResolution | null>>();
-  const pendingMachLookupPrompts = new Map<string, Promise<MachViolationResolution | null>>();
+  const pendingMachLookupPrompts = new Map<string, Promise<ViolationResolution | null>>();
 
   let executionQueue: Promise<void> = Promise.resolve();
 
@@ -1870,6 +2190,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     command: string,
     wrappedCommand: string,
     cwd: string,
+    runtimeConfig: SandboxRuntimeConfig | null,
     onData: (data: Buffer) => void,
     existingViolationCount: number,
     signal?: AbortSignal,
@@ -1888,6 +2209,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       let timedOut = false;
       let interruptedByFilesystemViolation = false;
       let seenViolationCount = existingViolationCount;
+      const runtimeProtectedWriteViolations = new Map<string, FilesystemViolation>();
       let timeoutHandle: NodeJS.Timeout | undefined;
       let timeoutEscalationHandle: NodeJS.Timeout | undefined;
       let filesystemStopEscalationHandle: NodeJS.Timeout | undefined;
@@ -1902,11 +2224,9 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         }, 500);
       };
 
-      // sandbox-runtime only provides live filesystem violation events on macOS.
-      // Upstream documents Linux violation monitoring as future work via
-      // automatic strace-based detection integrated with the violation store,
-      // but there is no Linux implementation yet:
-      // https://github.com/anthropic-experimental/sandbox-runtime#known-limitations-and-future-work
+      // The Linux monitor filters attempts against configured write rules and does not
+      // report mandatory runtime denies within already-allowed paths, so runtime-protected
+      // continuation remains macOS-only.
       const unsubscribeViolations =
         process.platform !== "darwin"
           ? () => undefined
@@ -1918,13 +2238,21 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
               const newViolations = violations.slice(seenViolationCount);
               seenViolationCount = violations.length;
 
-              const runtimeConfig = getRuntimeConfig();
-              const shouldStop = newViolations.some((violation) => {
+              for (const violation of newViolations) {
                 const filesystemViolation = detectFilesystemViolationFromLine(violation.line);
-                if (!filesystemViolation) return false;
-                return !isTraversalViolation(runtimeConfig, filesystemViolation, cwd);
-              });
-              if (shouldStop) {
+                if (!filesystemViolation) continue;
+                if (isTraversalViolation(runtimeConfig, filesystemViolation, cwd)) continue;
+
+                if (isRuntimeProtectedWriteViolation(runtimeConfig, filesystemViolation, cwd)) {
+                  if (filesystemViolation.path) {
+                    runtimeProtectedWriteViolations.set(
+                      filesystemViolation.path,
+                      filesystemViolation,
+                    );
+                  }
+                  continue;
+                }
+
                 stopForFilesystemViolation();
               }
             });
@@ -1988,6 +2316,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           exitCode: interruptedByFilesystemViolation && code === null ? 1 : code,
           combinedOutput: Buffer.concat(chunks).toString("utf-8"),
           interruptedByFilesystemViolation,
+          runtimeProtectedWriteViolations: Array.from(runtimeProtectedWriteViolations.values()),
         });
       });
     });
@@ -2105,7 +2434,13 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       applyRuntimeConfigForSession,
     });
 
-    const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
+    const runtimeConfig = getRuntimeConfig();
+    const attemptRuntimeConfig = runtimeConfig ? cloneRuntimeConfig(runtimeConfig) : null;
+    const wrappedCommand = await SandboxManager.wrapWithSandbox(
+      command,
+      IS_MACOS ? MACOS_SANDBOX_SHELL : undefined,
+      attemptRuntimeConfig ?? undefined,
+    );
     const existingViolationCount =
       SandboxManager.getSandboxViolationStore().getViolationsForCommand(command).length;
 
@@ -2114,13 +2449,14 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         command,
         wrappedCommand,
         cwd,
+        attemptRuntimeConfig,
         onData,
         existingViolationCount,
         signal,
         timeout,
         env,
       );
-      return { attempt, existingViolationCount };
+      return { attempt, existingViolationCount, runtimeConfig: attemptRuntimeConfig };
     } catch (err) {
       safeCleanupAfterCommand();
       throw err;
@@ -2132,42 +2468,95 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     command: string;
     cwd: string;
     existingViolationCount: number;
+    runtimeConfig: SandboxRuntimeConfig | null;
     autoRetryAvailable: boolean;
   }): Promise<ProcessedSandboxAttempt> {
-    const { attempt, command, cwd, existingViolationCount, autoRetryAvailable } = options;
-    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedByFilesystemViolation;
-    if (commandSucceeded) {
-      return { exitCode: attempt.exitCode, postamble: "", resolution: null };
-    }
-
+    const { attempt, command, cwd, existingViolationCount, runtimeConfig, autoRetryAvailable } =
+      options;
     const annotatedOutput = SandboxManager.annotateStderrWithSandboxFailures(
       command,
       attempt.combinedOutput,
     );
-    const runtimeConfig = getRuntimeConfig();
+    // Capture violations delivered after the child closed but before post-processing.
+    const storedViolationLines = SandboxManager.getSandboxViolationStore()
+      .getViolationsForCommand(command)
+      .slice(existingViolationCount)
+      .map((violation) => violation.line);
+    const storedFilesystemViolations = storedViolationLines
+      .map((line) => detectFilesystemViolationFromLine(line))
+      .filter((violation): violation is FilesystemViolation => violation !== null);
+    const runtimeProtectedWriteViolations = getRuntimeProtectedWriteViolations(
+      runtimeConfig,
+      [...attempt.runtimeProtectedWriteViolations, ...storedFilesystemViolations],
+      cwd,
+    );
+    const machLookupViolations = detectMachLookupViolations(storedViolationLines);
+    let postamble = extractAppendedSandboxAnnotation(
+      attempt.combinedOutput,
+      annotatedOutput,
+      existingViolationCount,
+    );
+
+    if (runtimeProtectedWriteViolations.length > 0) {
+      const notice = formatRuntimeProtectedWriteNotice(
+        runtimeProtectedWriteViolations,
+        !attempt.interruptedByFilesystemViolation,
+      );
+      postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
+
+      for (const violation of runtimeProtectedWriteViolations) {
+        recordEvent?.({
+          timestamp: Date.now(),
+          kind: "filesystem",
+          outcome: "blocked",
+          reason: "runtime-protected-write",
+          target: violation.path,
+          command,
+          cwd,
+          summary: "filesystem write is protected by the sandbox runtime",
+        });
+      }
+    }
+
+    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedByFilesystemViolation;
+    if (commandSucceeded) {
+      return {
+        exitCode: attempt.exitCode,
+        postamble,
+        resolution: null,
+        runtimeProtectedWriteViolations,
+      };
+    }
+
     const traversalPaths = getTraversalPaths({
       runtimeConfig,
       output: annotatedOutput,
       cwd,
       skipViolationLines: existingViolationCount,
     });
-    const effectiveExitCode = traversalPaths ? 0 : attempt.exitCode;
-    let postamble = extractAppendedSandboxAnnotation(
-      attempt.combinedOutput,
-      annotatedOutput,
-      existingViolationCount,
-    );
-    let resolution: FilesystemViolationResolution | null = null;
+    const continuedTraversal = machLookupViolations.length === 0 ? traversalPaths : null;
+    const effectiveExitCode = continuedTraversal ? 0 : attempt.exitCode;
+    let resolution: ViolationResolution | null = null;
 
-    if (traversalPaths) {
-      const notice = formatTraversalNotice(traversalPaths);
+    if (continuedTraversal) {
+      const notice = formatTraversalNotice(continuedTraversal);
       postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
-    } else if (runtimeConfig) {
+    } else {
+      const currentRuntimeConfig = getRuntimeConfig();
+      if (!currentRuntimeConfig) {
+        return {
+          exitCode: effectiveExitCode,
+          postamble,
+          resolution,
+          runtimeProtectedWriteViolations,
+        };
+      }
+
       resolution = await handleFilesystemViolation({
         pi,
         ctx: getContext(),
         promptMode: getPromptMode(),
-        runtimeConfig,
+        runtimeConfig: currentRuntimeConfig,
         output: annotatedOutput,
         rawOutput: attempt.combinedOutput,
         command,
@@ -2177,44 +2566,24 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         existingViolationCount,
         recordEvent,
         autoRetryAvailable,
+        runtimeProtectedWriteViolations,
+        allowOutputFallback: machLookupViolations.length === 0,
       });
 
       if (!resolution) {
         resolution = await handleMachLookupViolation({
+          pi,
           ctx: getContext(),
           promptMode: getPromptMode(),
-          runtimeConfig,
-          output: annotatedOutput,
+          runtimeConfig: currentRuntimeConfig,
+          violations: machLookupViolations,
           command,
           cwd,
           pendingPrompts: pendingMachLookupPrompts,
           applyRuntimeConfigForSession,
-          existingViolationCount,
           recordEvent,
           autoRetryAvailable,
-          withPromptSignal: (run) => withPromptSignal(pi, run),
-          getPromptOptions: getViolationPromptOptions,
-          parsePromptSelection: parseViolationPromptSelection,
-          showPermissionSelect: showSandboxPermissionSelect,
-          formatPermissionDenied: formatSandboxPermissionDeniedMessage,
-          escapeSlashCommandArg,
         });
-      }
-
-      const machErrorFallback =
-        !resolution &&
-        getMachErrorFallback({
-          output: attempt.combinedOutput,
-          command,
-          cwd,
-        });
-      if (machErrorFallback) {
-        recordEvent?.(machErrorFallback.event);
-        postamble = appendOutputPostamble(
-          postamble,
-          machErrorFallback.message,
-          attempt.combinedOutput,
-        );
       }
 
       if (resolution) {
@@ -2222,7 +2591,12 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       }
     }
 
-    return { exitCode: effectiveExitCode, postamble, resolution };
+    return {
+      exitCode: effectiveExitCode,
+      postamble,
+      resolution,
+      runtimeProtectedWriteViolations,
+    };
   }
 
   return {
@@ -2276,6 +2650,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
             command,
             cwd,
             existingViolationCount: initialRun.existingViolationCount,
+            runtimeConfig: initialRun.runtimeConfig,
             autoRetryAvailable: true,
           });
         } catch (postProcessError) {
@@ -2320,6 +2695,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
             command,
             cwd,
             existingViolationCount: retryRun.existingViolationCount,
+            runtimeConfig: retryRun.runtimeConfig,
             autoRetryAvailable: false,
           });
         } catch (postProcessError) {
@@ -2335,7 +2711,10 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
             retryResolution.retrySuccessMessage,
             retryRun.attempt.combinedOutput,
           );
-        } else if (!processedRetry.resolution) {
+        } else if (
+          !processedRetry.resolution &&
+          processedRetry.runtimeProtectedWriteViolations.length === 0
+        ) {
           retryPostamble = appendOutputPostamble(
             retryPostamble,
             retryResolution.retryFailureMessage,
@@ -2438,6 +2817,9 @@ function describeFilesystemEventSummary(
 
   if (reason === "explicit-deny-read") return "filesystem read matched a deny-read rule";
   if (reason === "explicit-deny-write") return "filesystem write matched a deny-write rule";
+  if (reason === "runtime-protected-write") {
+    return "filesystem write is protected by the sandbox runtime";
+  }
   if (reason === "already-approved-still-failed") {
     return "filesystem access was previously allowed for this session but is still failing";
   }
@@ -3043,6 +3425,24 @@ export default function (pi: ExtensionAPI) {
             };
           }
 
+          if (policyViolation.reason === "runtime-protected-write") {
+            const rule = policyViolation.matchedRule ?? "mandatory write policy";
+            recordSandboxEvent({
+              timestamp: Date.now(),
+              kind: "filesystem",
+              outcome: "blocked",
+              reason: "runtime-protected-write",
+              target: policyViolation.access.path,
+              command: `${event.toolName} ${policyViolation.access.path}`,
+              cwd: ctx.cwd,
+              summary: "native file-tool write is protected by the sandbox runtime",
+            });
+            return {
+              allow: false,
+              reason: `Sandbox blocked filesystem write to ${policyViolation.access.path}: ${rule} is protected by sandbox-runtime and cannot be allowed for this session.`,
+            };
+          }
+
           const violation: FilesystemViolation = {
             kind: policyViolation.access.kind,
             path: policyViolation.access.path,
@@ -3237,7 +3637,7 @@ export default function (pi: ExtensionAPI) {
 
         setSandboxStatus(ctx, true, runtimeConfig, promptMode);
 
-        notify(ctx, "Sandbox enabled", "info");
+        announceSandboxState(pi, ctx, true);
         return;
       }
 
@@ -3267,7 +3667,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        notify(ctx, "Sandbox disabled", "info");
+        announceSandboxState(pi, ctx, false);
         return;
       }
 
@@ -3296,9 +3696,13 @@ export default function (pi: ExtensionAPI) {
           `    allowLocalBinding: ${runtimeConfig.network.allowLocalBinding ? "true" : "false"}`,
           `    allowAllUnixSockets: ${runtimeConfig.network.allowAllUnixSockets ? "true" : "false"}`,
           `    allowUnixSockets: ${runtimeConfig.network.allowUnixSockets?.join(", ") || "(none)"}`,
-          "",
-          "  Mach lookup:",
-          `    Allowed: ${runtimeConfig.network.allowMachLookup?.join(", ") || "(none)"}`,
+          ...(IS_MACOS
+            ? [
+                "",
+                "  macOS service lookup (mach-lookup):",
+                `    Allowed: ${runtimeConfig.network.allowMachLookup?.join(", ") || "(none)"}`,
+              ]
+            : []),
           "",
           "  Filesystem:",
           `    Deny Read: ${runtimeConfig.filesystem.denyRead.join(", ") || "(none)"}`,
@@ -3399,6 +3803,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "mach-lookup") {
+        if (!IS_MACOS) {
+          notify(ctx, "Mach service lookup controls are only available on macOS.", "warning");
+          return;
+        }
+
         const runtimeConfig = requireRuntimeConfig(ctx, sandboxState);
         if (!runtimeConfig) return;
 

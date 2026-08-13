@@ -2,11 +2,8 @@ import { lstat, readlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { containsGlobChars } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
-import {
-  inferSandboxRuleMatch,
-  normalizeSandboxPath,
-  resolveSandboxPath,
-} from "./utils.ts";
+import { findMandatoryWriteRule } from "./mandatory-write-policy.ts";
+import { inferSandboxRuleMatch, normalizeSandboxPath, resolveSandboxPath } from "./utils.ts";
 
 export type FileToolAccessKind = "read" | "write";
 export type FileToolReadAccess = "metadata" | "data";
@@ -21,7 +18,8 @@ export interface FileToolAccess {
 export type FileToolPolicyViolationReason =
   | "explicit-deny-read"
   | "explicit-deny-write"
-  | "missing-allow-write";
+  | "missing-allow-write"
+  | "runtime-protected-write";
 
 export interface FileToolPolicyViolation {
   access: FileToolAccess;
@@ -119,6 +117,19 @@ export function findFileToolPolicyViolation(
         return { access, reason: "explicit-deny-read", matchedRule: traversalRule };
       }
       continue;
+    }
+
+    const mandatoryWriteRule = findMandatoryWriteRule(
+      access.path,
+      cwd,
+      runtimeConfig.filesystem.allowGitConfig === true,
+    );
+    if (mandatoryWriteRule) {
+      return {
+        access,
+        reason: "runtime-protected-write",
+        matchedRule: mandatoryWriteRule,
+      };
     }
 
     const deniedWrite = inferSandboxRuleMatch(access.path, runtimeConfig.filesystem.denyWrite, cwd);

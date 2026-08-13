@@ -95,14 +95,19 @@ interface ModelRequestAuth {
   model: Model<Api>;
   apiKey?: string;
   headers?: Record<string, string>;
+  env?: Record<string, string>;
 }
 
 type ModelAuthLookup = {
   find: (provider: string, modelId: string) => Model<Api> | undefined;
-  getApiKeyAndHeaders: (
-    model: Model<Api>,
-  ) => Promise<
-    { ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }
+  getApiKeyAndHeaders: (model: Model<Api>) => Promise<
+    | {
+        ok: true;
+        apiKey?: string;
+        headers?: Record<string, string>;
+        env?: Record<string, string>;
+      }
+    | { ok: false; error: string }
   >;
 };
 
@@ -149,7 +154,7 @@ async function resolveModelRequestAuth(
   model: Model<Api>,
 ): Promise<ModelRequestAuth | null> {
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
-  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers } : null;
+  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env } : null;
 }
 
 /**
@@ -542,6 +547,7 @@ export default function (pi: ExtensionAPI) {
               {
                 apiKey: extractionSelection.apiKey,
                 headers: extractionSelection.headers,
+                env: extractionSelection.env,
                 signal: loader.signal,
               },
             );

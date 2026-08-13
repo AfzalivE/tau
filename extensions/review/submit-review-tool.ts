@@ -35,11 +35,6 @@ const SUBMIT_REVIEW_PARAMS = Type.Object(
       ),
       { description: "Final review findings" },
     ),
-    note: Type.Optional(
-      Type.String({
-        description: "Optional note when submitting zero findings or explaining uncertainty.",
-      }),
-    ),
   },
   { additionalProperties: false },
 );
@@ -51,6 +46,7 @@ const submitReviewTool = defineTool({
   promptSnippet: "Submit the final review findings",
   promptGuidelines: ["Use submit_review exactly once as your final action."],
   parameters: SUBMIT_REVIEW_PARAMS,
+  constrainedSampling: { type: "json_schema", strict: "prefer" },
 
   async execute(_toolCallId, params) {
     return {
