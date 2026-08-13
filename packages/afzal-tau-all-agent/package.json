@@ -1,6 +1,6 @@
 {
   "name": "afzal-tau-all-agent",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "Full fork-specific Tau package for Pi with every extension except memory, a curated fork skill set, and the Tau theme",
   "keywords": [

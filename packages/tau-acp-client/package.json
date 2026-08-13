@@ -1,6 +1,6 @@
 {
   "name": "tau-acp-client",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "Standalone Pi package for using Claude and Codex agents via the Agent Client Protocol",
   "keywords": [
