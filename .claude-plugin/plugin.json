@@ -6,6 +6,7 @@
   "repository": "https://github.com/AfzalivE/tau",
   "license": "MIT",
   "skills": [
+    "./skills/address-pr-comments",
     "./skills/browser-tools",
     "./skills/cald",
     "./skills/dream",

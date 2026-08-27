@@ -213,6 +213,7 @@ Bundled in `afzal-tau-all-agent`.
 
 | Skill                           | Description                                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `address-pr-comments`           | Address PR feedback through disposition, per-change commits, approval, push, and replies.   |
 | `material-3`                    | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.       |
 | `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
 | `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |

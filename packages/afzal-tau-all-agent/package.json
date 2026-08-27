@@ -78,6 +78,7 @@
       "../../extensions/worktree.ts"
     ],
     "skills": [
+      "../../skills/address-pr-comments",
       "../../skills/browser-tools",
       "../../skills/git-clean-history",
       "../../skills/git-commit",
