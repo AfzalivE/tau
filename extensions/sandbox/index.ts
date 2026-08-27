@@ -69,11 +69,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  SandboxManager,
-  type SandboxAskCallback,
-  type SandboxRuntimeConfig,
-} from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 // Deep import because the public package does not expose its path normalizer.
 import { normalizePathForSandbox } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import {
@@ -96,6 +92,7 @@ import {
   JVM_PROXY_ENV,
   type JvmProxyEndpoint,
 } from "./jvm-proxy-options.ts";
+import { createNetworkAskCallback } from "./network-permission.js";
 import {
   getRuntimeProtectedWriteViolations,
   isRuntimeProtectedWriteViolation,
@@ -2822,27 +2819,6 @@ function describeFilesystemEventSummary(
   return "sandbox blocked filesystem access";
 }
 
-function buildNetworkBlockCommand(reason: SandboxEventReason, host: string): string | undefined {
-  if (reason === "explicit-deny-domain") {
-    return `/sandbox network deny remove ${escapeSlashCommandArg(host)}`;
-  }
-  if (reason === "missing-allowed-domain") {
-    return `/sandbox network allow add ${escapeSlashCommandArg(host)}`;
-  }
-  return undefined;
-}
-
-function describeNetworkEventSummary(
-  reason: SandboxEventReason,
-  outcome: SandboxEventOutcome,
-): string {
-  if (outcome === "allowed") return "user allowed network domain for this session";
-  if (reason === "explicit-deny-domain") return "network access matched a deny list entry";
-  if (reason === "missing-allowed-domain")
-    return "network access target is not in the allowed domain list";
-  return "sandbox blocked network access";
-}
-
 function formatSandboxEventTimestamp(timestamp: number): string {
   const date = new Date(timestamp);
   const hours = `${date.getHours()}`.padStart(2, "0");
@@ -3083,25 +3059,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function recordNetworkEvent(
-    outcome: SandboxEventOutcome,
-    reason: SandboxEventReason,
-    host: string,
-    port?: number,
-  ): void {
-    const target = port ? `${host}:${port}` : host;
-    recordSandboxEvent({
-      timestamp: Date.now(),
-      kind: "network",
-      outcome,
-      reason,
-      target,
-      cwd: sessionCwd,
-      summary: describeNetworkEventSummary(reason, outcome),
-      suggestedCommand: outcome === "blocked" ? buildNetworkBlockCommand(reason, host) : undefined,
-    });
-  }
-
   function recordRuntimeEvent(
     kind: SandboxEventKind,
     reason: SandboxEventReason,
@@ -3166,104 +3123,46 @@ export default function (pi: ExtensionAPI) {
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
-  const createNetworkAskCallback = (): SandboxAskCallback => {
-    return async ({ host, port }) => {
-      if (sandboxState.status === "suspended") return true;
+  const networkAskCallback = createNetworkAskCallback({
+    getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
+    isSuspended: () => sandboxState.status === "suspended",
+    getPromptMode: () => promptMode,
+    canPrompt: () => Boolean(sessionContext?.hasUI),
+    requestApproval: async ({ host, target, suggestedCommand }) => {
+      const ctx = sessionContext;
+      if (!ctx?.hasUI) return false;
 
-      const normalizedHost = host.toLowerCase();
-      const key = normalizedHost;
-
-      const existingDecision = pendingNetworkApprovals.get(key);
-      if (existingDecision) return existingDecision;
-
-      const decision = (async () => {
-        try {
-          const initialConfig = getStateRuntimeConfig(sandboxState);
-          if (!initialConfig) return false;
-
-          if (initialConfig.network.allowedDomains.includes(normalizedHost)) return true;
-          if (initialConfig.network.deniedDomains.includes(normalizedHost)) {
-            recordNetworkEvent("blocked", "explicit-deny-domain", normalizedHost, port);
-            return false;
-          }
-
-          const suggestedCommand = buildNetworkBlockCommand(
-            "missing-allowed-domain",
-            normalizedHost,
-          );
-          const ctx = sessionContext;
-          if (promptMode === "non-interactive" || !ctx || !ctx.hasUI) {
-            recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);
-            const message = `Sandbox blocked network access to ${normalizedHost}. To temporarily allow for this session, run: ${suggestedCommand}`;
-            if (ctx) notify(ctx, message, "warning");
-            else console.warn(message);
-            return false;
-          }
-
-          const target = port ? `${normalizedHost}:${port}` : normalizedHost;
-          const approved = await withPromptSignal(pi, () =>
-            showSandboxPermissionConfirm(ctx, {
-              title: "Sandbox blocked network access",
-              request: "Network connection",
-              target,
-              targetLabel: "Host",
-              sandboxChange: `Allow connections to ${normalizedHost} for this session`,
-              equivalentCommand: suggestedCommand,
-              typeCode: "NET_OUT",
-              extra: "Network policy is host-based, so allowing this host may cover multiple URLs.",
-            }),
-          );
-          if (!approved) {
-            recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);
-            return false;
-          }
-
-          const latestConfig = getStateRuntimeConfig(sandboxState);
-          if (!latestConfig) return false;
-          if (latestConfig.network.deniedDomains.includes(normalizedHost)) {
-            recordNetworkEvent("blocked", "explicit-deny-domain", normalizedHost, port);
-            notify(
-              ctx,
-              `Network access to ${normalizedHost} remains denied by current sandbox policy. Remove it from deny list to allow.`,
-              "warning",
-            );
-            return false;
-          }
-          if (latestConfig.network.allowedDomains.includes(normalizedHost)) {
-            recordNetworkEvent("allowed", "missing-allowed-domain", normalizedHost, port);
-            return true;
-          }
-
-          const nextConfig = cloneRuntimeConfig(latestConfig);
-          const changed = mutateStringList(
-            nextConfig.network.allowedDomains,
-            "add",
-            normalizedHost,
-          );
-          if (changed) {
-            applyRuntimeConfigForSession(ctx, nextConfig);
-          }
-
-          recordNetworkEvent("allowed", "missing-allowed-domain", normalizedHost, port);
-          notify(ctx, `Allowed network domain for this session: ${normalizedHost}`, "info");
-          return true;
-        } catch (error) {
-          const ctx = sessionContext;
-          const message = `Sandbox permission prompt failed for ${normalizedHost}: ${error instanceof Error ? error.message : error}`;
-          if (ctx) notify(ctx, message, "warning");
-          else console.warn(message);
-          return false;
-        }
-      })();
-
-      pendingNetworkApprovals.set(key, decision);
-      try {
-        return await decision;
-      } finally {
-        pendingNetworkApprovals.delete(key);
+      return withPromptSignal(pi, () =>
+        showSandboxPermissionConfirm(ctx, {
+          title: "Sandbox blocked network access",
+          request: "Network connection",
+          target,
+          targetLabel: "Host",
+          sandboxChange: `Allow connections to ${host} for this session`,
+          equivalentCommand: suggestedCommand,
+          typeCode: "NET_OUT",
+          extra: "Network policy is host-based, so allowing this host may cover multiple URLs.",
+        }),
+      );
+    },
+    applyRuntimeConfig: (runtimeConfig) => {
+      const ctx = sessionContext;
+      if (ctx) applyRuntimeConfigForSession(ctx, runtimeConfig);
+    },
+    recordEvent: recordSandboxEvent,
+    notify: (message, level) => {
+      const ctx = sessionContext;
+      if (ctx) {
+        notify(ctx, message, level);
+      } else if (level === "warning") {
+        console.warn(message);
+      } else {
+        console.info(message);
       }
-    };
-  };
+    },
+    getCwd: () => sessionCwd,
+    pendingApprovals: pendingNetworkApprovals,
+  });
 
   function getJvmProxyEndpoint(): JvmProxyEndpoint | null {
     const port = jvmProxyAdapter?.activePort;
@@ -3330,7 +3229,7 @@ export default function (pi: ExtensionAPI) {
 
     try {
       validateJvmProxyConfig(config);
-      await SandboxManager.initialize(runtimeConfig, createNetworkAskCallback(), true);
+      await SandboxManager.initialize(runtimeConfig, networkAskCallback, true);
       runtimeInitialized = true;
       await configureJvmProxyAdapter(config);
 
