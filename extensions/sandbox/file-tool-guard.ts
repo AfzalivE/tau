@@ -68,6 +68,15 @@ export function getFileToolAccesses(
  * Resolves a file tool's paths through symlinked ancestors. This catches paths
  * such as workspace/link/secret where link points outside the workspace.
  */
+function normalizeFileToolInputPath(toolName: string, input: unknown, cwd: string): void {
+  if (!FILE_TOOL_ACCESS[toolName] || !input || typeof input !== "object") return;
+
+  const path = (input as { path?: unknown }).path;
+  if (typeof path !== "string" || path.length === 0) return;
+
+  (input as { path: string }).path = resolveSandboxPath(path, cwd);
+}
+
 export async function resolveFileToolAccesses(
   toolName: string,
   input: unknown,
@@ -170,6 +179,7 @@ export interface FileToolGuardBlock {
 export async function guardFileToolCall(
   options: FileToolGuardOptions,
 ): Promise<FileToolGuardBlock | null> {
+  normalizeFileToolInputPath(options.toolName, options.input, options.cwd);
   const lexicalAccesses = getFileToolAccesses(options.toolName, options.input, options.cwd);
   if (!lexicalAccesses) return null;
 

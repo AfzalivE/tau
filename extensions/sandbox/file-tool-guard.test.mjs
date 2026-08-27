@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -55,6 +55,21 @@ test("maps native file tools to their filesystem access requirements", () => {
     { kind: "read", readAccess: "data", path: "/workspace/private/token" },
   ]);
   assert.equal(getFileToolAccesses("bash", { command: "cat notes.md" }, cwd), null);
+});
+
+test("normalizes native file-tool inputs before execution", async () => {
+  const input = { path: "~/.agents/notes.md", content: "test" };
+
+  const result = await guardFileToolCall({
+    toolName: "write",
+    input,
+    cwd,
+    getRuntimeConfig: () => runtimeConfig({ allowWrite: [homedir()] }),
+    onViolation: async () => assert.fail("Expected the normalized path to be writable"),
+  });
+
+  assert.equal(result, null);
+  assert.equal(input.path, join(homedir(), ".agents/notes.md"));
 });
 
 test("uses sandbox read and write precedence", () => {
