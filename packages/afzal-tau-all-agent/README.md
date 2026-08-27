@@ -80,6 +80,12 @@ The bundled draft-stashing extension is now named `stash`. Its default `alt+x` s
 | ---------- | ------------------------------------------------------------- |
 | `tau-dark` | Pi's official dark theme with a calmer, more cohesive polish. |
 
+## JVM HTTP clients on macOS
+
+Java and Kotlin HTTP clients can ignore proxy environment variables. Opt in to Tau's macOS adapter with `"network": { "jvmProxy": true, "allowLocalBinding": true }` in `sandbox.json`. This support is verified only on macOS. `allowLocalBinding` also permits local TCP binding and loopback connections.
+
+The unauthenticated adapter uses a random loopback port for the Pi session and forwards only through SRT's authenticated proxy, so SRT still enforces `allowedDomains` and `deniedDomains`. Any same-host process that finds the port can use that SRT route while it is active. Keep this option disabled unless JVM compatibility is required.
+
 ## Agent configuration
 
 Tau does not include agent configuration; those files are highly personal. Configure Pi with your own `AGENTS.md`, `settings.json`, sandbox config, and model preferences.

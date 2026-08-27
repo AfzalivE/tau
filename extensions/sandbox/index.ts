@@ -28,6 +28,8 @@
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
  *     "deniedDomains": [],
+ *     "jvmProxy": false,
+ *     "allowLocalBinding": true,
  *     "allowMachLookup": [
  *       "com.apple.dnssd.service",
  *       "com.apple.SystemConfiguration.configd",
@@ -43,6 +45,10 @@
  *   }
  * }
  * ```
+ *
+ * `network.jvmProxy` is an opt-in macOS compatibility adapter for JVM HTTP
+ * clients. It requires `network.allowLocalBinding: true`. See README.md for
+ * its same-host security effect.
  *
  * Usage:
  * - `pi -e ./sandbox` - sandbox enabled with default/config settings
@@ -80,6 +86,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
 import { getFileToolAccesses, guardFileToolCall } from "./file-tool-guard.js";
+import { JvmProxyAdapter } from "./jvm-proxy-adapter.ts";
+import {
+  formatJvmProxyEndpoint,
+  JVM_PROXY_ENV,
+  type JvmProxyEndpoint,
+} from "./jvm-proxy-options.ts";
 import {
   getRuntimeProtectedWriteViolations,
   isRuntimeProtectedWriteViolation,
@@ -196,6 +208,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.doist.com",
     ],
     deniedDomains: [],
+    jvmProxy: false,
     allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
     allowMachLookup: [
@@ -282,12 +295,18 @@ type SandboxCommandConfig = {
   excluded: string[];
 };
 
-type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
+type SandboxNetworkConfig = SandboxRuntimeConfig["network"] & {
+  /** Route JVM HTTP clients through a session-scoped authenticated SRT adapter on macOS. */
+  jvmProxy?: boolean;
+};
+
+type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem" | "network"> & {
   enabled?: boolean;
   mode?: PromptMode;
   /** Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG for this Pi process). */
   debug?: boolean;
   commands: SandboxCommandConfig;
+  network: SandboxNetworkConfig;
   filesystem: SandboxRuntimeConfig["filesystem"] & {
     allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
@@ -842,6 +861,10 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     },
     network: {
       ...config.network,
+      jvmProxy:
+        typeof config.network?.jvmProxy === "boolean"
+          ? config.network.jvmProxy
+          : DEFAULT_CONFIG.network.jvmProxy,
       allowedDomains: coerceStringArray(
         config.network?.allowedDomains,
         DEFAULT_CONFIG.network.allowedDomains,
@@ -1007,7 +1030,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   if (isPlainObject(overrides.network)) {
     result.network = {
       ...base.network,
-      ...(overrides.network as Partial<SandboxRuntimeConfig["network"]>),
+      ...(overrides.network as Partial<SandboxNetworkConfig>),
     };
   }
   if (isPlainObject(overrides.filesystem)) {
@@ -1150,7 +1173,8 @@ function expandFilesystemPathConfig(
 
 function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
-  const expandedNetwork = expandNetworkPathConfig(config.network);
+  const { jvmProxy: _jvmProxy, ...network } = config.network;
+  const expandedNetwork = expandNetworkPathConfig(network);
   const expandedFilesystem = expandFilesystemPathConfig(filesystem);
   const allowWrite = allowTempDirs
     ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]
@@ -2075,6 +2099,7 @@ interface SandboxedBashOpsOptions {
   getContext: () => ExtensionContext | null;
   getSandboxConfig: () => SandboxConfig | null;
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
+  getJvmProxyEndpoint: () => JvmProxyEndpoint | null;
   getPromptMode: () => PromptMode;
   applyRuntimeConfigForSession: (
     ctx: ExtensionContext,
@@ -2162,6 +2187,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     getContext,
     getSandboxConfig,
     getRuntimeConfig,
+    getJvmProxyEndpoint,
     getPromptMode,
     applyRuntimeConfigForSession,
     recordEvent,
@@ -2182,8 +2208,15 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
   function withSandboxDefaultEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     const baseEnv = env ?? process.env;
-    if (baseEnv.GIT_OPTIONAL_LOCKS !== undefined) return baseEnv;
-    return { ...baseEnv, GIT_OPTIONAL_LOCKS: "0" };
+    const sandboxEnv: NodeJS.ProcessEnv = {
+      ...baseEnv,
+      GIT_OPTIONAL_LOCKS: baseEnv.GIT_OPTIONAL_LOCKS ?? "0",
+    };
+    delete sandboxEnv[JVM_PROXY_ENV];
+
+    const endpoint = getJvmProxyEndpoint();
+    if (endpoint) sandboxEnv[JVM_PROXY_ENV] = formatJvmProxyEndpoint(endpoint);
+    return sandboxEnv;
   }
 
   async function runSandboxAttempt(
@@ -3071,6 +3104,8 @@ export default function (pi: ExtensionAPI) {
   const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
   const pendingFileToolPrompts = new Map<string, Promise<FilesystemViolationResolution | null>>();
 
+  let jvmProxyAdapter: JvmProxyAdapter | null = null;
+
   installSandboxDebugConsoleCapture();
   sandboxDebugLogWriter = (line) => {
     sandboxDebugLines.push({ timestamp: Date.now(), text: line });
@@ -3272,6 +3307,45 @@ export default function (pi: ExtensionAPI) {
     };
   };
 
+  function getJvmProxyEndpoint(): JvmProxyEndpoint | null {
+    const port = jvmProxyAdapter?.activePort;
+    return port ? { host: "127.0.0.1", port } : null;
+  }
+
+  function suspendJvmProxyAdapter(): void {
+    jvmProxyAdapter?.suspend();
+  }
+
+  async function closeJvmProxyAdapter(): Promise<void> {
+    await jvmProxyAdapter?.close();
+    jvmProxyAdapter = null;
+  }
+
+  function validateJvmProxyConfig(config: SandboxConfig): void {
+    if (config.network.jvmProxy !== true) return;
+    if (!IS_MACOS) {
+      throw new Error("network.jvmProxy is supported only on macOS");
+    }
+    if (config.network.allowLocalBinding !== true) {
+      throw new Error("network.jvmProxy requires network.allowLocalBinding: true on macOS");
+    }
+  }
+
+  async function configureJvmProxyAdapter(config: SandboxConfig): Promise<void> {
+    suspendJvmProxyAdapter();
+    if (config.network.jvmProxy !== true) return;
+
+    const proxyPort = SandboxManager.getProxyPort();
+    const authToken = SandboxManager.getProxyAuthToken();
+    if (!proxyPort || !authToken) {
+      throw new Error("network.jvmProxy requires SRT's authenticated local HTTP proxy");
+    }
+
+    jvmProxyAdapter ??= new JvmProxyAdapter();
+    await jvmProxyAdapter.start();
+    jvmProxyAdapter.activate({ port: proxyPort, authToken });
+  }
+
   const initializeSandboxRuntime = async (
     ctx: ExtensionContext,
     config: SandboxConfig,
@@ -3294,13 +3368,27 @@ export default function (pi: ExtensionAPI) {
     }
 
     const runtimeConfig = toRuntimeConfig(config);
+    let runtimeInitialized = false;
 
     try {
+      validateJvmProxyConfig(config);
       await SandboxManager.initialize(runtimeConfig, createNetworkAskCallback(), true);
+      runtimeInitialized = true;
+      await configureJvmProxyAdapter(config);
+
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
       return activeConfig;
     } catch (err) {
+      suspendJvmProxyAdapter();
+      if (runtimeInitialized) {
+        try {
+          await SandboxManager.reset();
+        } catch {
+          // Preserve the initialization error below.
+        }
+      }
+
       const errorMessage = err instanceof Error ? err.message : `${err}`;
       promptMode = DEFAULT_PROMPT_MODE;
       pendingNetworkApprovals.clear();
@@ -3317,6 +3405,7 @@ export default function (pi: ExtensionAPI) {
     getContext: () => sessionContext,
     getSandboxConfig: () => sandboxConfig,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
+    getJvmProxyEndpoint,
     getPromptMode: () => promptMode,
     applyRuntimeConfigForSession,
     recordEvent: recordSandboxEvent,
@@ -3499,6 +3588,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     setSandboxStatus(ctx, false);
+    await closeJvmProxyAdapter();
     sessionContext = ctx;
     resetRuntimeState();
     rebuildBashTools(ctx.cwd);
@@ -3552,6 +3642,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     setSandboxStatus(ctx, false);
+    suspendJvmProxyAdapter();
     if (getStateRuntimeConfig(sandboxState)) {
       try {
         await SandboxManager.reset();
@@ -3559,6 +3650,7 @@ export default function (pi: ExtensionAPI) {
         // Ignore cleanup errors
       }
     }
+    await closeJvmProxyAdapter();
 
     resetRuntimeState();
     sessionContext = null;
@@ -3655,6 +3747,7 @@ export default function (pi: ExtensionAPI) {
         sandboxState = { status: "suspended" };
         pendingNetworkApprovals.clear();
         setSandboxStatus(ctx, false);
+        suspendJvmProxyAdapter();
 
         try {
           await SandboxManager.reset();
@@ -3694,6 +3787,7 @@ export default function (pi: ExtensionAPI) {
           `    Allowed: ${runtimeConfig.network.allowedDomains.join(", ") || "(none)"}`,
           `    Denied: ${runtimeConfig.network.deniedDomains.join(", ") || "(none)"}`,
           `    allowLocalBinding: ${runtimeConfig.network.allowLocalBinding ? "true" : "false"}`,
+          `    JVM proxy adapter: ${sandboxConfig?.network.jvmProxy ? "enabled (macOS only)" : "disabled"}`,
           `    allowAllUnixSockets: ${runtimeConfig.network.allowAllUnixSockets ? "true" : "false"}`,
           `    allowUnixSockets: ${runtimeConfig.network.allowUnixSockets?.join(", ") || "(none)"}`,
           ...(IS_MACOS

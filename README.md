@@ -66,6 +66,25 @@ The standalone `tau-acp-client` package provides the `acp-client` extension; the
 | `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
 | `todoist`           | `/todoist`           |   —    |  —  | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
 
+### JVM HTTP clients in the macOS sandbox
+
+Java and Kotlin HTTP clients can ignore `HTTP_PROXY` and `HTTPS_PROXY`. On macOS, opt in to Tau's JVM proxy adapter when these clients need sandboxed network access:
+
+```json
+{
+  "network": {
+    "jvmProxy": true,
+    "allowLocalBinding": true
+  }
+}
+```
+
+This support is verified only on macOS. It requires `network.allowLocalBinding: true`, which also permits sandboxed processes to bind local TCP ports and connect to loopback services. Linux behavior is unchanged.
+
+The adapter listens without client authentication on a random `127.0.0.1` port for the Pi session. It removes any client `Proxy-Authorization` header, adds the current SRT Basic credentials, and forwards all traffic to SRT. SRT still enforces `allowedDomains` and `deniedDomains`. The listener has bounded headers, closes active connections when the sandbox is disabled, keeps its port across re-enable for persistent JVM daemons, and closes at session shutdown.
+
+Any same-host process that can reach the random port while the adapter is active can use that session's SRT route and domain policy. This includes other local sandboxes that allow loopback access. Keep `jvmProxy` disabled unless JVM compatibility is required.
+
 ## Skills
 
 | Skill               | Coding | All | Description                                                                        |

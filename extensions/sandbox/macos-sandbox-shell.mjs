@@ -14,6 +14,7 @@
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
+import { applyJvmProxyEnvironment } from "./jvm-proxy-options.ts";
 
 const PROXY_CONNECT_MODE = "--proxy-connect";
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -26,6 +27,8 @@ if (process.argv[2] === PROXY_CONNECT_MODE) {
 }
 
 function runBash(args) {
+  applyJvmProxyEnvironment(process.env);
+
   if (hasAuthenticatedSandboxProxy()) {
     const scriptPath = fileURLToPath(import.meta.url);
     const proxyCommand = [
