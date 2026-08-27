@@ -85,6 +85,10 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
+import {
+  extractFilesystemFallbackPath,
+  extractPathLikeValue,
+} from "./filesystem-violation-parser.js";
 import { getFileToolAccesses, guardFileToolCall } from "./file-tool-guard.js";
 import { JvmProxyAdapter } from "./jvm-proxy-adapter.ts";
 import {
@@ -1290,46 +1294,6 @@ function extractAppendedSandboxAnnotation(
   return "";
 }
 
-function sanitizeExtractedPath(path: string): string | undefined {
-  const trimmed = path.trim();
-  if (!trimmed) return undefined;
-
-  const withoutDelimiter = trimmed.replace(/:+$/g, "");
-  return withoutDelimiter.length > 0 ? withoutDelimiter : undefined;
-}
-
-function extractPathLikeValueFromLine(line: string): string | undefined {
-  const sandboxViolationMatch = line.match(/\bfile-(?:read|write)[^\s]*\s+((?:~\/|\/).+)$/i);
-  if (sandboxViolationMatch?.[1]) return sanitizeExtractedPath(sandboxViolationMatch[1]);
-
-  const operationNotPermittedMatch = line.match(
-    /^(?:[^:\n]+:\s+)*((?:~\/|\/).+?):\s+Operation not permitted$/i,
-  );
-  if (operationNotPermittedMatch?.[1]) return sanitizeExtractedPath(operationNotPermittedMatch[1]);
-
-  const quotedPathMatch = line.match(/["']((?:~\/|\/)[^"']+)["']/);
-  if (quotedPathMatch?.[1]) return sanitizeExtractedPath(quotedPathMatch[1]);
-
-  const rawPathMatch = line.match(/((?:~\/|\/)[^\s,)]+)/);
-  if (rawPathMatch?.[1]) return sanitizeExtractedPath(rawPathMatch[1]);
-
-  return undefined;
-}
-
-function extractPathLikeValue(text: string): string | undefined {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const path = extractPathLikeValueFromLine(lines[index]);
-    if (path) return path;
-  }
-
-  return undefined;
-}
-
 function extractViolationProcessName(line: string): string | undefined {
   const match = line.match(/^([^\s(]+)\(/);
   const processName = match?.[1]?.trim();
@@ -1437,14 +1401,8 @@ function detectFilesystemViolations(
 
   if (violations.length > 0 || !allowOutputFallback) return violations;
 
-  const hasEperm = /\bEPERM\b/i.test(fallbackOutput);
-  const hasOperationNotPermitted = /(?:^|\n)[^\n]*Operation not permitted(?:$|\n)/i.test(
-    fallbackOutput,
-  );
-  if (hasEperm || hasOperationNotPermitted) {
-    const path = extractPathLikeValue(fallbackOutput);
-    if (path) violations.push({ kind: "unknown", path });
-  }
+  const fallbackPath = extractFilesystemFallbackPath(fallbackOutput);
+  if (fallbackPath) violations.push({ kind: "unknown", path: fallbackPath });
 
   return violations;
 }
