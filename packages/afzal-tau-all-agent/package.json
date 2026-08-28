@@ -80,6 +80,7 @@
     "skills": [
       "../../skills/address-pr-comments",
       "../../skills/browser-tools",
+      "../../skills/fix-ci",
       "../../skills/git-clean-history",
       "../../skills/git-commit",
       "../../skills/oracle",

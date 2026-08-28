@@ -53,6 +53,7 @@ The bundled draft-stashing extension is now named `stash`. Its default `alt+x` s
 | Skill                           | Description                                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------------------------- |
 | `address-pr-comments`          | Address PR feedback through disposition, per-change commits, approval, push, and replies.   |
+| `fix-ci`                       | Fix failing CI through triage, focused commits, approval, reruns, and verification.          |
 | `browser-tools`                | Interactive browser automation via Chrome DevTools Protocol.                                |
 | `git-clean-history`            | Reimplement a branch on a fresh branch off `main` with a clean commit history.              |
 | `git-commit`                   | Tidy, focused commits with clear rationale in messages.                                     |
