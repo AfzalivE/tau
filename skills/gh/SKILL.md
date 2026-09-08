@@ -5,10 +5,20 @@ description: "GitHub CLI for issues, PRs, Actions, search, and raw API calls. Us
 
 # GitHub CLI (`gh`)
 
+Verified against `gh` 2.100.0. Check `gh --version` and command `--help` when flags differ.
+
+## Safety
+
+- Get explicit user approval before pushing or creating a PR.
+- Treat merges, reviews, comments, edits, and workflow reruns as remote changes. Run them only within the approved task.
+- `gh pr create --dry-run` can still push commits. Use `--head` to skip automatic pushing and forking.
+- Use `--body-file` for multiline Markdown to avoid shell quoting errors.
+
 ## Repo Targeting
 
 Most commands auto-detect repo from cwd. Override with `-R OWNER/REPO`.
-Placeholders `{owner}`, `{repo}`, `{branch}` work in `gh api` endpoints.
+`gh api` uses `GH_REPO=OWNER/REPO` instead of `-R`, or an explicit repo path.
+Placeholders `{owner}`, `{repo}`, `{branch}` work in `gh api` endpoints. Quote endpoints that contain placeholders or query strings.
 
 ## Quick Reference
 
@@ -50,7 +60,42 @@ gh pr create -t "title" -b "body" [-B base] [-H head] [-r reviewer] [-l label] [
 - `-f` / `--fill` autofills title+body from commits
 - `-d` marks as draft
 - `--fill-verbose` uses commit msg+body for description
-- `-F file` reads body from file
+- `-F file` reads body from file; `-F -` reads stdin
+- `--head branch` selects an already-pushed branch without automatic pushing or forking
+- `--attach` uploads images or videos (see Attachments)
+
+### Edit
+
+```bash
+gh pr edit 123 -R OWNER/REPO --body-file body.md
+gh pr edit 123 -R OWNER/REPO --title "Updated title"
+gh pr edit 123 -R OWNER/REPO --add-reviewer reviewer-login
+gh pr edit 123 -R OWNER/REPO --add-label bug --remove-label triage
+```
+
+`--add-reviewer` also re-requests review. Project changes require the `project` auth scope.
+
+### Attachments
+
+Use `gh pr create --attach` or `gh pr edit --attach` with the existing CLI login. A browser upload is unnecessary.
+
+```bash
+# body.md contains: ![Login error](./login.png)
+gh pr create -R OWNER/REPO --head feature --base main \
+  --title "Fix login" --body-file body.md \
+  --attach './login.png#Login error'
+
+# Preserve the existing body and append an image.
+gh pr edit 123 -R OWNER/REPO --attach './after.png#After the fix'
+```
+
+- Repeat `--attach` for multiple files, up to 50 per command.
+- Use the exact same file path in the body and attachment flag. An absolute attachment path does not match a `./filename.png` body reference.
+- Matching body references are rewritten to uploaded URLs. Otherwise, attachments are appended. Existing body references keep their alt text.
+- Images accept `#alt text`; videos render as players and do not accept alt text.
+- For more than 50 files, upload in batches. Fetch the updated body before each later body replacement to preserve uploaded URLs.
+- For a PR template with sized images, upload first, then use the returned URLs in HTML such as `<img src="UPLOADED_URL" width="150">`.
+- Partial upload failure can still create or update the PR. A nonzero exit status does not mean no change occurred. Check the printed PR URL and body before retrying.
 
 ### View
 
@@ -171,23 +216,35 @@ gh run rerun <run-id> [--failed]
 gh api <endpoint> [-X method] [-F key=value] [-f key=value] [-H header] [--jq expr] [--paginate] [--cache duration]
 ```
 
-- Endpoint relative to `/api/v3/` (REST) or `graphql` for v4
-- `-F` does type coercion (booleans, ints, `@file`); `-f` sends raw strings
-- `--paginate --slurp` collects all pages into one JSON array
+- Use a REST endpoint such as `repos/OWNER/REPO/pulls`, or `graphql` for v4
+- `-F` converts booleans, integers, and `null`, resolves placeholders, and reads `@file` or `@-`; `-f` sends raw strings
+- Adding `-F` or `-f` changes the default method from GET to POST. Use `--method GET` for query parameters on read requests
+- `--input file.json` reads a request body; `--input -` reads stdin. With `--input`, field flags become query parameters
+- `--paginate --slurp` wraps pages in an outer JSON array; it does not flatten page arrays
+- GraphQL pagination requires an `$endCursor: String` variable and `pageInfo { hasNextPage endCursor }`
 - `--jq` filters response (jq syntax)
 - `--cache 1h` caches response
 
 ### Common API Patterns
 
 ```bash
-# PR comments
-gh api repos/{owner}/{repo}/pulls/123/comments
+# Inline PR review comments
+gh api 'repos/{owner}/{repo}/pulls/123/comments' --paginate
+
+# PR conversation comments (PRs also use issue endpoints)
+gh api 'repos/{owner}/{repo}/issues/123/comments' --paginate
+
+# PR reviews
+gh api 'repos/{owner}/{repo}/pulls/123/reviews' --paginate
 
 # Issue timeline
-gh api repos/{owner}/{repo}/issues/123/timeline --paginate
+gh api 'repos/{owner}/{repo}/issues/123/timeline' --paginate
+
+# GET parameters: keep the method explicit
+gh api --method GET 'repos/{owner}/{repo}/pulls' -f state=all -F per_page=100 --paginate
 
 # Repo info
-gh api repos/{owner}/{repo}
+gh api 'repos/{owner}/{repo}'
 
 # User info
 gh api user
