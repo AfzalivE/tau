@@ -495,6 +495,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  --no-sandbox",
     "  --sandbox-debug",
     "  --sandbox-config <path>",
+    "  --sandbox-required (Bash tool must stay sandboxed)",
   ];
   notify(ctx, lines.join("\n"), "info");
 }
@@ -972,7 +973,7 @@ function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSand
 
   let overrideConfig: Partial<SandboxConfig>;
   try {
-    overrideConfig = JSON.parse(source);
+    overrideConfig = parseSandboxConfig(source);
   } catch (error) {
     throw new SandboxConfigLoadError(
       "parse-error",
@@ -1005,7 +1006,7 @@ function loadConfig(
 
   if (existsSync(globalConfigPath)) {
     try {
-      globalConfig = JSON.parse(readFileSync(globalConfigPath, "utf-8"));
+      globalConfig = parseSandboxConfig(readFileSync(globalConfigPath, "utf-8"));
       paths.push({ label: "Global", path: globalConfigPath, status: "loaded" });
     } catch (e) {
       paths.push({ label: "Global", path: globalConfigPath, status: "parse-error" });
@@ -1020,7 +1021,7 @@ function loadConfig(
       paths.push({ label: "Project", path: projectConfigPath, status: "skipped-untrusted" });
     } else {
       try {
-        projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
+        projectConfig = parseSandboxConfig(readFileSync(projectConfigPath, "utf-8"));
         paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
       } catch (e) {
         paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
@@ -1035,6 +1036,12 @@ function loadConfig(
     config: finalizeConfig(merged),
     paths,
   };
+}
+
+function parseSandboxConfig(source: string): Partial<SandboxConfig> {
+  const config: unknown = JSON.parse(source);
+  if (!isPlainObject(config)) throw new Error("Sandbox config must be a JSON object.");
+  return config as Partial<SandboxConfig>;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -2630,6 +2637,20 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           commandConfig.excluded,
           commandConfig.exclusionsEnabled,
         );
+        if (excludedMatch && pi.getFlag("sandbox-required") === true) {
+          const message = `Sandbox is required, but this command matches commands.excluded entry \`${excludedMatch.pattern}\`. Disable exclusions to test it inside the sandbox.`;
+          recordEvent?.({
+            timestamp: Date.now(),
+            kind: "command",
+            outcome: "blocked",
+            reason: "excluded-command",
+            target: excludedMatch.executable,
+            command,
+            cwd,
+            summary: message,
+          });
+          throw new Error(message);
+        }
         if (excludedMatch) {
           const summary = `command bypassed sandbox via commands.excluded entry \`${excludedMatch.pattern}\``;
           recordEvent?.({
@@ -3045,6 +3066,12 @@ function installSandboxDebugConsoleCapture(): void {
 export default function (pi: ExtensionAPI) {
   pi.registerFlag("no-sandbox", {
     description: "Disable OS-level bash sandboxing and native file-tool guardrails",
+    type: "boolean",
+    default: false,
+  });
+
+  pi.registerFlag("sandbox-required", {
+    description: "Require sandboxed Bash tool execution; refuse disabled configs and exclusions",
     type: "boolean",
     default: false,
   });
@@ -3471,8 +3498,10 @@ export default function (pi: ExtensionAPI) {
     label: "bash (sandbox-aware)",
     async execute(id, params, signal, onUpdate, ctx) {
       if (sandboxState.status !== "active") {
+        const requiresSandbox = pi.getFlag("sandbox-required") === true;
         const allowsUnsandboxed =
-          sandboxState.status === "bypassed" || sandboxState.status === "suspended";
+          !requiresSandbox &&
+          (sandboxState.status === "bypassed" || sandboxState.status === "suspended");
         if (!allowsUnsandboxed) {
           const runMode = getSandboxRunMode(sandboxState);
 
@@ -3487,6 +3516,10 @@ export default function (pi: ExtensionAPI) {
           } else if (runMode === "sandbox") {
             reason =
               "Sandbox session initialization is incomplete. Retry after session startup or run /sandbox enable.";
+          }
+
+          if (requiresSandbox) {
+            reason = `Sandbox is required but is not active (${runMode}). Check the configuration and sandbox startup diagnostics.`;
           }
 
           recordUnavailableSandboxBlock(
@@ -3659,6 +3692,13 @@ export default function (pi: ExtensionAPI) {
     const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
     if (parseErrors.length > 0) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
+      if (pi.getFlag("sandbox-required") === true) {
+        requestShutdownWithError(
+          ctx,
+          "Sandbox is required; refusing to run with invalid configuration.",
+        );
+        return;
+      }
     }
     const config = loadedConfig.config;
     sandboxConfig = config;
