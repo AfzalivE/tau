@@ -95,7 +95,7 @@ ssh-add --apple-load-keychain
 
 A user LaunchAgent can run this command at login. While a key is loaded, sandboxed processes that can reach `$SSH_AUTH_SOCK` can ask the agent to sign with it.
 
-### Sandbox exclusions
+### Sandbox exclusions and audit logs
 
 `commands.excluded` runs matching commands outside the OS sandbox. Disable that execution path while keeping the configured list intact with:
 
@@ -108,6 +108,10 @@ A user LaunchAgent can run this command at login. While a key is loaded, sandbox
 ```
 
 When the sandbox is active and exclusions are disabled, matching commands use the normal sandboxed Bash path.
+
+Tau writes a private JSONL audit log for each Pi session under `~/.pi/agent/logs/sandbox/<session-id>.jsonl`. `/sandbox doctor` and `/sandbox show` print the exact path. The log contains effective policy snapshots, interpreted policy events, and raw violations reported by sandbox-runtime. Raw violations are recorded even when the command handles the denial and exits successfully without an approval prompt.
+
+The log can contain commands and local paths. Tau creates it with mode `0600` inside a `0700` directory on POSIX systems. Runtime coverage depends on sandbox-runtime and the operating system. Violations filtered by `ignoreViolations` are not reported. Linux runtime monitoring currently reports denied writes but cannot report every denied read.
 
 ### JVM HTTP clients in the macOS sandbox
 

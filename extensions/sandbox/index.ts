@@ -58,6 +58,10 @@
  * - `pi -e ./sandbox --sandbox-config ./sandbox.json` - use a custom sandbox config file
  * - `/sandbox` - show command help
  *
+ * Sandbox policy events and raw runtime violations are written to
+ * `~/.pi/agent/logs/sandbox/<session-id>.jsonl`. `/sandbox doctor` prints the
+ * exact path for the current session.
+ *
  * Setup for source checkouts:
  * - Run `npm install` from the repository root.
  *
@@ -81,6 +85,12 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  createSandboxAuditLog,
+  getSandboxAuditLogPath,
+  subscribeToNewViolations,
+  type SandboxAuditLog,
+} from "./audit-log.js";
 import { findBlockedCommand, findExcludedCommand, type SimpleCommand } from "./command-policy.js";
 import {
   extractFilesystemFallbackPath,
@@ -1875,6 +1885,7 @@ async function handleFilesystemViolation(options: {
           : formatFilesystemAlreadyAllowedMessage(target),
       };
     } catch {
+      recordFilesystemEvent("blocked");
       return null;
     }
   })();
@@ -2052,6 +2063,7 @@ async function handleMachLookupViolation(options: {
           : formatViolationAlreadyAllowedMessage(blockedTarget),
       };
     } catch {
+      recordMachLookupEvent("blocked");
       return null;
     }
   })();
@@ -2866,13 +2878,16 @@ function renderSandboxDoctorReport(options: {
   configPaths: SandboxConfigPath[];
   events: SandboxEvent[];
   debugLines: SandboxDebugLine[];
+  auditLog: string;
   exclusionsEnabled: boolean;
 }): string {
-  const { state, promptMode, configPaths, events, debugLines, exclusionsEnabled } = options;
+  const { state, promptMode, configPaths, events, debugLines, auditLog, exclusionsEnabled } =
+    options;
   const lines = [
     "Sandbox doctor",
     `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`,
     `- Excluded-command execution: ${exclusionsEnabled ? "enabled" : "disabled"}`,
+    `- Audit log: ${auditLog}`,
     `- Runtime debug logs: ${describeSandboxDebugLogging()}`,
   ];
 
@@ -3054,6 +3069,10 @@ export default function (pi: ExtensionAPI) {
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
   let sandboxDebugLines: SandboxDebugLine[] = [];
+  let sandboxAuditLog: SandboxAuditLog | null = null;
+  let sandboxAuditLogPath: string | null = null;
+  let sandboxAuditLogError: string | null = null;
+  let unsubscribeAuditViolations: (() => void) | null = null;
   const warnedSkippedProjectConfigPaths = new Set<string>();
 
   const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
@@ -3073,11 +3092,130 @@ export default function (pi: ExtensionAPI) {
     return config.debug === true || (pi.getFlag("sandbox-debug") as boolean) === true;
   }
 
+  function reportSandboxAuditLogError(error: unknown): void {
+    if (sandboxAuditLogError) return;
+
+    sandboxAuditLogError = error instanceof Error ? error.message : `${error}`;
+    const message = `Sandbox audit logging failed${sandboxAuditLogPath ? ` (${sandboxAuditLogPath})` : ""}: ${sandboxAuditLogError}`;
+    if (sessionContext) notify(sessionContext, message, "warning");
+    else console.warn(message);
+  }
+
+  function describeSandboxAuditLog(): string {
+    if (sandboxAuditLogError) {
+      return `failed${sandboxAuditLogPath ? ` (${sandboxAuditLogPath})` : ""}: ${sandboxAuditLogError}`;
+    }
+    return sandboxAuditLogPath ?? "not initialized";
+  }
+
+  function startSandboxAuditLog(ctx: ExtensionContext, reason: string): void {
+    const sessionId = ctx.sessionManager.getSessionId();
+    sandboxAuditLogPath = getSandboxAuditLogPath(getAgentDir(), sessionId);
+    sandboxAuditLogError = null;
+
+    try {
+      const auditLog = createSandboxAuditLog({
+        agentDir: getAgentDir(),
+        sessionId,
+        cwd: ctx.cwd,
+        onError: reportSandboxAuditLogError,
+      });
+      sandboxAuditLog = auditLog;
+      auditLog.append("session-start", {
+        reason,
+        sessionFile: ctx.sessionManager.getSessionFile(),
+      });
+
+      unsubscribeAuditViolations = subscribeToNewViolations(
+        SandboxManager.getSandboxViolationStore(),
+        (violation) => {
+          auditLog.append(
+            "runtime-violation",
+            {
+              line: violation.line,
+              command: violation.command,
+              violationTimestamp: violation.timestamp.toISOString(),
+            },
+            violation.timestamp,
+          );
+        },
+        (count) => {
+          auditLog.append("runtime-violation-gap", {
+            dropped: count,
+            summary: "sandbox-runtime produced more violations than its in-memory tail retained",
+          });
+        },
+      );
+    } catch (error) {
+      sandboxAuditLog = null;
+      reportSandboxAuditLogError(error);
+    }
+  }
+
+  function stopSandboxAuditLog(reason: string): void {
+    unsubscribeAuditViolations?.();
+    unsubscribeAuditViolations = null;
+
+    sandboxAuditLog?.append("session-stop", { reason });
+    sandboxAuditLog?.close();
+    sandboxAuditLog = null;
+  }
+
+  function recordSandboxConfiguration(config: SandboxConfig): void {
+    sandboxAuditLog?.append("configuration", {
+      configPaths: sandboxConfigPaths,
+      policy: {
+        enabled: config.enabled,
+        mode: config.mode,
+        debug: config.debug,
+        commands: config.commands,
+        network: {
+          allowedDomains: config.network.allowedDomains,
+          deniedDomains: config.network.deniedDomains,
+          allowLocalBinding: config.network.allowLocalBinding,
+          allowAllUnixSockets: config.network.allowAllUnixSockets,
+          allowUnixSockets: config.network.allowUnixSockets,
+          allowMachLookup: config.network.allowMachLookup,
+          jvmProxy: config.network.jvmProxy,
+        },
+        filesystem: {
+          denyRead: config.filesystem.denyRead,
+          allowRead: config.filesystem.allowRead,
+          allowWrite: config.filesystem.allowWrite,
+          denyWrite: config.filesystem.denyWrite,
+          allowTempDirs: config.filesystem.allowTempDirs,
+          allowGitConfig: config.filesystem.allowGitConfig,
+          allowGitCommonDir: config.filesystem.allowGitCommonDir,
+        },
+        ignoreViolations: config.ignoreViolations,
+      },
+    });
+  }
+
+  function recordRuntimePolicy(
+    runtimeConfig: SandboxRuntimeConfig,
+    reason: "initialize" | "session-update",
+  ): void {
+    sandboxAuditLog?.append("runtime-policy", {
+      reason,
+      network: {
+        allowedDomains: runtimeConfig.network.allowedDomains,
+        deniedDomains: runtimeConfig.network.deniedDomains,
+        allowLocalBinding: runtimeConfig.network.allowLocalBinding,
+        allowAllUnixSockets: runtimeConfig.network.allowAllUnixSockets,
+        allowUnixSockets: runtimeConfig.network.allowUnixSockets,
+        allowMachLookup: runtimeConfig.network.allowMachLookup,
+      },
+      filesystem: runtimeConfig.filesystem,
+    });
+  }
+
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
     if (sandboxEvents.length > SANDBOX_EVENT_LIMIT) {
       sandboxEvents.splice(0, sandboxEvents.length - SANDBOX_EVENT_LIMIT);
     }
+    sandboxAuditLog?.append("policy-event", event, event.timestamp);
   }
 
   function recordRuntimeEvent(
@@ -3090,6 +3228,19 @@ export default function (pi: ExtensionAPI) {
       kind,
       outcome: "blocked",
       reason,
+      cwd: sessionCwd,
+      summary,
+    });
+  }
+
+  function recordUnavailableSandboxBlock(command: string, summary: string, target?: string): void {
+    recordSandboxEvent({
+      timestamp: Date.now(),
+      kind: "runtime",
+      outcome: "blocked",
+      reason: sandboxState.status === "blocked" ? sandboxState.reason : "unknown",
+      target,
+      command,
       cwd: sessionCwd,
       summary,
     });
@@ -3141,6 +3292,7 @@ export default function (pi: ExtensionAPI) {
     const nextConfig = cloneRuntimeConfig(runtimeConfig);
     sandboxState = { status: "active", runtimeConfig: nextConfig };
     SandboxManager.updateConfig(nextConfig);
+    recordRuntimePolicy(nextConfig, "session-update");
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
@@ -3256,6 +3408,7 @@ export default function (pi: ExtensionAPI) {
 
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
+      recordRuntimePolicy(activeConfig, "initialize");
       return activeConfig;
     } catch (err) {
       suspendJvmProxyAdapter();
@@ -3336,6 +3489,10 @@ export default function (pi: ExtensionAPI) {
               "Sandbox session initialization is incomplete. Retry after session startup or run /sandbox enable.";
           }
 
+          recordUnavailableSandboxBlock(
+            params.command,
+            "bash execution was blocked because the sandbox runtime is unavailable",
+          );
           throw new Error(reason);
         }
         return localBashTool.execute(id, params, signal, onUpdate);
@@ -3369,6 +3526,12 @@ export default function (pi: ExtensionAPI) {
         sandboxState.status === "bypassed" || sandboxState.status === "suspended";
       if (allowsUnsandboxed) return undefined;
 
+      const target = lexicalAccesses[0]?.path;
+      recordUnavailableSandboxBlock(
+        `${event.toolName}${target ? ` ${target}` : ""}`,
+        "native file-tool execution was blocked because the sandbox runtime is unavailable",
+        target,
+      );
       return {
         block: true,
         reason:
@@ -3385,6 +3548,11 @@ export default function (pi: ExtensionAPI) {
         onViolation: async (policyViolation) => {
           const runtimeConfig = getStateRuntimeConfig(sandboxState);
           if (!runtimeConfig) {
+            recordUnavailableSandboxBlock(
+              `${event.toolName} ${policyViolation.access.path}`,
+              "native file-tool execution was blocked after the sandbox runtime became unavailable",
+              policyViolation.access.path,
+            );
             return {
               allow: false,
               reason:
@@ -3464,12 +3632,14 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     setSandboxStatus(ctx, false);
     await closeJvmProxyAdapter();
+    stopSandboxAuditLog("session-restart");
     sessionContext = ctx;
     resetRuntimeState();
     rebuildBashTools(ctx.cwd);
+    startSandboxAuditLog(ctx, event.reason);
 
     const noSandbox = pi.getFlag("no-sandbox") as boolean;
     if (noSandbox) {
@@ -3492,6 +3662,7 @@ export default function (pi: ExtensionAPI) {
     }
     const config = loadedConfig.config;
     sandboxConfig = config;
+    recordSandboxConfiguration(config);
     setSandboxDebugLogging(shouldEnableSandboxDebug(config));
 
     if (!config.enabled) {
@@ -3518,7 +3689,7 @@ export default function (pi: ExtensionAPI) {
     notify(ctx, "Sandbox initialized", "info");
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     setSandboxStatus(ctx, false);
     suspendJvmProxyAdapter();
     if (getStateRuntimeConfig(sandboxState)) {
@@ -3529,6 +3700,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     await closeJvmProxyAdapter();
+    stopSandboxAuditLog(event.reason);
 
     resetRuntimeState();
     sessionContext = null;
@@ -3562,6 +3734,7 @@ export default function (pi: ExtensionAPI) {
             configPaths: sandboxConfigPaths,
             events: sandboxEvents,
             debugLines: sandboxDebugLines,
+            auditLog: describeSandboxAuditLog(),
             exclusionsEnabled:
               sandboxConfig?.commands.exclusionsEnabled ??
               DEFAULT_CONFIG.commands.exclusionsEnabled,
@@ -3604,6 +3777,7 @@ export default function (pi: ExtensionAPI) {
           notifySandboxConfigParseErrors(ctx, parseErrors);
         }
         sandboxConfig = loadedConfig.config;
+        recordSandboxConfiguration(loadedConfig.config);
         setSandboxDebugLogging(shouldEnableSandboxDebug(loadedConfig.config));
         const runtimeConfig = await initializeSandboxRuntime(ctx, loadedConfig.config);
         if (!runtimeConfig) return;
@@ -3662,6 +3836,7 @@ export default function (pi: ExtensionAPI) {
           `  State: enabled`,
           `  Mode: ${promptMode}`,
           `  Runtime state: ${getSandboxRunMode(sandboxState)}`,
+          `  Audit log: ${describeSandboxAuditLog()}`,
           `  Runtime debug logs: ${describeSandboxDebugLogging()}`,
           "",
           "  Network:",
