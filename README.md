@@ -66,6 +66,35 @@ The standalone `tau-acp-client` package provides the `acp-client` extension; the
 | `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
 | `todoist`           | `/todoist`           |   —    |  —  | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
 
+### Git over SSH in the macOS sandbox
+
+Tau routes Git-over-SSH connections through sandbox-runtime's authenticated proxy on macOS. The default policy exposes `$SSH_AUTH_SOCK` and permits SSH configuration, known hosts, and public keys while private-key files stay blocked. Use an SSH agent instead of granting the sandbox access to a private key.
+
+In a trusted terminal outside Pi, save the key's passphrase in Keychain and load the key into the macOS agent:
+
+```bash
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+```
+
+Configure OpenSSH to select that agent identity through its public key:
+
+```sshconfig
+Host github.com
+    IdentityFile ~/.ssh/id_ed25519.pub
+    IdentitiesOnly yes
+    UseKeychain yes
+```
+
+The public key only selects a matching agent identity. It cannot authenticate by itself. Use `ssh-add -l` to confirm that the matching identity is loaded. Make the first host connection from a trusted terminal outside Pi if `known_hosts` does not contain the host yet.
+
+A Pi restart does not clear the macOS agent. A macOS logout or restart does. If the passphrase was saved in Keychain, restore Keychain-backed identities from a trusted login context with:
+
+```bash
+ssh-add --apple-load-keychain
+```
+
+A user LaunchAgent can run this command at login. While a key is loaded, sandboxed processes that can reach `$SSH_AUTH_SOCK` can ask the agent to sign with it.
+
 ### JVM HTTP clients in the macOS sandbox
 
 Java and Kotlin HTTP clients can ignore `HTTP_PROXY` and `HTTPS_PROXY`. On macOS, opt in to Tau's JVM proxy adapter when these clients need sandboxed network access:

@@ -61,6 +61,12 @@ pi install -l npm:tau-all-agent
 | ---------- | ------------------------------------------------------------- |
 | `tau-dark` | Pi's official dark theme with a calmer, more cohesive polish. |
 
+## Git over SSH on macOS
+
+Tau routes Git-over-SSH connections through the sandbox's authenticated proxy. Private-key files remain blocked, so load the key into the macOS SSH agent from a trusted terminal with `ssh-add --apple-use-keychain ~/.ssh/id_ed25519`. Configure the host with `IdentityFile ~/.ssh/id_ed25519.pub` and `IdentitiesOnly yes`; the public key selects the matching agent identity but cannot authenticate by itself.
+
+Use `ssh-add -l` to confirm that the identity is loaded. After a macOS logout or restart, restore Keychain-backed identities from a trusted login context with `ssh-add --apple-load-keychain`. A user LaunchAgent can run that command at login. While loaded, the key is available for signing through `$SSH_AUTH_SOCK` to sandboxed processes.
+
 ## JVM HTTP clients on macOS
 
 Java and Kotlin HTTP clients can ignore proxy environment variables. Opt in to Tau's macOS adapter with `"network": { "jvmProxy": true, "allowLocalBinding": true }` in `sandbox.json`. This support is verified only on macOS. `allowLocalBinding` also permits local TCP binding and loopback connections.
