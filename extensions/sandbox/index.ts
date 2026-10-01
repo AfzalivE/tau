@@ -23,6 +23,7 @@
  *   "debug": false,
  *   "commands": {
  *     "blocked": ["npx"],
+ *     "exclusionsEnabled": true,
  *     "excluded": ["tdc"]
  *   },
  *   "network": {
@@ -136,6 +137,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
   debug: false,
   commands: {
     blocked: [],
+    exclusionsEnabled: true,
     excluded: [],
   },
   network: {
@@ -292,6 +294,8 @@ type SandboxState =
 
 type SandboxCommandConfig = {
   blocked: string[];
+  /** Enable commands.excluded as an outside-sandbox execution path. */
+  exclusionsEnabled: boolean;
   /** Commands that run outside the OS sandbox. Must match a single simple command. */
   excluded: string[];
 };
@@ -818,6 +822,14 @@ function cleanStringArray(value: unknown[], field: string): string[] {
   return cleaned;
 }
 
+function coerceBoolean(value: unknown, fallback: boolean, field: string): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+
+  console.error(`Warning: Expected ${field} to be a boolean; using defaults.`);
+  return fallback;
+}
+
 function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
   if (!Array.isArray(value)) {
     console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
@@ -853,6 +865,11 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
         config.commands?.blocked,
         DEFAULT_CONFIG.commands.blocked,
         "commands.blocked",
+      ),
+      exclusionsEnabled: coerceBoolean(
+        config.commands?.exclusionsEnabled,
+        DEFAULT_CONFIG.commands.exclusionsEnabled,
+        "commands.exclusionsEnabled",
       ),
       excluded: coerceStringArray(
         config.commands?.excluded,
@@ -2595,9 +2612,11 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           throw new Error(`Working directory does not exist: ${cwd}`);
         }
 
+        const commandConfig = getSandboxConfig()?.commands ?? DEFAULT_CONFIG.commands;
         const excludedMatch = findExcludedCommand(
           command,
-          getSandboxConfig()?.commands.excluded ?? [],
+          commandConfig.excluded,
+          commandConfig.exclusionsEnabled,
         );
         if (excludedMatch) {
           const summary = `command bypassed sandbox via commands.excluded entry \`${excludedMatch.pattern}\``;
@@ -2847,11 +2866,13 @@ function renderSandboxDoctorReport(options: {
   configPaths: SandboxConfigPath[];
   events: SandboxEvent[];
   debugLines: SandboxDebugLine[];
+  exclusionsEnabled: boolean;
 }): string {
-  const { state, promptMode, configPaths, events, debugLines } = options;
+  const { state, promptMode, configPaths, events, debugLines, exclusionsEnabled } = options;
   const lines = [
     "Sandbox doctor",
     `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`,
+    `- Excluded-command execution: ${exclusionsEnabled ? "enabled" : "disabled"}`,
     `- Runtime debug logs: ${describeSandboxDebugLogging()}`,
   ];
 
@@ -3541,6 +3562,9 @@ export default function (pi: ExtensionAPI) {
             configPaths: sandboxConfigPaths,
             events: sandboxEvents,
             debugLines: sandboxDebugLines,
+            exclusionsEnabled:
+              sandboxConfig?.commands.exclusionsEnabled ??
+              DEFAULT_CONFIG.commands.exclusionsEnabled,
           }),
           "info",
         );
@@ -3666,7 +3690,8 @@ export default function (pi: ExtensionAPI) {
           "",
           "  Commands:",
           `    Blocked: ${sandboxConfig?.commands.blocked.join(", ") || "(none)"}`,
-          `    Excluded: ${sandboxConfig?.commands.excluded.join(", ") || "(none)"}`,
+          `    Excluded-command execution: ${sandboxConfig?.commands.exclusionsEnabled ? "enabled" : "disabled"}`,
+          `    Configured exclusions: ${sandboxConfig?.commands.excluded.join(", ") || "(none)"}`,
           "",
           "  Advanced:",
           `    ignoreViolations: ${runtimeConfig.ignoreViolations ? "configured" : "(none)"}`,

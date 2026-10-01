@@ -69,6 +69,10 @@ test("expands tilde paths for excluded command execution", () => {
   });
 });
 
+test("disables excluded-command matching when configured", () => {
+  assert.equal(findExcludedCommand("tdc auth status", ["tdc"], false), null);
+});
+
 test("matches excluded commands by executable and glob patterns", () => {
   assert.equal(findExcludedCommand("tdc", ["tdc"])?.pattern, "tdc");
   assert.equal(findExcludedCommand("tdc auth status", ["tdc"])?.pattern, "tdc");

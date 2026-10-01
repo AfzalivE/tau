@@ -95,6 +95,20 @@ ssh-add --apple-load-keychain
 
 A user LaunchAgent can run this command at login. While a key is loaded, sandboxed processes that can reach `$SSH_AUTH_SOCK` can ask the agent to sign with it.
 
+### Sandbox exclusions
+
+`commands.excluded` runs matching commands outside the OS sandbox. Disable that execution path while keeping the configured list intact with:
+
+```json
+{
+  "commands": {
+    "exclusionsEnabled": false
+  }
+}
+```
+
+When the sandbox is active and exclusions are disabled, matching commands use the normal sandboxed Bash path.
+
 ### JVM HTTP clients in the macOS sandbox
 
 Java and Kotlin HTTP clients can ignore `HTTP_PROXY` and `HTTPS_PROXY`. On macOS, opt in to Tau's JVM proxy adapter when these clients need sandboxed network access:

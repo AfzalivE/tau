@@ -82,7 +82,10 @@ export function findBlockedCommand(
 export function findExcludedCommand(
   command: string,
   excludedCommands: string[],
+  enabled = true,
 ): ExcludedCommandMatch | null {
+  if (!enabled) return null;
+
   const normalizedExcludedCommands = normalizeCommandPatterns(excludedCommands);
   if (normalizedExcludedCommands.length === 0) return null;
 
