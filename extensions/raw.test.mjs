@@ -4,7 +4,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { loadExtensions } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
-import { Text, TUI } from "../node_modules/@earendil-works/pi-tui/dist/index.js";
+import {
+  Text,
+  TuiMainScreen,
+  TuiAltScreen,
+} from "../node_modules/@earendil-works/pi-tui/dist/index.js";
 
 const extensionPath = fileURLToPath(new URL("./raw/index.ts", import.meta.url));
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -109,7 +113,7 @@ test("opens an unwrapped transcript in terminal scrollback and resumes Pi", asyn
       input.setRawMode(false);
     },
     start: () => events.push(`start:${input.isRaw}`),
-    requestRender: () => {},
+    renderNow: () => {},
   };
   const notifications = [];
   const ctx = {
@@ -161,50 +165,55 @@ test("opens an unwrapped transcript in terminal scrollback and resumes Pi", asyn
   assert.deepEqual(notifications, ["Usage: /raw"]);
 });
 
-test("restores rendering when raw interrupts a pending TUI render", async () => {
-  const { extensions, errors } = await loadExtensions([extensionPath], projectRoot);
-  assert.deepEqual(errors, []);
+for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+  test(`restores rendering and preserves scrollback when raw interrupts ${Screen.name}`, async () => {
+    const { extensions, errors } = await loadExtensions([extensionPath], projectRoot);
+    assert.deepEqual(errors, []);
 
-  const extension = extensions[0];
-  assert.ok(extension);
+    const extension = extensions[0];
+    assert.ok(extension);
 
-  const sessionStart = extension.handlers.get("session_start")?.[0];
-  const rawCommand = extension.commands.get("raw");
-  assert.ok(sessionStart);
-  assert.ok(rawCommand);
+    const sessionStart = extension.handlers.get("session_start")?.[0];
+    const rawCommand = extension.commands.get("raw");
+    assert.ok(sessionStart);
+    assert.ok(rawCommand);
 
-  const input = new RawOnlyInput();
-  const restoreStdin = replaceStdin(input);
-  const terminal = new RecordingTerminal();
-  const tui = new TUI(terminal);
-  tui.addChild(new Text("TUI renders again after raw"));
-  tui.start();
-  await timeout(30);
+    const input = new RawOnlyInput();
+    const restoreStdin = replaceStdin(input);
+    const terminal = new RecordingTerminal();
+    const tui = new Screen(terminal);
+    tui.addChild(new Text("TUI renders again after raw"));
+    tui.start();
+    tui.renderNow();
 
-  const ctx = {
-    mode: "tui",
-    hasUI: true,
-    isIdle: () => true,
-    sessionManager: { getBranch: () => [] },
-    ui: {
-      setWidget: (_key, content) => {
-        if (typeof content === "function") content(tui, {});
+    const ctx = {
+      mode: "tui",
+      hasUI: true,
+      isIdle: () => true,
+      sessionManager: { getBranch: () => [] },
+      ui: {
+        setWidget: (_key, content) => {
+          if (typeof content === "function") content(tui, {});
+        },
+        notify: () => {},
       },
-      notify: () => {},
-    },
-  };
+    };
 
-  try {
-    await sessionStart({}, ctx);
-    const writesBeforeRaw = terminal.writes.length;
-    tui.requestRender();
-    await rawCommand.handler("", ctx);
-    await timeout(30);
+    try {
+      await sessionStart({}, ctx);
+      const writesBeforeRaw = terminal.writes.length;
+      tui.requestRender();
+      await rawCommand.handler("", ctx);
 
-    const resumedWrites = terminal.writes.slice(writesBeforeRaw).join("");
-    assert.ok(resumedWrites.includes("TUI renders again after raw"));
-  } finally {
-    tui.stop();
-    restoreStdin();
-  }
-});
+      const resumedWrites = terminal.writes.slice(writesBeforeRaw).join("");
+      assert.ok(resumedWrites.includes("TUI renders again after raw"));
+      assert.ok(
+        !resumedWrites.includes("\x1b[3J"),
+        "Resuming Pi must preserve terminal scrollback",
+      );
+    } finally {
+      tui.stop();
+      restoreStdin();
+    }
+  });
+}

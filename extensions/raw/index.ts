@@ -1,11 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Component, TUI, TuiMainScreen } from "@earendil-works/pi-tui";
 
 import { formatRawScrollback, rawTranscript } from "./render.js";
 
 const CAPTURE_WIDGET_KEY = "raw-output-capture";
-
-type RawTui = Pick<TUI, "start" | "stop" | "requestRender" | "terminal"> & Record<string, unknown>;
 
 function emptyComponent(): Component {
   return {
@@ -34,22 +32,20 @@ function waitForEnter(): Promise<void> {
 
 /**
  * Resume at the end of the raw dump without clearing it from scrollback.
- * TUI's public forced redraw clears scrollback, so reset its render bookkeeping
- * to the same values it has before its initial non-clearing render instead.
+ * A forced redraw clears scrollback. Restore a fresh main-screen render state
+ * through Pi's public API instead. Fullscreen mode manages its own screen state.
  */
-function resetTuiForScrollback(tui: RawTui): void {
-  tui.previousLines = [];
-  tui.previousKittyImageIds = new Set<number>();
-  tui.previousWidth = 0;
-  tui.previousHeight = 0;
-  tui.cursorRow = 0;
-  tui.hardwareCursorRow = 0;
-  tui.maxLinesRendered = 0;
-  tui.previousViewportTop = 0;
-  // stop() cancels the pending timer but leaves this flag set, which makes
-  // start() skip scheduling the redraw needed to restore Pi's UI.
-  tui.renderRequested = false;
-  tui.renderTimer = undefined;
+function resetTuiForScrollback(tui: TUI): void {
+  if (tui.mode !== "regular") return;
+  (tui as TuiMainScreen).restoreRenderState({
+    previousLines: [],
+    previousWidth: 0,
+    previousHeight: 0,
+    cursorRow: 0,
+    hardwareCursorRow: 0,
+    maxLinesRendered: 0,
+    previousViewportTop: 0,
+  });
 }
 
 function isInteractiveTui(ctx: ExtensionContext): boolean {
@@ -62,7 +58,7 @@ function reportUnavailable(ctx: ExtensionContext, message: string): void {
 }
 
 export default function rawOutputExtension(pi: ExtensionAPI): void {
-  let tui: RawTui | undefined;
+  let tui: TUI | undefined;
   let rawViewOpen = false;
 
   const showRawTranscript = async (ctx: ExtensionContext): Promise<void> => {
@@ -97,6 +93,7 @@ export default function rawOutputExtension(pi: ExtensionAPI): void {
       if (stopped) {
         resetTuiForScrollback(currentTui);
         currentTui.start();
+        currentTui.renderNow();
       }
     }
   };
@@ -126,7 +123,7 @@ export default function rawOutputExtension(pi: ExtensionAPI): void {
     ctx.ui.setWidget(
       CAPTURE_WIDGET_KEY,
       (currentTui) => {
-        tui = currentTui as unknown as RawTui;
+        tui = currentTui;
         return emptyComponent();
       },
       { placement: "belowEditor" },
