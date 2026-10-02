@@ -105,10 +105,6 @@ export async function main(argv) {
         `Could not load the sandbox extension: ${loaded.errors.map((error) => error.error).join("; ")}`,
       );
     }
-    loaded.runtime.flagValues.set("sandbox-required", true);
-    loaded.runtime.flagValues.set("sandbox-debug", options.debug);
-    if (options.config) loaded.runtime.flagValues.set("sandbox-config", options.config);
-
     // Keep model configuration and credentials out of a command-only session.
     const modelRuntime = await ModelRuntime.create({
       credentials: new InMemoryCredentialStore(),
@@ -125,6 +121,9 @@ export async function main(argv) {
       tools: ["bash"],
       thinkingLevel: "off",
     }));
+    session.extensionRunner.setFlagValue("sandbox-required", true);
+    session.extensionRunner.setFlagValue("sandbox-debug", options.debug);
+    if (options.config) session.extensionRunner.setFlagValue("sandbox-config", options.config);
     const extensionErrors = [];
     let shutdownRequested = false;
     await session.bindExtensions({
@@ -173,7 +172,12 @@ async function executeCommand(session, args, signal) {
     throw new Error("The sandbox Bash tool is missing. Refusing built-in Bash execution.");
   }
   const toolCall = { type: "toolCall", id: "sandbox-run", name: "bash", arguments: args };
-  const preflight = await session.agent.beforeToolCall?.({ toolCall, args }, signal);
+  const preflight = await session.extensionRunner.emitToolCall({
+    type: "tool_call",
+    toolCallId: toolCall.id,
+    toolName: "bash",
+    input: args,
+  });
   if (preflight?.block) return { exitCode: 126, output: preflight.reason || "Command blocked." };
 
   let result;
@@ -184,10 +188,15 @@ async function executeCommand(session, args, signal) {
     result = { content: [{ type: "text", text: error.message }], details: undefined };
     exitCode = failureExitCode(error.message);
   }
-  const patch = await session.agent.afterToolCall?.(
-    { toolCall, args, result, isError: exitCode !== 0 },
-    signal,
-  );
+  const patch = await session.extensionRunner.emitToolResult({
+    type: "tool_result",
+    toolCallId: toolCall.id,
+    toolName: "bash",
+    input: args,
+    content: result.content,
+    details: result.details,
+    isError: exitCode !== 0,
+  });
   if (patch) {
     result = {
       ...result,
