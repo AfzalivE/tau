@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Added
+
+- Added per-session sandbox audit logs, an exclusion disable switch, and a strict standalone `sandbox-run` command.
+- Added the `fix-ci` skill for gated CI diagnosis, focused fixes, approved reruns, and post-push verification.
+- Added the `address-pr-comments` skill for gated PR feedback handling with per-change commits and replies.
+- Added a standalone `tau-acp-client` package for the ACP client extension.
+- Added `afzal-tau-non-coding-agent`, a local-model knowledge-work profile for running `/insights` over sessions rooted in non-code sources such as Obsidian vaults.
+- Added an `acp-client` extension to use Claude and Codex agents via the Agent Client Protocol, through an `acp_agent` tool and an `/acp` command.
+- Added a dedicated `/review` security focus.
+- Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
+
+### Changed
+
+- Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
+- Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
+- Installed the Claude and Codex ACP adapters with `tau-acp-client` instead of downloading them at runtime through `npx`.
+- Grounded `/review` efficiency findings in locally provable runtime costs.
+- Sharpened `/review` prompts for deslopify-style maintainability issues.
+- Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
+- Clarified sandbox violation prompts with compact prominent access summaries, targets, and session-only policy changes.
+
+### Security
+
+- Guarded native Pi file tools with the sandbox filesystem policy.
+- Preserved fork command restrictions and JVM proxy configuration in background subagents. Strict sandbox runs reject per-command unsandboxed approval.
+
+### Fixed
+
+- Restored `/raw` on Pi 0.87.1 through public renderer APIs, preserving scrollback in regular and fullscreen modes.
+- Allowed native file tools to create permitted files through macOS temporary-directory aliases.
+- Fixed the fork-specific package manifest's `review` extension entry so packaging resolves the extension directory.
+
 ## [0.2.0] - 2026-09-27
 
 ### Migration notes

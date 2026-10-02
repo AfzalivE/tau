@@ -35,7 +35,7 @@ pi install -l npm:tau-coding-agent
 | `fast`              | `/fast`              | Toggle fast processing for compatible models.                                                                             |
 | `openai-verbosity`  | `/verbosity`         | Set verbosity for supported GPT models.                                                                                   |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `sandbox`           | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
 | `subagent`          | —                    | Delegate work to background Pi agents and follow up with them.                                                            |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |

@@ -38,12 +38,6 @@ Project-local install allows you to pin Tau for everyone working on the project:
 pi install -l npm:tau-coding-agent
 ```
 
-## Agent configuration
-
-The published packages do not include agent configuration; those files are highly personal.
-
-Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
-
 ## Extensions
 
 The standalone `tau-acp-client` package provides the `acp-client` extension; the Tau bundle packages below do not include it.
@@ -65,7 +59,7 @@ The standalone `tau-acp-client` package provides the `acp-client` extension; the
 | `fast`              | `/fast`              |   ✓    |  ✓  | Toggle fast processing for compatible models.                                                                             |
 | `openai-verbosity`  | `/verbosity`         |   ✓    |  ✓  | Set verbosity for supported GPT models.                                                                                   |
 | `review`            | `/review`, `/triage` |   ✓    |  ✓  | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`           | `/sandbox`           |   ✓    |  ✓  | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `sandbox`           | `/sandbox`           |   ✓    |  ✓  | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
 | `subagent`          | —                    |   ✓    |  ✓  | Delegate work to background Pi agents and follow up with them.                                                            |
 | `tool-display-mode` | `ctrl+o`             |   ✓    |  ✓  | Cycle tool output modes and combine background activity in the composer.                                                  |
 | `usage`             | `/usage`             |   ✓    |  ✓  | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
@@ -179,7 +173,7 @@ pi -e ./packages/afzal-tau-non-coding-agent
 
 The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`. An extension manifest entry ending in `index.ts` includes its containing directory and sibling modules; direct-file entries must be updated when upstream renames their source file.
 
-Run `npm test` for all extension tests or `npm test -- <extension>` for one extension. Node test options can follow the extension name, for example `npm test -- <extension> --test-name-pattern=reload`. Tests compile into disposable build output and run with isolated home/config directories and no inherited credentials. See [AGENTS.md](AGENTS.md) for extension development and testing guidelines.
+Run `npm test` for all extension tests or `npm test -- <extension>` for one extension. Node test options can follow the extension name, for example `npm test -- <extension> --test-name-pattern=reload`. TypeScript tests compile into disposable build output. The runner also includes the fork's `.test.mjs` suites in `extensions/`, `scripts/`, and `skills/`. Tests run with isolated home/config directories and no inherited credentials. See [AGENTS.md](AGENTS.md) for extension development and testing guidelines.
 
 CI runs formatting, linting, compilation, extension tests, and package checks on macOS and Linux for pull requests and pushes to `main`.
 
@@ -263,33 +257,32 @@ That wrapper reads dream config from the personal agent-config repo via `AGENTS_
 
 Bundled in `afzal-tau-all-agent`.
 
-| Extension         | Command      | Description                                                              |
-| ----------------- | ------------ | ------------------------------------------------------------------------ |
-| `converge`        | `/converge`  | Run multiple planner personas and synthesize one recommended plan.       |
-| `raw`             | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
-| `spotlight`       | `/spotlight` | Mirror a linked worktree into the main worktree while you work elsewhere. |
-| `todoist`         | `/todoist`   | Todoist-backed tasks with offline outbox sync for single or multi-session work. |
+| Extension   | Command         | Description                                                                |
+| ----------- | --------------- | -------------------------------------------------------------------------- |
+| `converge`  | `/converge`     | Run multiple planner personas and synthesize one recommended plan.         |
+| `raw`       | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
+| `spotlight` | `/spotlight`    | Mirror a linked worktree into the main worktree while you work elsewhere.  |
 
 ### Skills in this fork
 
 Bundled in `afzal-tau-all-agent`.
 
-| Skill                           | Description                                                                                 |
-| ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `address-pr-comments`           | Address PR feedback through disposition, per-change commits, approval, push, and replies.   |
-| `fix-ci`                        | Fix failing CI through triage, focused commits, approval, reruns, and verification.          |
-| `material-3`                    | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.       |
-| `cald`                          | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.  |
-| `dream`                         | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.      |
-| `gh`                            | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                             |
-| `git-rebase-check`              | Verify that a rebased branch preserved the same cumulative patch.                            |
-| `git-worktree`                  | Manage git worktrees for multiple branches in separate directories.                          |
-| `ms-openapi-explorer`           | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                            |
-| `qmd`                           | Local semantic search engine for markdown knowledge bases.                                   |
-| `pup/datadog/dashboards`        | Manage Datadog dashboards through the pup CLI and Datadog API.                               |
-| `review-breaker`                | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.     |
-| `td`                            | Todoist CLI for task and project management.                                                 |
-| `tdc`                           | Comms CLI for Twist team messaging, threads, DMs, and search.                              |
+| Skill                    | Description                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| `address-pr-comments`    | Address PR feedback through disposition, per-change commits, approval, push, and replies.  |
+| `fix-ci`                 | Fix failing CI through triage, focused commits, approval, reruns, and verification.        |
+| `material-3`             | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.      |
+| `cald`                   | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac. |
+| `dream`                  | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.    |
+| `gh`                     | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                            |
+| `git-rebase-check`       | Verify that a rebased branch preserved the same cumulative patch.                          |
+| `git-worktree`           | Manage git worktrees for multiple branches in separate directories.                        |
+| `ms-openapi-explorer`    | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                           |
+| `qmd`                    | Local semantic search engine for markdown knowledge bases.                                 |
+| `pup/datadog/dashboards` | Manage Datadog dashboards through the pup CLI and Datadog API.                             |
+| `review-breaker`         | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.   |
+| `td`                     | Todoist CLI for task and project management.                                               |
+| `tdc`                    | Comms CLI for Twist team messaging, threads, DMs, and search.                              |
 
 See each `skills/*/SKILL.md` for the exact behavior and usage contract.
 
