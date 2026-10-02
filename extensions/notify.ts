@@ -5,7 +5,7 @@
  * - Agent finished and ready for the next prompt
  * - Extension prompt is waiting for a question/confirmation answer
  * Supports multiple terminal protocols:
- * - OSC 777: Ghostty, iTerm2, WezTerm, rxvt-unicode
+ * - OSC 9: Ghostty, Supacode, iTerm2, WezTerm
  * - OSC 99: Kitty
  * - Windows toast: Windows Terminal (WSL)
  */
@@ -29,8 +29,8 @@ function windowsToastScript(title: string, body: string): string {
   ].join("; ");
 }
 
-function notifyOSC777(title: string, body: string): void {
-  process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+function notifyOSC9(title: string, body: string): void {
+  process.stdout.write(`\x1b]9;${title}: ${body}\x1b\\`);
 }
 
 function notifyOSC99(title: string, body: string): void {
@@ -51,16 +51,8 @@ function notify(title: string, body: string): void {
   } else if (process.env.KITTY_WINDOW_ID) {
     notifyOSC99(title, body);
   } else {
-    notifyOSC777(title, body);
+    notifyOSC9(title, body);
   }
-}
-
-function getPromptSource(event: unknown): string | undefined {
-  if (!event || typeof event !== "object") return undefined;
-  const source = (event as Record<string, unknown>).source;
-  if (typeof source !== "string") return undefined;
-  const trimmed = source.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function getSessionKey(ctx: ExtensionContext): string {
@@ -89,7 +81,7 @@ function extractReviewOutcome(data: unknown): "success" | "failed" | "cancelled"
 }
 
 export default function (pi: ExtensionAPI) {
-  let pendingPromptCount = 0;
+  let promptPending = false;
   const activeReviewSessions = new Set<string>();
   let currentSessionKey: string | undefined;
   let pendingReadyNotification: ReturnType<typeof setImmediate> | undefined;
@@ -110,7 +102,7 @@ export default function (pi: ExtensionAPI) {
     pendingReadyNotification = setImmediate(() => {
       pendingReadyNotification = undefined;
       if (!ctx.isIdle()) return;
-      if (pendingPromptCount > 0) return;
+      if (promptPending) return;
       if (hasCurrentSessionReviewRun()) return;
       notify("Pi", "Ready for input");
     });
@@ -122,18 +114,13 @@ export default function (pi: ExtensionAPI) {
     currentSessionKey = getSessionKey(ctx);
   });
 
-  pi.events.on("ui:prompt_start", (data) => {
-    const wasIdle = pendingPromptCount === 0;
-    pendingPromptCount += 1;
-
-    if (!wasIdle) return;
-    const source = getPromptSource(data);
-    notify("Pi", source ? `Question pending (${source})` : "Question pending");
+  pi.on("ui_prompt_start", async () => {
+    promptPending = true;
+    notify("Pi", "Waiting for input");
   });
 
-  pi.events.on("ui:prompt_end", () => {
-    if (pendingPromptCount === 0) return;
-    pendingPromptCount -= 1;
+  pi.on("ui_prompt_end", async () => {
+    promptPending = false;
   });
 
   pi.events.on(REVIEW_EVENT_START, (data) => {
@@ -148,8 +135,9 @@ export default function (pi: ExtensionAPI) {
 
     activeReviewSessions.delete(sessionKey);
 
-    if (pendingPromptCount > 0) return;
     if (!currentSessionKey || sessionKey !== currentSessionKey) return;
+    cancelReadyNotification();
+    if (promptPending) return;
 
     const outcome = extractReviewOutcome(data);
     if (outcome === "success") {
@@ -170,7 +158,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     cancelReadyNotification();
-    pendingPromptCount = 0;
+    promptPending = false;
     const sessionKey = getSessionKey(ctx);
     activeReviewSessions.delete(sessionKey);
     if (currentSessionKey === sessionKey) {

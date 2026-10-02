@@ -1,4 +1,3 @@
-import { complete } from "@earendil-works/pi-ai/compat";
 import {
   StringEnum,
   type Api,
@@ -14,6 +13,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -71,6 +71,9 @@ Schema:
     "focus": "...",
     "pending": "..."
   },
+  "pending_dispositions": [
+    { "id": "pending-1", "status": "retain" }
+  ],
   "summary": "..."
 }
 
@@ -84,9 +87,12 @@ Rules:
 - focus: the current objective and immediate next steps.
 - pending: unresolved follow-ups, open questions, blocked work.
 - Use explicit invalidates/supersedes links when resolving contradictions.
-- Preserve unresolved pending items. Do not clear pending unless the summary explicitly says they were resolved or abandoned.
+- The <pending-items> JSON assigns snapshot-local identifiers to every nonblank line of existing pending.md, including headings and continuation lines. This conservative unit preserves arbitrary existing Markdown without guessing item boundaries.
+- Return pending_dispositions with exactly one {id, status} per provided identifier, no duplicates or unknown identifiers. Return [] when no identifiers were provided.
+- status must be "retain", "complete", or "abandon". Use complete or abandon only when the provided evidence establishes that work is finished or deliberately abandoned; otherwise retain. Summary wording never authorizes deletion.
+- Every retained line must remain verbatim as a separate line in blocks.pending, including repeated occurrences. Do not replace retained work with a paraphrase or an identifier. For multiline work, retain every constituent line unless that work is complete or abandoned. You may reorder retained lines and add new pending work.
 - Keep every block short, concrete, and high-signal.
-- Self-check that JSON.parse(output) succeeds before responding.`;
+- Before returning, check that the output is valid JSON and matches the required structure.`;
 
 // --- Types and errors ---
 
@@ -112,20 +118,27 @@ type PendingCompaction = {
 };
 
 type MemoryState = {
-  // Newest timestamp appended to log.md.
+  // Timestamp of the last entry appended to log.md.
   lastLogAt: string | null;
   // Timestamp of the most recent successful dream run.
   lastDreamAt: string | null;
-  // Next dream replays log.md entries newer than this timestamp.
+  // Timestamp provenance only; replay follows the append cursor, not wall time.
   lastDreamedLogAt: string | null;
+  lastDreamedLogCursor: LogCursor | null;
   // session_compact summaries waiting to be folded into core.
   pendingCompactions: PendingCompaction[];
+};
+
+type LogCursor = {
+  bytes: number;
+  sha256: string;
 };
 
 type MemoryStateFile = {
   last_log_at: string | null;
   last_dream_at: string | null;
   last_dreamed_log_at: string | null;
+  last_dreamed_log_cursor: LogCursor | null;
   pending_compactions: PendingCompaction[];
 };
 
@@ -158,8 +171,15 @@ type DreamReplay = {
   totalLines: number;
   totalChars: number;
   undreamedEntries: LogEntry[];
+  logCursor: LogCursor;
+  previousLogCursor: LogCursor | null;
   pendingCompactions: PendingCompaction[];
   researchFiles: string[];
+};
+
+type PendingItem = {
+  id: string;
+  text: string;
 };
 
 type DreamOutput = {
@@ -198,9 +218,6 @@ type AutoDreamState = {
 
 type ModelSelection = {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
 };
 
 class MemoryReadmeMissingError extends Error {
@@ -289,12 +306,6 @@ async function maybeScheduleAutoDream(
     return true;
   }
 
-  const noUndreamedLogs =
-    stateFile.lastLogAt !== null && stateFile.lastLogAt === stateFile.lastDreamedLogAt;
-  if (noUndreamedLogs) {
-    return shouldAutoDream(quickStatus, trigger) ? startAutoDream(quickStatus) : true;
-  }
-
   const status = await loadAutoDreamStatus(cwd, core, stateFile);
   return shouldAutoDream(status, trigger) ? startAutoDream(status) : true;
 }
@@ -373,15 +384,16 @@ function getDreamReplaySignature(replay: DreamReplay): string {
     readme: replay.readme,
     blocks: replay.blocks,
     undreamedEntries: replay.undreamedEntries,
+    logCursor: replay.logCursor,
+    previousLogCursor: replay.previousLogCursor,
     pendingCompactions: replay.pendingCompactions,
     researchFiles: replay.researchFiles,
   });
 }
 
-// Dream reads current core, log.md entries newer than lastDreamedLogAt,
-// pending compactions, and the memory README rules.
-// Dream writes rewritten core blocks, a dream summary in compactions/,
-// and state.json with lastDreamAt, lastDreamedLogAt, and an empty pendingCompactions queue.
+// Dream reads current core, logs after the persisted append cursor,
+// pending compactions, and the memory README rules, then commits only if unchanged.
+// A successful dream advances the cursor and clears pendingCompactions.
 async function runMemoryDream(
   cwd: string,
   ctx: ExtensionContext,
@@ -424,18 +436,13 @@ async function runMemoryDream(
   }
 
   const selection = await selectDreamModel(ctx);
-  const response = await complete(
+  const response = await ctx.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: MEMORY_DREAM_SYSTEM_PROMPT,
       messages: [buildDreamUserMessage(snapshot.replay, reason)],
     },
-    {
-      apiKey: selection.apiKey,
-      headers: selection.headers,
-      env: selection.env,
-      signal: ctx.signal,
-    },
+    { signal: ctx.signal },
   );
 
   if (response.stopReason === "aborted") {
@@ -456,19 +463,8 @@ async function runMemoryDream(
     throw new Error("Memory dream returned no text.");
   }
 
-  const abstraction = parseDreamOutput(rawText);
+  const abstraction = parseDreamOutput(rawText, getPendingItems(snapshot.replay.blocks.pending));
   const finalBlocks = abstraction.blocks;
-  if (
-    wouldWipePendingWithoutResolution(
-      snapshot.replay.blocks.pending,
-      finalBlocks.pending,
-      abstraction.summary,
-    )
-  ) {
-    throw new Error(
-      "Memory dream proposed clearing pending.md without saying it was resolved or abandoned.",
-    );
-  }
 
   const finalCoreLines = getCoreLineCount(finalBlocks);
   if (finalCoreLines > CORE_LINE_CAP) {
@@ -502,6 +498,7 @@ async function runMemoryDream(
       ...previousState,
       lastDreamAt: dreamTimestamp,
       lastDreamedLogAt,
+      lastDreamedLogCursor: snapshot.replay.logCursor,
       pendingCompactions: [],
     });
 
@@ -589,7 +586,7 @@ async function loadMemoryStatus(cwd: string): Promise<MemoryStatus> {
     lastLogAt: entries.at(-1)?.timestamp ?? state.lastLogAt,
     lastDreamAt: state.lastDreamAt,
     lastDreamedLogAt: state.lastDreamedLogAt,
-    undreamedLogs: countUndreamedLogs(entries, state.lastDreamedLogAt),
+    undreamedLogs: selectUndreamedLogEntries(logText ?? "", state).length,
     pendingCompactions: state.pendingCompactions.length,
     researchFiles: researchFiles.length,
     hasLog,
@@ -602,8 +599,7 @@ async function loadAutoDreamStatus(
   state: MemoryState,
 ): Promise<AutoDreamStatus> {
   const logText = await readTextIfExists(getMemoryPaths(cwd).logFile);
-  const entries = parseMemoryLog(logText ?? "");
-  const undreamedEntries = selectUndreamedLogEntries(entries, state.lastDreamedLogAt);
+  const undreamedEntries = selectUndreamedLogEntries(logText ?? "", state);
 
   return {
     coreLines: core.totalLines,
@@ -666,14 +662,14 @@ async function updateCoreBlockUnsafe(
   const totalLines = getCoreLineCount(nextBlocks);
   if (totalLines > CORE_LINE_CAP) {
     throw new Error(
-      `Core block update would exceed the ${CORE_LINE_CAP}-line cap (${totalLines}). Run memory_dream or remove content first.`,
+      `Core block update would exceed the ${CORE_LINE_CAP}-line cap (${totalLines}). Run memory_dream to consolidate core memory.`,
     );
   }
 
   const totalChars = getCoreCharCount(nextBlocks);
   if (totalChars > CORE_CHAR_CAP) {
     throw new Error(
-      `Core block update would exceed the ${CORE_CHAR_CAP}-character cap (${totalChars}). Run memory_dream or remove content first.`,
+      `Core block update would exceed the ${CORE_CHAR_CAP}-character cap (${totalChars}). Run memory_dream to consolidate core memory.`,
     );
   }
 
@@ -728,8 +724,7 @@ async function collectDreamReplay(cwd: string): Promise<DreamReplay> {
     readTextIfExists(paths.logFile),
     listResearchFiles(cwd),
   ]);
-  const entries = parseMemoryLog(logText ?? "");
-  const undreamedEntries = selectUndreamedLogEntries(entries, state.lastDreamedLogAt);
+  const undreamedEntries = selectUndreamedLogEntries(logText ?? "", state);
 
   return {
     readme,
@@ -737,6 +732,8 @@ async function collectDreamReplay(cwd: string): Promise<DreamReplay> {
     totalLines: core.totalLines,
     totalChars: core.totalChars,
     undreamedEntries,
+    logCursor: getLogCursor(Buffer.from(logText ?? "", "utf8")),
+    previousLogCursor: state.lastDreamedLogCursor,
     pendingCompactions: state.pendingCompactions,
     researchFiles,
   };
@@ -795,6 +792,7 @@ async function readStateUnsafe(cwd: string): Promise<MemoryState> {
       lastDreamAt: typeof parsed.last_dream_at === "string" ? parsed.last_dream_at : null,
       lastDreamedLogAt:
         typeof parsed.last_dreamed_log_at === "string" ? parsed.last_dreamed_log_at : null,
+      lastDreamedLogCursor: parseLogCursor(parsed.last_dreamed_log_cursor),
       pendingCompactions: Array.isArray(parsed.pending_compactions)
         ? parsed.pending_compactions
             .map((entry) => normalizePendingCompaction(entry))
@@ -805,7 +803,7 @@ async function readStateUnsafe(cwd: string): Promise<MemoryState> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `${path.relative(cwd, statePath)} is invalid JSON. Repair or restore it before using repo memory. ${message}`,
+      `${path.relative(cwd, statePath)} is invalid. Repair or restore it before using repo memory. ${message}`,
     );
   }
 }
@@ -816,6 +814,7 @@ async function writeStateUnsafe(cwd: string, state: MemoryState): Promise<void> 
     last_log_at: state.lastLogAt,
     last_dream_at: state.lastDreamAt,
     last_dreamed_log_at: state.lastDreamedLogAt,
+    last_dreamed_log_cursor: state.lastDreamedLogCursor,
     pending_compactions: state.pendingCompactions,
   };
   const payload = `${JSON.stringify(stateFile, null, 2)}\n`;
@@ -860,7 +859,7 @@ async function writeDreamSummary(
   const paths = getMemoryPaths(cwd);
   const filePath = path.join(
     paths.compactionsDir,
-    `${formatTimestampForFilename(summary.timestamp)}-dream.md`,
+    `${formatTimestampForFilename(summary.timestamp)}-${randomUUID()}-dream.md`,
   );
   await ensureDir(paths.compactionsDir);
   await fs.writeFile(filePath, buildDreamSummaryContent(summary), "utf8");
@@ -950,6 +949,10 @@ function buildDreamUserMessage(replay: DreamReplay, reason?: string): UserMessag
     replay.blocks.pending.trimEnd() || "(empty)",
     "</core>",
     "",
+    "<pending-items>",
+    JSON.stringify(getPendingItems(replay.blocks.pending), null, 2),
+    "</pending-items>",
+    "",
     "<undreamed-log>",
     formatLogEntriesForPrompt(replay.undreamedEntries) || "(none)",
     "</undreamed-log>",
@@ -980,15 +983,10 @@ async function selectDreamModel(ctx: ExtensionContext): Promise<ModelSelection> 
     throw new Error("error" in auth ? auth.error : "Memory dream is missing model auth.");
   }
 
-  return {
-    model: ctx.model,
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    env: auth.env,
-  };
+  return { model: ctx.model };
 }
 
-function parseDreamOutput(rawText: string): DreamOutput {
+function parseDreamOutput(rawText: string, pendingItems: PendingItem[]): DreamOutput {
   const parsed = parsePossiblyWrappedJson(rawText);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Memory dream output must be a JSON object.");
@@ -1016,6 +1014,8 @@ function parseDreamOutput(rawText: string): DreamOutput {
     blocks[name] = normalizeMarkdownBlock(value);
   }
 
+  validatePendingDispositions(record.pending_dispositions, pendingItems, blocks.pending);
+
   const summary =
     typeof record.summary === "string" && record.summary.trim()
       ? normalizeInlineText(record.summary)
@@ -1024,28 +1024,55 @@ function parseDreamOutput(rawText: string): DreamOutput {
   return { blocks, summary };
 }
 
-// Reject dream proposals that clear pending.md unless the summary says the work
-// was resolved or abandoned.
-function wouldWipePendingWithoutResolution(
-  previousPending: string,
-  nextPending: string,
-  summary: string,
-): boolean {
-  if (!previousPending.trim()) {
-    return false;
-  }
-
-  if (nextPending.trim()) {
-    return false;
-  }
-
-  return !mentionsResolution(summary);
+// Snapshot-local line IDs avoid changing existing free-form pending.md files.
+// Treating every nonblank line as a unit also protects prose and continuation lines.
+function getPendingItems(pending: string): PendingItem[] {
+  return normalizeMarkdownBlock(pending)
+    .split("\n")
+    .map((text, index) => ({ id: `pending-${index + 1}`, text }))
+    .filter((item) => item.text.trim().length > 0);
 }
 
-function mentionsResolution(text: string): boolean {
-  return /\b(resolve|resolved|abandon|abandoned|drop|dropped|complete|completed|close|closed)\b/i.test(
-    text,
-  );
+function validatePendingDispositions(
+  input: unknown,
+  items: PendingItem[],
+  nextPending: string,
+): void {
+  if (!Array.isArray(input)) {
+    throw new Error("Memory dream must include a pending_dispositions array.");
+  }
+  const byId = new Map(items.map((item) => [item.id, item.text]));
+  const seen = new Set<string>();
+  const nextLines = nextPending.split("\n");
+  for (const value of input) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Memory dream has an invalid pending disposition.");
+    }
+    const disposition = value as Record<string, unknown>;
+    const { id, status } = disposition;
+    if (typeof id !== "string" || !byId.has(id) || seen.has(id)) {
+      throw new Error("Memory dream has a duplicate or unknown pending identifier.");
+    }
+    if (
+      Object.keys(disposition).some((key) => key !== "id" && key !== "status") ||
+      (status !== "retain" && status !== "complete" && status !== "abandon")
+    ) {
+      throw new Error(`Memory dream has an invalid pending disposition for ${id}.`);
+    }
+    seen.add(id);
+    if (status === "retain") {
+      const lineIndex = nextLines.indexOf(byId.get(id)!);
+      if (lineIndex === -1) {
+        throw new Error(
+          `Memory dream must preserve retained pending item ${id} verbatim in pending.md.`,
+        );
+      }
+      nextLines.splice(lineIndex, 1);
+    }
+  }
+  if (seen.size !== items.length) {
+    throw new Error("Memory dream is missing pending dispositions for existing items.");
+  }
 }
 
 function buildMemoryPrompt(readme: string, blocks: CoreBlocks, researchFiles: string[]): string {
@@ -1101,9 +1128,11 @@ function buildDefaultMemoryReadme(): string {
     "",
     "Dream is the only consolidation mechanism for `core/`.",
     "",
+    "Dream requires an explicit retain, complete, or abandon disposition for every nonblank line of existing `pending.md`. Retained lines must remain verbatim; prose in a summary cannot authorize deleting pending work.",
+    "",
     "Pi can trigger dreaming automatically on session start when logs are stale and after compaction when new compaction context should be folded into memory. You can also run `/memory dream` manually.",
     "",
-    "Dream reads all log entries newer than the last dreamed log timestamp plus pending compaction summaries. It does not automatically retrieve older log entries.",
+    "Dream reads log entries after the append cursor in `state.json` plus pending compaction summaries. Timestamps are provenance, not replay boundaries. The cursor includes a hash of the consumed log prefix; restore the log if that prefix changes. It does not automatically retrieve consumed entries.",
     "",
   ].join("\n");
 }
@@ -1281,6 +1310,7 @@ function defaultMemoryState(): MemoryState {
     lastLogAt: null,
     lastDreamAt: null,
     lastDreamedLogAt: null,
+    lastDreamedLogCursor: null,
     pendingCompactions: [],
   };
 }
@@ -1405,21 +1435,44 @@ function parseMemoryLog(text: string): LogEntry[] {
   }
 
   flush();
-  return entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return entries;
 }
 
-function selectUndreamedLogEntries(
-  entries: LogEntry[],
-  lastDreamedLogAt: string | null,
-): LogEntry[] {
-  if (!lastDreamedLogAt) {
-    return [...entries];
+function selectUndreamedLogEntries(logText: string, state: MemoryState): LogEntry[] {
+  const cursor = state.lastDreamedLogCursor;
+  const log = Buffer.from(logText, "utf8");
+  if (
+    cursor &&
+    (cursor.bytes > log.length ||
+      getLogCursor(log.subarray(0, cursor.bytes)).sha256 !== cursor.sha256)
+  ) {
+    throw new Error(
+      "Memory log changed before its dream cursor. Restore log.md or explicitly reset last_dreamed_log_cursor to null to replay the entire log.",
+    );
   }
-  return entries.filter((entry) => entry.timestamp > lastDreamedLogAt);
+  return parseMemoryLog(log.subarray(cursor?.bytes ?? 0).toString("utf8"));
 }
 
-function countUndreamedLogs(entries: LogEntry[], lastDreamedLogAt: string | null): number {
-  return selectUndreamedLogEntries(entries, lastDreamedLogAt).length;
+function getLogCursor(log: Buffer): LogCursor {
+  return { bytes: log.length, sha256: createHash("sha256").update(log).digest("hex") };
+}
+
+function parseLogCursor(input: unknown): LogCursor | null {
+  if (input === undefined || input === null) return null;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Invalid last_dreamed_log_cursor.");
+  }
+  const cursor = input as Record<string, unknown>;
+  if (
+    typeof cursor.bytes !== "number" ||
+    !Number.isSafeInteger(cursor.bytes) ||
+    cursor.bytes < 0 ||
+    typeof cursor.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(cursor.sha256)
+  ) {
+    throw new Error("Invalid last_dreamed_log_cursor.");
+  }
+  return { bytes: cursor.bytes, sha256: cursor.sha256 };
 }
 
 function parseLogEntryBody(body: string): {
@@ -1729,7 +1782,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         promptSnippet: `Update one core memory block in .agents/memory/core with ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character cap enforcement`,
         promptGuidelines: [
           "Use memory_update_block when updating .agents/memory/core/directives.md, context.md, focus.md, or pending.md.",
-          `If a write would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, run memory_dream or remove content first.`,
+          `If memory_update_block would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, use memory_dream for consolidation. Do not discard unresolved work to fit.`,
         ],
         parameters: MEMORY_UPDATE_BLOCK_PARAMS,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1760,7 +1813,6 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         promptSnippet: "Append an entry to the repo memory log at .agents/memory/log.md",
         promptGuidelines: [
           "Use memory_append_log for important decisions, discoveries, plans, experiments, prompt ingests, and attachment additions worth remembering.",
-          "Use importance labels high, medium, or low.",
           "If this entry replaces or corrects prior memory, set supersedes and/or invalidates links explicitly.",
           "The memory log is append-only. Do not rewrite or truncate older entries.",
         ],
@@ -1793,7 +1845,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         name: "memory_dream",
         label: "Memory Dream",
         description:
-          "Consolidate repo memory into .agents/memory/core from newer log entries and compaction context",
+          "Consolidate repo memory into .agents/memory/core from undreamed log entries and compaction context",
         promptSnippet: "Consolidate repo memory with dream-based core compression",
         promptGuidelines: [
           "Dream is the only consolidation mechanism for .agents/memory/core.",

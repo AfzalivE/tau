@@ -24,18 +24,17 @@ const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const TELEGRAM_BOT_TOKEN_ENV = "PI_TELEGRAM_BOT_TOKEN";
+const TELEGRAM_BOT_TOKEN_ENV = "TAU_TELEGRAM_BOT_TOKEN";
 const TELEGRAM_KEYCHAIN_SERVICE = "pi.telegram";
 const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
 const AUTO_CONNECT_INTERVAL_MS = 3_000;
 const COMPACTION_RELEASE_DELAY_MS = 500;
-const COMPACTION_STALE_RESET_MS = 120_000;
 const TELEGRAM_FILE_SEND_TIMEOUT_MS = 5 * 60_000 + 5_000;
-const TELEGRAM_SEND_FILE_CAPABILITY = "send_file";
+const TELEGRAM_SEND_FILE_CAPABILITY = "send_file_queued";
 const TELEGRAM_SEND_FILE_TOOL_NAME = "telegram_send_file";
 
 type TelegramFileRequestMode = "auto" | "document";
-type TelegramFileSendResult = { mode: string; size?: number };
+type TelegramFileSendResult = { mode: string; size?: number; queued: boolean };
 
 type WindowSessionRef = {
   sessionId: string;
@@ -66,6 +65,7 @@ type DaemonToClientMessage =
       error?: string;
       mode?: string;
       size?: number;
+      queued?: boolean;
     };
 
 type ClientToDaemonMessage =
@@ -103,22 +103,7 @@ type Config = {
   pairedChatId?: number;
 };
 
-type PromptStatus = "completed" | "error";
 type TelegramBotTokenSource = "env" | "keychain" | "config" | "missing";
-
-async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "telegram" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "telegram", status });
-  }
-}
 
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -422,9 +407,8 @@ async function ensureDaemonRunning(daemonPath: string, signal?: AbortSignal): Pr
     stdio: "ignore",
     env: {
       ...process.env,
-      PI_TELEGRAM_AGENT_DIR: AGENT_DIR,
-      PI_TELEGRAM_PI_EXECUTABLE: process.execPath,
-      PI_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
+      PI_CODING_AGENT_DIR: AGENT_DIR,
+      TAU_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
     },
   });
   child.unref();
@@ -492,7 +476,7 @@ function formatBytes(size: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  if (process.env.PI_TELEGRAM_DISABLE === "1") return;
+  if (process.env.TAU_TELEGRAM_DISABLE === "1" || process.env.TAU_SUBAGENT_CHILD === "1") return;
 
   const extensionDir = path.dirname(fileURLToPath(import.meta.url));
   const daemonPath = path.join(extensionDir, "daemon.mjs");
@@ -507,7 +491,7 @@ export default function (pi: ExtensionAPI) {
     pendingInjectedTexts: [] as PendingInject[],
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
-    compactionResetTimer: null as ReturnType<typeof setTimeout> | null,
+    compactionReleaseTimer: null as ReturnType<typeof setTimeout> | null,
     lastCtx: null as ExtensionContext | null,
     connectPromise: null as Promise<void> | null,
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
@@ -534,25 +518,15 @@ export default function (pi: ExtensionAPI) {
     state.pendingInjectedFlushTimer.unref?.();
   }
 
-  function clearCompactionResetTimer() {
-    if (!state.compactionResetTimer) return;
-    clearTimeout(state.compactionResetTimer);
-    state.compactionResetTimer = null;
+  function clearCompactionReleaseTimer() {
+    if (!state.compactionReleaseTimer) return;
+    clearTimeout(state.compactionReleaseTimer);
+    state.compactionReleaseTimer = null;
   }
 
   function applyCompactingState(compacting: boolean, ctx?: ExtensionContext | null) {
+    clearCompactionReleaseTimer();
     state.compacting = compacting;
-
-    if (compacting) {
-      clearCompactionResetTimer();
-      state.compactionResetTimer = setTimeout(() => {
-        state.compactionResetTimer = null;
-        applyCompactingState(false, state.lastCtx);
-      }, COMPACTION_STALE_RESET_MS);
-      state.compactionResetTimer.unref?.();
-    } else {
-      clearCompactionResetTimer();
-    }
 
     const currentCtx = ctx ?? state.lastCtx;
     if (currentCtx) {
@@ -921,12 +895,16 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
+        if (typeof msg.queued !== "boolean") {
+          finish(new Error("Telegram daemon returned an invalid file send result."));
+          return;
+        }
         const mode = typeof msg.mode === "string" && msg.mode ? msg.mode : "file";
         const size =
           typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size >= 0
             ? msg.size
             : undefined;
-        finish(undefined, { mode, size });
+        finish(undefined, { mode, size, queued: msg.queued });
       };
 
       const onAbort = () => {
@@ -1028,7 +1006,9 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text",
-                text: `Sent ${path.basename(filePath)} to Telegram as a ${result.mode}${size}.`,
+                text: result.queued
+                  ? `Queued ${path.basename(filePath)} for Telegram as a ${result.mode}${size}. It will be sent when you select this session in Telegram.`
+                  : `Sent ${path.basename(filePath)} to Telegram as a ${result.mode}${size}.`,
               },
             ],
             details: { path: filePath, ...result },
@@ -1100,6 +1080,8 @@ export default function (pi: ExtensionAPI) {
     void flushPendingInjectedTexts();
   });
 
+  pi.on("session_tree", updateTelegramSendFileToolAvailability);
+
   pi.on("input", async (event) => {
     if (event.source !== "extension" && state.pendingInjectedTexts.length > 0) {
       state.pendingInjectedTexts = [];
@@ -1159,18 +1141,23 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_compact", async (event, ctx) => {
     state.awaitingRetry = event.willRetry;
     if (event.willRetry) state.busy = true;
-    clearCompactionResetTimer();
-    state.compactionResetTimer = setTimeout(() => {
-      state.compactionResetTimer = null;
+    clearCompactionReleaseTimer();
+    state.compactionReleaseTimer = setTimeout(() => {
+      state.compactionReleaseTimer = null;
       applyCompactingState(false, state.lastCtx ?? ctx);
     }, COMPACTION_RELEASE_DELAY_MS);
-    state.compactionResetTimer.unref?.();
+    state.compactionReleaseTimer.unref?.();
+  });
+
+  pi.on("session_compact_failed", async (_event, ctx) => {
+    state.awaitingRetry = false;
+    applyCompactingState(false, ctx);
   });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     stopAutoConnectLoop();
     clearPendingInjectedFlushTimer();
-    clearCompactionResetTimer();
+    clearCompactionReleaseTimer();
     state.busy = false;
     state.compacting = false;
     state.awaitingRetry = false;
@@ -1247,8 +1234,9 @@ export default function (pi: ExtensionAPI) {
           const promptLocation = canUseTelegramKeychain()
             ? "saved to macOS Keychain"
             : `stored in ${CONFIG_PATH}`;
-          const token = await withPromptSignal(pi, () =>
-            ctx.ui.input("Telegram bot token", `Paste the bot token (${promptLocation})`),
+          const token = await ctx.ui.input(
+            "Telegram bot token",
+            `Paste the bot token (${promptLocation})`,
           );
           if (!token) {
             notify("Cancelled.", "info");

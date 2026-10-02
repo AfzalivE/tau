@@ -1,6 +1,9 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
   defineTool,
+  formatSize,
   getMarkdownTheme,
   keyHint,
   type ExtensionAPI,
@@ -12,15 +15,15 @@ import { Type } from "typebox";
 import { createBrowserSession, discoverProfiles } from "./browser/discovery.js";
 import { loadConfig } from "./config.js";
 import { renderSearchResultMarkdown } from "./normalize.js";
+import { limitOutput } from "./output.js";
 import { isPiAnthropicModel, searchWithPiAnthropic } from "./providers/anthropic.pi.js";
 import { browserGemini } from "./providers/gemini.browser.js";
 import { isPiGeminiModel, searchWithPiGemini } from "./providers/gemini.pi.js";
-import { browserOpenAICodex } from "./providers/openai-codex.browser.js";
 import { isPiOpenAICodexModel, searchWithPiOpenAICodex } from "./providers/openai-codex.pi.js";
 import type { PiModelSelection } from "./providers/pi-model.shared.js";
-import { selectCurrentPiModel, selectFallbackPiModel } from "./providers/pi-model.shared.js";
+import { getPiModelCandidates, selectNextPiModel } from "./providers/pi-model.shared.js";
+import { isModelUnavailableError } from "./providers/shared.js";
 import type {
-  BrowserProfile,
   WebsearchAuthSource,
   WebsearchBackendId,
   WebsearchBrowserFamily,
@@ -29,10 +32,13 @@ import type {
   WebsearchRouteId,
 } from "./types.js";
 
-const PI_ROUTE_HANDLERS: Record<`pi:${WebsearchBackendId}`, PiRouteHandler> = {
+type PiRouteId = `pi:${WebsearchBackendId}`;
+
+const PI_ROUTE_HANDLERS: Record<PiRouteId, PiRouteHandler> = {
   "pi:openai-codex": {
     predicate: isPiOpenAICodexModel,
     search: searchWithPiOpenAICodex,
+    fallbackModels: ["gpt-5.6-luna", "gpt-5.5"],
   },
   "pi:anthropic": {
     predicate: isPiAnthropicModel,
@@ -51,17 +57,80 @@ interface SearchSummary {
   authSource: WebsearchAuthSource;
   browserName?: string;
   profile?: string;
-  accountLabel?: string;
   sources: number;
+}
+
+interface PiRoutePlan {
+  remaining: Model<Api>[];
+  attemptsLeft: number;
 }
 
 interface PiRouteHandler {
   predicate: (model: Model<Api>) => boolean;
+  fallbackModels?: readonly string[];
   search: (
     selection: PiModelSelection,
     query: string,
     signal?: AbortSignal,
   ) => Promise<WebsearchResult>;
+}
+
+async function runSearch(
+  ctx: ExtensionContext,
+  query: string,
+  signal?: AbortSignal,
+): Promise<SearchSummary> {
+  const config = loadConfig();
+  const plans = new Map<PiRouteId, PiRoutePlan>();
+  let pending = config.routes;
+  let lastError: string | null = null;
+
+  while (pending.length > 0) {
+    const retries: PiRouteId[] = [];
+    for (const route of pending) {
+      throwIfAborted(signal);
+      let selection: PiModelSelection | null = null;
+      let plan: PiRoutePlan | undefined;
+      try {
+        if (isPiRoute(route)) {
+          const handler = PI_ROUTE_HANDLERS[route];
+          plan = plans.get(route);
+          if (!plan) {
+            const remaining = getPiModelCandidates(ctx, handler.predicate, handler.fallbackModels);
+            plan = { remaining, attemptsLeft: handler.fallbackModels ? remaining.length : 2 };
+            plans.set(route, plan);
+          }
+          selection = await selectNextPiModel(ctx, plan.remaining, signal);
+          if (!selection) continue;
+          throwIfAborted(signal);
+          plan.attemptsLeft--;
+          return toSearchSummary(route, await handler.search(selection, query, signal));
+        }
+        const result = await searchBrowserRoute(route, config, query, signal);
+        if (result) return result;
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
+        lastError = error instanceof Error ? error.message : String(error);
+        if (
+          isPiRoute(route) &&
+          selection &&
+          plan &&
+          plan.attemptsLeft > 0 &&
+          plan.remaining.length > 0 &&
+          isModelUnavailableError(error, selection.model)
+        ) {
+          retries.push(route);
+        }
+      }
+    }
+    pending = retries;
+  }
+
+  throw new Error(lastError ?? "No configured websearch route is available.");
+}
+
+function isPiRoute(route: WebsearchRouteId): route is PiRouteId {
+  return route.startsWith("pi:");
 }
 
 function toSearchSummary(route: WebsearchRouteId, result: WebsearchResult): SearchSummary {
@@ -72,51 +141,8 @@ function toSearchSummary(route: WebsearchRouteId, result: WebsearchResult): Sear
     authSource: result.authSource,
     browserName: result.browserName,
     profile: result.profile,
-    accountLabel: result.accountLabel,
     sources: result.sources.length,
   };
-}
-
-function currentPiRoute(ctx: ExtensionContext): `pi:${WebsearchBackendId}` | null {
-  if (!ctx.model) return null;
-
-  for (const [route, handler] of Object.entries(PI_ROUTE_HANDLERS) as Array<
-    [`pi:${WebsearchBackendId}`, PiRouteHandler]
-  >) {
-    if (handler.predicate(ctx.model)) return route;
-  }
-
-  return null;
-}
-
-async function executePiRoute(
-  route: `pi:${WebsearchBackendId}`,
-  ctx: ExtensionContext,
-  query: string,
-  mode: "current" | "fallback",
-  signal?: AbortSignal,
-): Promise<SearchSummary | null> {
-  const handler = PI_ROUTE_HANDLERS[route];
-  const selection =
-    mode === "current"
-      ? await selectCurrentPiModel(ctx, handler.predicate)
-      : await selectFallbackPiModel(ctx, handler.predicate);
-
-  return selection ? toSearchSummary(route, await handler.search(selection, query, signal)) : null;
-}
-
-async function searchPiRoute(
-  route: `pi:${WebsearchBackendId}`,
-  ctx: ExtensionContext,
-  query: string,
-  signal?: AbortSignal,
-): Promise<SearchSummary | null> {
-  if (route === currentPiRoute(ctx)) {
-    const current = await executePiRoute(route, ctx, query, "current", signal);
-    if (current) return current;
-  }
-
-  return executePiRoute(route, ctx, query, "fallback", signal);
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -128,32 +154,17 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw signal.reason ?? new Error("The operation was aborted.");
 }
 
-async function getBrowserProfiles(
-  cache: Partial<Record<WebsearchBrowserFamily, BrowserProfile[]>>,
-  family: WebsearchBrowserFamily,
-  config: WebsearchConfig,
-): Promise<BrowserProfile[]> {
-  const cached = cache[family];
-  if (cached) return cached;
-
-  const profiles = await discoverProfiles([family], config.profiles);
-  cache[family] = profiles;
-  return profiles;
-}
-
 async function searchBrowserRoute(
   route: WebsearchRouteId,
   config: WebsearchConfig,
   query: string,
-  profileCache: Partial<Record<WebsearchBrowserFamily, BrowserProfile[]>>,
   signal?: AbortSignal,
 ): Promise<SearchSummary | null> {
   const profileFamily: WebsearchBrowserFamily = route.startsWith("firefox:")
     ? "firefox"
     : "chromium";
-  const browserProvider = route.endsWith(":gemini") ? browserGemini : browserOpenAICodex;
   const configuredProfileName = config.profiles[profileFamily];
-  const profiles = await getBrowserProfiles(profileCache, profileFamily, config);
+  const profiles = await discoverProfiles([profileFamily], config.profiles);
   let lastError: string | null = null;
 
   if (configuredProfileName && profiles.length === 0) {
@@ -164,7 +175,7 @@ async function searchBrowserRoute(
     throwIfAborted(signal);
 
     try {
-      const session = await createBrowserSession(profile, browserProvider.domains);
+      const session = await createBrowserSession(profile, browserGemini.domains);
       if (!session) {
         if (configuredProfileName) {
           throw new Error(
@@ -173,7 +184,7 @@ async function searchBrowserRoute(
         }
         continue;
       }
-      return toSearchSummary(route, await browserProvider.search(session, query, signal));
+      return toSearchSummary(route, await browserGemini.search(session, query, signal));
     } catch (error) {
       if (isAbortError(error, signal)) throw error;
       lastError = error instanceof Error ? error.message : String(error);
@@ -182,43 +193,6 @@ async function searchBrowserRoute(
 
   if (lastError) throw new Error(lastError);
   return null;
-}
-
-async function searchRoute(
-  route: WebsearchRouteId,
-  ctx: ExtensionContext,
-  config: WebsearchConfig,
-  query: string,
-  profileCache: Partial<Record<WebsearchBrowserFamily, BrowserProfile[]>>,
-  signal?: AbortSignal,
-): Promise<SearchSummary | null> {
-  return route.startsWith("pi:")
-    ? await searchPiRoute(route as `pi:${WebsearchBackendId}`, ctx, query, signal)
-    : await searchBrowserRoute(route, config, query, profileCache, signal);
-}
-
-async function runSearch(
-  ctx: ExtensionContext,
-  query: string,
-  signal?: AbortSignal,
-): Promise<SearchSummary> {
-  const config = loadConfig();
-  const profileCache: Partial<Record<WebsearchBrowserFamily, BrowserProfile[]>> = {};
-  let lastError: string | null = null;
-
-  for (const route of config.routes) {
-    throwIfAborted(signal);
-
-    try {
-      const result = await searchRoute(route, ctx, config, query, profileCache, signal);
-      if (result) return result;
-    } catch (error) {
-      if (isAbortError(error, signal)) throw error;
-      lastError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  throw new Error(lastError ?? "No configured websearch route is available.");
 }
 
 const COLLAPSED_RESULT_LINES = 10;
@@ -261,11 +235,11 @@ export default function (pi: ExtensionAPI) {
     defineTool({
       name: "websearch",
       label: "Websearch",
-      description: "Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions.",
-      promptSnippet:
-        "Search the web for current or external information unavailable in local files",
+      description: `Search the web for sourced answers. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first), including the truncation notice. Full truncated output is saved to a temporary file.`,
+      promptSnippet: "Discover web sources for current or external information",
       promptGuidelines: [
         "Use websearch for recent facts, live service behavior, or external documentation that is not already present in the repo.",
+        "When asked to read a supplied URL, fetch that page directly. Use websearch to discover sources or independently verify information.",
         "Do not use websearch when repository files or supplied context already answer the question.",
       ],
       parameters: Type.Object({
@@ -293,16 +267,27 @@ export default function (pi: ExtensionAPI) {
         return container;
       },
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-        const result = await runSearch(ctx, params.query, signal);
+        let result: SearchSummary;
+        try {
+          result = await runSearch(ctx, params.query, signal);
+        } catch (error) {
+          if (isAbortError(error, signal)) throw error;
+          const output = await limitOutput(
+            error instanceof Error ? error.message : String(error),
+            signal,
+          );
+          throw new Error(output.text);
+        }
+        const output = await limitOutput(result.result, signal);
         return {
-          content: [{ type: "text", text: result.result }],
+          content: [{ type: "text", text: output.text }],
           details: {
+            ...output.details,
             route: result.route,
             backend: result.backend,
             authSource: result.authSource,
             browserName: result.browserName,
             profile: result.profile,
-            accountLabel: result.accountLabel,
             sources: result.sources,
           },
         };

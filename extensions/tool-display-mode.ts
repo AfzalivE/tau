@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   getAgentDir,
   type AppKeybinding,
@@ -10,6 +11,7 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   type AgentToolResult,
+  type BashToolDetails,
   type ExtensionAPI,
   type ExtensionContext,
   type KeybindingsManager,
@@ -20,18 +22,24 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
+  Loader,
   Text,
+  truncateToWidth,
   type AutocompleteProvider,
   type Component,
   type EditorComponent,
   type Focusable,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+  type TUI,
 } from "@earendil-works/pi-tui";
 
 // --- Constants ---
 
 const CONFIG_FILE = "tool-display-mode.json";
-const MODES = ["default", "expanded", "minimal"] as const;
-const DEFAULT_MODE = "default";
+const MODES = ["collapsed", "expanded", "minimal"] as const;
+const INITIAL_MODE = MODES[0];
+const ACTIVITY_WIDGET = "tool-display-activity";
 
 // These are current Pi built-in tool output messages, used only because grep/find/ls
 // do not expose structured zero-result details yet.
@@ -39,6 +47,7 @@ const GREP_NO_MATCHES_OUTPUT = "No matches found"; // core/tools/grep.ts
 const FIND_NO_MATCHES_OUTPUT = "No files found matching pattern"; // core/tools/find.ts
 const LS_EMPTY_DIRECTORY_OUTPUT = "(empty directory)"; // core/tools/ls.ts
 
+// PowerShell is intentionally omitted because Tau does not officially support Windows.
 const TOOL_FACTORIES = {
   read: createReadToolDefinition,
   bash: createBashToolDefinition,
@@ -55,13 +64,17 @@ type AnyToolDefinition = ToolDefinition<any, any, any>;
 type AnyToolRenderContext = Parameters<NonNullable<AnyToolDefinition["renderResult"]>>[3];
 type JsonObject = Record<string, unknown>;
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
+type WorkingIndicator = NonNullable<Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]>;
+type ActivitySource = "subagent" | "review";
+type ActivityState = { text: string; idle: boolean };
 
 type ToolDisplayModeConfig = {
   mode: Mode;
 };
 
 type CustomEditorLike = EditorComponent &
-  Partial<Focusable> & {
+  Partial<Focusable> &
+  Partial<Pick<CustomEditor, "embedWorkingStatus" | "setWorkingStatusIndicator">> & {
     actionHandlers?: Map<AppKeybinding, () => void>;
     onEscape?: () => void;
     onCtrlD?: () => void;
@@ -73,7 +86,7 @@ type CustomEditorLike = EditorComponent &
 // --- Config ---
 
 function emptyConfig(): ToolDisplayModeConfig {
-  return { mode: DEFAULT_MODE };
+  return { mode: INITIAL_MODE };
 }
 
 function getConfigPath(): string {
@@ -99,7 +112,7 @@ function parseConfig(value: unknown): ToolDisplayModeConfig {
   if (!isObject(value)) return emptyConfig();
 
   return {
-    mode: parseMode(value.mode) ?? DEFAULT_MODE,
+    mode: parseMode(value.mode) ?? INITIAL_MODE,
   };
 }
 
@@ -126,61 +139,39 @@ async function saveConfig(config: ToolDisplayModeConfig): Promise<void> {
 
 // --- Tool definitions ---
 
-function getToolDefinition(
-  cache: Map<string, Partial<Record<ToolName, AnyToolDefinition>>>,
-  name: ToolName,
-  cwd: string,
-): AnyToolDefinition {
-  let tools = cache.get(cwd);
-  if (!tools) {
-    tools = {};
-    cache.set(cwd, tools);
-  }
-
-  return (tools[name] ??= TOOL_FACTORIES[name](cwd));
-}
-
 function shouldRegisterToolRenderer(tools: ToolInfo[], name: ToolName): boolean {
   const existingTool = tools.find((tool) => tool.name === name);
   return existingTool?.sourceInfo.source === "builtin";
 }
 
 function createToolDisplayDefinition(options: {
-  cache: Map<string, Partial<Record<ToolName, AnyToolDefinition>>>;
   name: ToolName;
   getMode: () => Mode;
 }): AnyToolDefinition {
-  const { cache, name, getMode } = options;
-  const base = getToolDefinition(cache, name, process.cwd());
+  const { name, getMode } = options;
+  const base: AnyToolDefinition = TOOL_FACTORIES[name](process.cwd());
 
   return {
     ...base,
 
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getToolDefinition(cache, name, ctx.cwd).execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-        ctx,
-      );
-    },
-
-    renderCall(args, theme, context) {
-      const renderer = getToolDefinition(cache, name, context.cwd).renderCall;
-      return renderer?.(args, theme, { ...context, lastComponent: undefined }) ?? emptyComponent();
-    },
-
     renderResult(result, options, theme, context) {
       const mode = getMode();
-      const renderer = getToolDefinition(cache, name, context.cwd).renderResult;
+      const renderer = base.renderResult;
+      const previous = context.lastComponent;
 
       if (mode === "minimal") {
+        const component =
+          previous instanceof MinimalResultComponent
+            ? previous
+            : new MinimalResultComponent(previous);
         if (name === "bash") {
-          renderer?.(result, options, theme, { ...context, lastComponent: undefined });
+          component.nativeComponent = renderer?.(result, options, theme, {
+            ...context,
+            lastComponent: component.nativeComponent,
+          });
         }
-
-        return renderMinimalResult(name, result, options, theme, context);
+        component.setText(formatMinimalResult(name, result, options, theme, context));
+        return component;
       }
 
       const expanded = mode === "expanded";
@@ -188,7 +179,8 @@ function createToolDisplayDefinition(options: {
         renderer?.(result, { ...options, expanded }, theme, {
           ...context,
           expanded,
-          lastComponent: undefined,
+          lastComponent:
+            previous instanceof MinimalResultComponent ? previous.nativeComponent : previous,
         }) ?? emptyComponent()
       );
     },
@@ -199,7 +191,7 @@ function createToolDisplayDefinition(options: {
 
 function nextMode(currentMode: Mode): Mode {
   const index = MODES.indexOf(currentMode);
-  return MODES[(index + 1) % MODES.length] ?? DEFAULT_MODE;
+  return MODES[(index + 1) % MODES.length] ?? INITIAL_MODE;
 }
 
 function applyMode(ctx: ExtensionContext, mode: Mode): void {
@@ -226,19 +218,25 @@ function reportSaveError(ctx: ExtensionContext, error: unknown): void {
 
 // --- Minimal rendering ---
 
-function renderMinimalResult(
+class MinimalResultComponent extends Text {
+  constructor(public nativeComponent: Component | undefined) {
+    super("", 0, 0);
+  }
+}
+
+function formatMinimalResult(
   name: ToolName,
   result: AgentToolResult<any>,
   options: ToolRenderResultOptions,
   theme: Theme,
   context: AnyToolRenderContext,
-): Component {
+): string {
   if (context.isError) {
-    return renderMinimalText(theme, "error", lastNonEmptyLine(textOutput(result)) ?? "error");
+    return theme.fg("error", lastNonEmptyLine(textOutput(result)) ?? "error");
   }
 
   if (options.isPartial) {
-    return renderMinimalText(theme, "muted", "running...");
+    return theme.fg("muted", "running...");
   }
 
   let summary: string;
@@ -260,18 +258,15 @@ function renderMinimalResult(
       break;
   }
 
-  return renderMinimalText(theme, "muted", `↳ ${summary}`);
-}
-
-function renderMinimalText(theme: Theme, color: "error" | "muted", text: string): Text {
-  return new Text(theme.fg(color, text), 0, 0);
+  return theme.fg("muted", `↳ ${summary}`);
 }
 
 function bashSummary(result: AgentToolResult<any>): string {
-  const text = stripTrailingNotice(textOutput(result)).trim();
+  const text = textOutput(result).trim();
   if (!text || text === "(no output)") return "no output";
 
-  const lines = countLines(text);
+  const details = result.details as BashToolDetails | undefined;
+  const lines = details?.truncation?.outputLines ?? countLines(text);
   return `${lines} ${plural(lines, "line")}`;
 }
 
@@ -337,7 +332,7 @@ function lastNonEmptyLine(text: string): string | undefined {
 }
 
 function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
+  return count === 1 ? singular : singular === "entry" ? "entries" : `${singular}s`;
 }
 
 function emptyComponent(): Container {
@@ -345,6 +340,28 @@ function emptyComponent(): Container {
 }
 
 // --- Editor ---
+
+/** Adapt public Loader output to CustomEditor's native border layout. Check parity on Pi upgrades. */
+class BackgroundWorkingIndicator extends Loader implements WorkingIndicator {
+  readonly kind = "working";
+
+  dispose(): void {
+    this.stop();
+  }
+
+  renderInBorder(width: number): string {
+    const line = super.render(width + 2)[1] ?? "";
+    return truncateToWidth(
+      line.startsWith(" ") ? line.slice(1).trimEnd() : line.trimEnd(),
+      width,
+      "",
+    );
+  }
+
+  renderSpinnerInBorder(width: number): string {
+    return truncateToWidth(this.getRenderedIndicator(), width, "");
+  }
+}
 
 class ToolDisplayEditor implements EditorComponent, Focusable {
   readonly actionHandlers: Map<AppKeybinding, () => void>;
@@ -354,11 +371,19 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
   private fallbackOnCtrlD?: () => void;
   private fallbackOnPasteImage?: () => void;
   private fallbackOnExtensionShortcut?: (data: string) => boolean;
+  private nativeIndicator: WorkingIndicator | undefined;
+  private backgroundIndicator: BackgroundWorkingIndicator | undefined;
+  private backgroundMessage: string | undefined;
+  private workingMessage: string | undefined;
 
   constructor(
     private readonly base: EditorComponent,
     private readonly appKeybindings: KeybindingsManager,
     private readonly cycleMode: () => void,
+    private readonly tui: TUI,
+    private readonly getActivity: () => ActivityState | undefined,
+    private readonly setWorkingMessage: (message?: string) => void,
+    private readonly statusColor: (text: string) => string,
   ) {
     this.customBase = base as CustomEditorLike;
     this.actionHandlers = this.customBase.actionHandlers ?? new Map();
@@ -391,6 +416,62 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
 
   get wantsKeyRelease(): boolean | undefined {
     return this.base.wantsKeyRelease;
+  }
+
+  get embedWorkingStatus(): boolean {
+    return (
+      this.customBase.embedWorkingStatus === true &&
+      typeof this.customBase.setWorkingStatusIndicator === "function"
+    );
+  }
+
+  setWorkingStatusIndicator(
+    indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0],
+  ): void {
+    this.nativeIndicator = indicator;
+    this.refreshActivity();
+  }
+
+  refreshActivity(): boolean {
+    const activity = this.embedWorkingStatus ? this.getActivity() : undefined;
+    const nativeWorking = this.nativeIndicator?.kind === "working";
+    const foregroundMessage = activity && nativeWorking ? `Working, ${activity.text}` : undefined;
+    if (foregroundMessage !== this.workingMessage) {
+      this.workingMessage = foregroundMessage;
+      this.setWorkingMessage(foregroundMessage);
+    }
+
+    const backgroundMessage = activity?.idle && !this.nativeIndicator ? activity.text : undefined;
+    if (backgroundMessage) {
+      if (!this.backgroundIndicator) {
+        this.backgroundIndicator = new BackgroundWorkingIndicator(
+          this.tui,
+          this.statusColor,
+          this.statusColor,
+          backgroundMessage,
+        );
+      } else if (backgroundMessage !== this.backgroundMessage) {
+        this.backgroundIndicator.setMessage(backgroundMessage);
+      }
+    } else {
+      this.backgroundIndicator?.dispose();
+      this.backgroundIndicator = undefined;
+    }
+    this.backgroundMessage = backgroundMessage;
+    this.customBase.setWorkingStatusIndicator?.(this.nativeIndicator ?? this.backgroundIndicator);
+    return Boolean(activity && (nativeWorking || this.backgroundIndicator));
+  }
+
+  disposeActivity(): void {
+    const hadBackground = this.backgroundIndicator !== undefined;
+    this.backgroundIndicator?.dispose();
+    this.backgroundIndicator = undefined;
+    this.backgroundMessage = undefined;
+    if (this.workingMessage !== undefined) {
+      this.workingMessage = undefined;
+      this.setWorkingMessage();
+    }
+    if (hadBackground) this.customBase.setWorkingStatusIndicator?.(undefined);
   }
 
   get borderColor(): ((str: string) => string) | undefined {
@@ -470,10 +551,12 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
   }
 
   render(width: number): string[] {
+    this.refreshActivity();
     return this.base.render(width);
   }
 
   invalidate(): void {
+    this.backgroundIndicator?.invalidate();
     this.base.invalidate();
   }
 
@@ -485,24 +568,99 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
 
     this.base.handleInput(data);
   }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.base.handleMouse?.(event);
+  }
 }
 
 export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
-  let mode: Mode = DEFAULT_MODE;
+  let mode: Mode = INITIAL_MODE;
   let registeredToolRenderers = false;
   let installedEditorFactory: EditorFactory | undefined;
   let previousEditorFactory: EditorFactory | undefined;
-  const toolCache = new Map<string, Partial<Record<ToolName, AnyToolDefinition>>>();
+  let editor: ToolDisplayEditor | undefined;
+  let context: ExtensionContext | undefined;
+  let sessionKey: string | undefined;
+  let activityView: object | undefined;
+  let requestRender: (() => void) | undefined;
+  let promptActive = false;
+  let compacting = false;
+  const activities = new Map<ActivitySource, string>();
+
+  const getActivity = (): ActivityState | undefined => {
+    if (
+      !context ||
+      !activityView ||
+      context.ui.getEditorComponent() !== installedEditorFactory ||
+      context.ui.getToolsExpanded() ||
+      promptActive ||
+      compacting
+    )
+      return undefined;
+    const text = [activities.get("subagent"), activities.get("review")].filter(Boolean).join(", ");
+    return text ? { text, idle: context.isIdle() } : undefined;
+  };
+
+  const refreshEditorActivity = (): boolean => {
+    if (context && context.ui.getEditorComponent() !== installedEditorFactory) {
+      editor?.disposeActivity();
+      editor = undefined;
+    }
+    return editor?.refreshActivity() ?? false;
+  };
+
+  const refreshActivity = (): void => {
+    refreshEditorActivity();
+    requestRender?.();
+  };
+
+  pi.events.on("tau:activity", (data) => {
+    if (!context || !isObject(data) || data.sessionKey !== sessionKey) return;
+    if (data.source !== "subagent" && data.source !== "review") return;
+    if (data.text !== undefined && typeof data.text !== "string") return;
+    const text =
+      typeof data.text === "string"
+        ? stripVTControlCharacters(data.text).replace(/\s+/g, " ").trim()
+        : undefined;
+    const changed = activities.get(data.source) !== (text || undefined);
+    if (text) activities.set(data.source, text);
+    else activities.delete(data.source);
+    data.handled = refreshEditorActivity();
+    if (changed) requestRender?.();
+  });
+  pi.on("agent_start", refreshActivity);
+  pi.on("agent_settled", refreshActivity);
+  pi.on("ui_prompt_start", () => {
+    promptActive = true;
+    refreshActivity();
+  });
+  pi.on("ui_prompt_end", () => {
+    promptActive = false;
+    refreshActivity();
+  });
+  pi.on("session_before_compact", () => {
+    compacting = true;
+    refreshActivity();
+  });
+  const finishCompaction = (): void => {
+    compacting = false;
+    refreshActivity();
+  };
+  pi.on("session_compact", finishCompaction);
+  pi.on("session_compact_failed", finishCompaction);
 
   const setMode = (ctx: ExtensionContext, next: Mode): void => {
     mode = next;
     applyMode(ctx, mode);
+    refreshActivity();
     showModeChange(ctx, mode);
 
     void saveConfig({ mode }).catch((error) => reportSaveError(ctx, error));
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
     mode = (await loadConfig()).mode;
 
     if (!registeredToolRenderers) {
@@ -510,29 +668,74 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
       for (const name of Object.keys(TOOL_FACTORIES) as ToolName[]) {
         if (!shouldRegisterToolRenderer(tools, name)) continue;
 
-        pi.registerTool(
-          createToolDisplayDefinition({ cache: toolCache, name, getMode: () => mode }),
-        );
+        pi.registerTool(createToolDisplayDefinition({ name, getMode: () => mode }));
       }
       registeredToolRenderers = true;
     }
 
     applyMode(ctx, mode);
-    if (!ctx.hasUI) return;
 
     if (installedEditorFactory && ctx.ui.getEditorComponent() === installedEditorFactory) return;
 
+    context = ctx.mode === "tui" ? ctx : undefined;
+    sessionKey =
+      ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
     previousEditorFactory = ctx.ui.getEditorComponent();
     installedEditorFactory = (tui, theme, keybindings) => {
+      editor?.disposeActivity();
       const baseEditor =
         previousEditorFactory?.(tui, theme, keybindings) ??
-        new CustomEditor(tui, theme, keybindings);
-      return new ToolDisplayEditor(baseEditor, keybindings, () => setMode(ctx, nextMode(mode)));
+        new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
+      editor = new ToolDisplayEditor(
+        baseEditor,
+        keybindings,
+        () => setMode(ctx, nextMode(mode)),
+        tui,
+        getActivity,
+        (message) => ctx.ui.setWorkingMessage(message),
+        (text) =>
+          (
+            baseEditor.borderColor ??
+            ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")
+          )(text),
+      );
+      return editor;
     };
     ctx.ui.setEditorComponent(installedEditorFactory);
+    if (ctx.mode === "tui") {
+      ctx.ui.setWidget(ACTIVITY_WIDGET, (tui) => {
+        const owner = {};
+        activityView = owner;
+        requestRender = () => tui.requestRender();
+        return {
+          // Observe native redraws for expansion changes and replacement editors without polling.
+          render() {
+            if (activityView === owner) refreshEditorActivity();
+            return [];
+          },
+          invalidate() {},
+          dispose() {
+            if (activityView !== owner) return;
+            activityView = undefined;
+            requestRender = undefined;
+            editor?.disposeActivity();
+          },
+        };
+      });
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    activityView = undefined;
+    editor?.disposeActivity();
+    if (context) context.ui.setWidget(ACTIVITY_WIDGET, undefined);
+    context = undefined;
+    sessionKey = undefined;
+    activities.clear();
+    promptActive = false;
+    compacting = false;
+    requestRender = undefined;
+    editor = undefined;
     if (ctx.hasUI && ctx.ui.getEditorComponent() === installedEditorFactory) {
       ctx.ui.setEditorComponent(previousEditorFactory);
     }

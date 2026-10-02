@@ -1,7 +1,9 @@
 import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
+import { REVIEW_TASK_TIMEOUT_MS } from "./runner.js";
+
+const OPENAI_FAST_MODEL_ID = "gpt-5.6-luna";
 const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
 
 type ModelFamily = "openai" | "anthropic";
@@ -505,15 +507,89 @@ function resolveUnqualifiedModelPattern(
   });
 }
 
+function getRequestedProvider(
+  modelPattern: string,
+  availableModels: Array<Model<Api>>,
+  modelRegistry: ExtensionContext["modelRegistry"],
+): string | undefined {
+  const { basePattern } = splitModelPatternThinkingSuffix(modelPattern);
+  const slash = basePattern.indexOf("/");
+  if (slash <= 0) return undefined;
+
+  const providerPrefix = basePattern.slice(0, slash);
+  const provider = modelRegistry
+    .getRegisteredProviderIds()
+    .find((candidate) => candidate.toLowerCase() === providerPrefix.toLowerCase());
+  if (!provider) return undefined;
+  if (shouldTreatAsExplicitProviderPattern(basePattern, availableModels, modelRegistry)) {
+    return provider;
+  }
+
+  const hasRawModelMatch = availableModels.some(
+    (model) => model.id.toLowerCase() === basePattern.toLowerCase(),
+  );
+  return hasRawModelMatch ? undefined : provider;
+}
+
+async function refreshModelCatalog(
+  ctx: ExtensionContext,
+  requestedModels: string[],
+  signal: AbortSignal,
+): Promise<Array<Model<Api>>> {
+  signal.throwIfAborted();
+  const currentModels = ctx.modelRegistry.getAll();
+  const requestedProviders = new Set(
+    requestedModels
+      .map((pattern) => getRequestedProvider(pattern, currentModels, ctx.modelRegistry))
+      .filter((provider): provider is string => Boolean(provider)),
+  );
+
+  if (requestedProviders.size > 0) {
+    const result = await ctx.modelRegistry.refresh({
+      providers: [...requestedProviders],
+      signal: AbortSignal.any([signal, AbortSignal.timeout(REVIEW_TASK_TIMEOUT_MS)]),
+    });
+    signal.throwIfAborted();
+    const failedProvider = [...requestedProviders].find((provider) =>
+      [...result.errors.keys()].some(
+        (candidate) => candidate.toLowerCase() === provider.toLowerCase(),
+      ),
+    );
+    if (result.aborted || failedProvider) {
+      const provider =
+        failedProvider ?? (requestedProviders.size === 1 ? [...requestedProviders][0] : undefined);
+      throw new Error(
+        provider
+          ? `Could not refresh requested provider "${provider}".`
+          : "Could not refresh all requested providers.",
+      );
+    }
+  }
+
+  const hasUnqualifiedRequest =
+    requestedModels.length === 0 ||
+    requestedModels.some(
+      (pattern) => !getRequestedProvider(pattern, currentModels, ctx.modelRegistry),
+    );
+  if (hasUnqualifiedRequest) {
+    await ctx.modelRegistry.refresh({
+      signal: AbortSignal.any([signal, AbortSignal.timeout(REVIEW_TASK_TIMEOUT_MS)]),
+    });
+    signal.throwIfAborted();
+  }
+
+  return ctx.modelRegistry.getAll();
+}
+
 export async function resolveModels(
   ctx: ExtensionContext,
   requestedModels: string[],
   currentThinkingLevel: ReviewThinkingLevel,
+  signal: AbortSignal,
 ): Promise<ResolvedReviewModel[]> {
-  await ctx.modelRegistry.refresh();
+  const allModels = await refreshModelCatalog(ctx, requestedModels, signal);
   const currentProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
   const currentModelId = ctx.model?.id;
-  const allModels = ctx.modelRegistry.getAll();
 
   const resolveRequestedModel = (modelPattern: string): ResolvedReviewModel => {
     const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);

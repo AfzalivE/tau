@@ -1,6 +1,6 @@
 {
   "name": "tau-all-agent",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "private": true,
   "description": "Full Tau package for Pi with coding workflows, web search, sandboxing, memory, Telegram, Home Assistant, OpenSCAD, skills, and a theme",
   "keywords": [
@@ -31,12 +31,14 @@
   },
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "^0.0.67",
+    "@anthropic-ai/sandbox-runtime": "^0.0.73",
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^29.0.2",
+    "proper-lockfile": "4.1.2",
     "puppeteer-core": "^24.40.0",
     "turndown": "^7.2.4",
-    "turndown-plugin-gfm": "^1.0.2"
+    "turndown-plugin-gfm": "^1.0.2",
+    "undici": "8.9.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -51,8 +53,9 @@
   "pi": {
     "extensions": [
       "../../extensions/answer.ts",
-      "../../extensions/branch-term.ts",
+      "../../extensions/branch-term/index.ts",
       "../../extensions/btw.ts",
+      "../../extensions/caffeinate/index.ts",
       "../../extensions/ghostty.ts",
       "../../extensions/git-diff-stats.ts",
       "../../extensions/git-pr-status.ts",
@@ -61,10 +64,11 @@
       "../../extensions/loop.ts",
       "../../extensions/memory.ts",
       "../../extensions/notify.ts",
-      "../../extensions/openai-fast.ts",
+      "../../extensions/fast.ts",
       "../../extensions/openai-verbosity.ts",
       "../../extensions/review/index.ts",
       "../../extensions/sandbox/index.ts",
+      "../../extensions/subagent/index.ts",
       "../../extensions/tool-display-mode.ts",
       "../../extensions/usage/index.ts",
       "../../extensions/websearch/index.ts",
@@ -75,6 +79,7 @@
       "../../skills/browser-tools",
       "../../skills/git-clean-history",
       "../../skills/git-commit",
+      "../../skills/github-pull-request",
       "../../skills/oracle",
       "../../skills/sentry",
       "../../skills/update-changelog",

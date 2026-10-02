@@ -1,4 +1,3 @@
-import { complete } from "@earendil-works/pi-ai/compat";
 import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
@@ -7,12 +6,10 @@ import {
   getAgentDir,
   getLanguageFromPath,
   getMarkdownTheme,
-  migrateSessionEntries,
   parseSessionEntries,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type SessionEntry,
-  type SessionHeader,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -32,10 +29,10 @@ import path from "node:path";
 
 // --- Constants ---
 
-const INSIGHTS_META_SCHEMA_VERSION = 1;
-const SESSION_FINGERPRINT_VERSION = 1;
+const INSIGHTS_META_SCHEMA_VERSION = 2;
+const SESSION_FINGERPRINT_VERSION = 2;
 const INSIGHTS_FACET_SCHEMA_VERSION = 1;
-const FACET_PROMPT_VERSION = 1;
+const FACET_PROMPT_VERSION = 2;
 const SYNTHESIS_PROMPT_VERSION = 1;
 
 const MIN_MEANINGFUL_USER_MESSAGES = 2;
@@ -45,6 +42,8 @@ const FULL_TRANSCRIPT_MAX_CHARS = 30_000;
 const REDUCED_TRANSCRIPT_HEAD_CHARS = 12_000;
 const REDUCED_TRANSCRIPT_TAIL_CHARS = 12_000;
 const REDUCED_TRANSCRIPT_MAX_CHARS = FULL_TRANSCRIPT_MAX_CHARS;
+
+const MIN_REPORT_WIDTH = 42; // Existing 40-column box plus its outer margin.
 
 const AGENT_ROOT = getAgentDir();
 const CACHE_ROOT = path.join(AGENT_ROOT, "insights");
@@ -140,9 +139,7 @@ type InsightScope = "current" | "project" | "all";
 
 type ConfiguredModelSelection = {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
+  modelRegistry: ExtensionCommandContext["modelRegistry"];
 };
 
 type ReadonlySessionManager = Pick<
@@ -311,6 +308,7 @@ class AbortError extends Error {
 class InsightsReportComponent implements Component {
   private readonly markdown: Markdown;
   private scrollOffset = 0;
+  private renderWidth?: number;
   private cachedWidth?: number;
   private cachedLines?: string[];
   private cachedBodyWidth?: number;
@@ -344,8 +342,11 @@ class InsightsReportComponent implements Component {
       return;
     }
 
+    const width = this.renderWidth ?? this.tui.terminal.columns;
+    if (width < MIN_REPORT_WIDTH) return;
+
     const bodyHeight = this.getBodyHeight();
-    const boxWidth = this.getBoxWidth(this.tui.terminal.columns);
+    const boxWidth = this.getBoxWidth(width);
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
 
@@ -370,6 +371,19 @@ class InsightsReportComponent implements Component {
   }
 
   render(width: number): string[] {
+    this.renderWidth = width;
+    if (width < MIN_REPORT_WIDTH) {
+      if (width < 1) return [];
+      return [
+        truncateToWidth(
+          this.theme.fg("muted", `Resize to ${MIN_REPORT_WIDTH}+ columns to view insights.`),
+          width,
+          "",
+        ),
+        truncateToWidth(this.theme.fg("dim", "Enter/Esc close"), width, ""),
+      ];
+    }
+
     if (this.cachedWidth === width && this.cachedLines) {
       return this.cachedLines;
     }
@@ -437,11 +451,11 @@ class InsightsReportComponent implements Component {
   }
 
   private getBoxWidth(width: number): number {
-    return Math.max(40, Math.min(width - 2, 140));
+    return Math.min(width - 2, 140);
   }
 
   private getContentWidth(boxWidth: number): number {
-    return Math.max(10, boxWidth - 4);
+    return boxWidth - 4;
   }
 
   private borderLine(left: string, right: string, width: number): string {
@@ -453,7 +467,7 @@ class InsightsReportComponent implements Component {
   }
 
   private boxLine(content: string, width: number): string {
-    const padded = ` ${content}`;
+    const padded = ` ${truncateToWidth(content, this.getContentWidth(width))}`;
     const visible = visibleWidth(padded);
     const rightPad = Math.max(0, width - 2 - visible);
     return `${this.theme.fg("borderMuted", "│")}${padded}${" ".repeat(rightPad)}${this.theme.fg("borderMuted", "│")}`;
@@ -779,12 +793,7 @@ async function getConfiguredModelSelection(
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
   if (!auth.ok) return null;
-  return {
-    model: ctx.model,
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    env: auth.env,
-  };
+  return { model: ctx.model, modelRegistry: ctx.modelRegistry };
 }
 
 async function listTargets(
@@ -804,32 +813,16 @@ async function listTargets(
     onProgress({ stage: "resolve", current, total });
   };
 
-  const sessionFiles =
+  const cwd = path.resolve(ctx.cwd);
+  const sessions =
     scope === "project"
-      ? await listProjectSessionFiles(ctx.cwd, ctx.sessionManager.getSessionDir(), progress)
-      : await listAllSessionFiles(progress);
+      ? await SessionManager.list(cwd, ctx.sessionManager.getSessionDir(), progress, signal)
+      : await SessionManager.listAll(progress, signal);
 
   throwIfAborted(signal);
-  return sessionFiles.map((sessionFile) => ({ path: sessionFile }));
-}
-
-async function listProjectSessionFiles(
-  cwd: string,
-  sessionDir: string,
-  onProgress: (current: number, total: number) => void,
-): Promise<string[]> {
-  const currentCwd = path.resolve(cwd);
-  const sessions = await SessionManager.list(currentCwd, sessionDir, onProgress);
   return sessions
-    .filter((session) => path.resolve(session.cwd || currentCwd) === currentCwd)
-    .map((session) => session.path);
-}
-
-async function listAllSessionFiles(
-  onProgress: (current: number, total: number) => void,
-): Promise<string[]> {
-  const sessions = await SessionManager.listAll(onProgress);
-  return sessions.map((session) => session.path);
+    .filter((session) => scope === "all" || path.resolve(session.cwd || cwd) === cwd)
+    .map((session) => ({ path: session.path }));
 }
 
 async function loadOrExtractMeta(
@@ -841,7 +834,7 @@ async function loadOrExtractMeta(
   cacheHit: boolean;
   runtime?: SessionRuntime;
 }> {
-  const cacheInfo = await getCacheInfo(target.path);
+  const cacheInfo = await getCacheInfo(target);
 
   if (cacheInfo.cacheKey && cacheInfo.fingerprint) {
     const cached = await readMetaCache(cacheInfo.cacheKey, cacheInfo.fingerprint);
@@ -919,48 +912,12 @@ async function readOnlyOpenSession(sessionFile: string): Promise<ReadonlySession
     throw new Error(`Session file is empty or invalid: ${sessionFile}`);
   }
 
-  migrateSessionEntries(fileEntries);
-  const header = fileEntries.find((entry): entry is SessionHeader => entry.type === "session");
+  const header = fileEntries.find((entry) => entry.type === "session");
   if (!header) {
     throw new Error(`Session file has no header: ${sessionFile}`);
   }
 
-  const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
-  const byId = new Map(entries.map((entry) => [entry.id, entry]));
-  const leafId = entries.at(-1)?.id ?? null;
-  const sessionDir = path.dirname(sessionFile);
-
-  return {
-    getEntries() {
-      return entries.slice();
-    },
-    getBranch(fromId?: string) {
-      const startId = fromId ?? leafId;
-      if (!startId) return [];
-      const pathEntries: SessionEntry[] = [];
-      let current = byId.get(startId);
-      while (current) {
-        pathEntries.unshift(current);
-        current = current.parentId ? byId.get(current.parentId) : undefined;
-      }
-      return pathEntries;
-    },
-    getLeafId() {
-      return leafId;
-    },
-    getHeader() {
-      return header;
-    },
-    getSessionDir() {
-      return sessionDir;
-    },
-    getSessionId() {
-      return header.id;
-    },
-    getSessionFile() {
-      return sessionFile;
-    },
-  } satisfies ReadonlySessionManager;
+  return SessionManager.inMemory(header.cwd, undefined, fileEntries);
 }
 
 function extractSessionArtifacts(
@@ -993,11 +950,23 @@ function extractSessionArtifacts(
   for (const entry of branchEntries) {
     collectModifiedFilesFromEntry(entry, modifiedFiles);
 
-    if (entry.type !== "message") continue;
-    const message = entry.message as unknown as Record<string, unknown>;
-    const role = typeof message.role === "string" ? message.role : "";
+    const message =
+      entry.type === "message" ? (entry.message as unknown as Record<string, unknown>) : undefined;
+    const usage =
+      entry.type === "usage"
+        ? entry.usage
+        : message?.role === "assistant"
+          ? message.usage
+          : undefined;
+    if (isRecord(usage)) {
+      totalInputTokens +=
+        numberValue(usage.input) + numberValue(usage.cacheRead) + numberValue(usage.cacheWrite);
+      totalOutputTokens += numberValue(usage.output);
+      totalCost += numberValue(isRecord(usage.cost) ? usage.cost.total : undefined);
+    }
+    if (!message) continue;
 
-    if (role === "user") {
+    if (message.role === "user") {
       if (isMeaningfulUserMessage(message)) {
         meaningfulUserMessages++;
         if (!firstUserPrompt) {
@@ -1007,14 +976,8 @@ function extractSessionArtifacts(
       continue;
     }
 
-    if (role === "assistant") {
+    if (message.role === "assistant") {
       assistantMessages++;
-      const usage = isRecord(message.usage) ? message.usage : undefined;
-      totalInputTokens +=
-        numberValue(usage?.input) + numberValue(usage?.cacheRead) + numberValue(usage?.cacheWrite);
-      totalOutputTokens += numberValue(usage?.output);
-      totalCost += numberValue(isRecord(usage?.cost) ? usage?.cost.total : undefined);
-
       const toolCalls = extractToolCalls(message.content);
       for (const toolCall of toolCalls) {
         incrementRecord(toolCounts, toolCall.name);
@@ -1023,7 +986,7 @@ function extractSessionArtifacts(
       continue;
     }
 
-    if (role === "toolResult") {
+    if (message.role === "toolResult") {
       toolResultMessages++;
       if (message.isError === true && typeof message.toolName === "string") {
         incrementRecord(toolsWithErrors, message.toolName);
@@ -1235,76 +1198,51 @@ function prepareTranscriptForFacet(transcript: NormalizedTranscript): PreparedTr
     };
   }
 
-  const selected = new Set<number>();
-  let headChars = 0;
-  for (let index = 0; index < transcript.blocks.length; index++) {
-    if (headChars >= REDUCED_TRANSCRIPT_HEAD_CHARS) break;
-    selected.add(index);
-    headChars += transcript.blocks[index]!.text.length + 2;
-  }
+  const prefix = [
+    truncateChars(transcript.headerText, 1_000),
+    `[Transcript reduced due to length. Full size: ${formatCount(transcript.charLength)} chars.]`,
+  ].join("\n\n");
+  const gap = (count: number): string => `[... ${count} blocks omitted ...]`;
+  // Charge each selected block for a possible preceding gap and both separators.
+  // Reserve one more gap for the end, so assembly never needs a head-only final cut.
+  const gapAllowance = gap(transcript.blocks.length).length + 4;
+  const maxBodyLength = REDUCED_TRANSCRIPT_MAX_CHARS - prefix.length - 2 - gapAllowance;
+  const selected = new Map<number, string>();
+  const selectBlock = (index: number, budget: number): number => {
+    if (selected.has(index)) return budget;
+    const text = reduceTranscriptBlock(transcript.blocks[index]!.text, budget - gapAllowance);
+    if (!text) return 0;
+    selected.set(index, text);
+    return budget - text.length - gapAllowance;
+  };
 
-  let tailChars = 0;
-  for (let index = transcript.blocks.length - 1; index >= 0; index--) {
-    if (tailChars >= REDUCED_TRANSCRIPT_TAIL_CHARS) break;
-    if (selected.has(index)) continue;
-    selected.add(index);
-    tailChars += transcript.blocks[index]!.text.length + 2;
+  // Independent allocations ensure an oversized opening cannot consume the ending.
+  let headBudget = REDUCED_TRANSCRIPT_HEAD_CHARS;
+  for (let index = 0; index < transcript.blocks.length && headBudget > 0; index++) {
+    headBudget = selectBlock(index, headBudget);
   }
-
-  for (let index = 0; index < transcript.blocks.length; index++) {
+  let tailBudget = REDUCED_TRANSCRIPT_TAIL_CHARS;
+  for (let index = transcript.blocks.length - 1; index >= 0 && tailBudget > 0; index--) {
+    tailBudget = selectBlock(index, tailBudget);
+  }
+  let summaryBudget = maxBodyLength - REDUCED_TRANSCRIPT_HEAD_CHARS - REDUCED_TRANSCRIPT_TAIL_CHARS;
+  for (let index = 0; index < transcript.blocks.length && summaryBudget > 0; index++) {
     if (transcript.blocks[index]!.isSummary) {
-      selected.add(index);
+      summaryBudget = selectBlock(index, summaryBudget);
     }
   }
-
-  const ordered = [...selected].sort((a, b) => a - b);
-  const prefix = [
-    transcript.headerText,
-    `[Transcript reduced due to length. Full size: ${formatCount(transcript.charLength)} chars.]`,
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
 
   const reducedBlocks: string[] = [];
   let previous = -1;
-  let bodyLength = 0;
-  const maxBodyLength = Math.max(0, REDUCED_TRANSCRIPT_MAX_CHARS - prefix.length - 2);
-
-  for (const index of ordered) {
-    if (previous >= 0 && index > previous + 1) {
-      const gapText = `[... ${index - previous - 1} blocks omitted ...]`;
-      const appendedGap = appendReducedBlock(reducedBlocks, gapText, maxBodyLength, bodyLength);
-      bodyLength = appendedGap.bodyLength;
-      if (!appendedGap.didAppend) break;
-    }
-
-    const appendedBlock = appendReducedBlock(
-      reducedBlocks,
-      transcript.blocks[index]!.text,
-      maxBodyLength,
-      bodyLength,
-    );
-    bodyLength = appendedBlock.bodyLength;
-    if (!appendedBlock.didAppend) break;
+  for (const [index, text] of [...selected].sort(([a], [b]) => a - b)) {
+    if (index > previous + 1) reducedBlocks.push(gap(index - previous - 1));
+    reducedBlocks.push(text);
     previous = index;
   }
-
-  if (previous >= 0 && previous < transcript.blocks.length - 1) {
-    const appendedTailGap = appendReducedBlock(
-      reducedBlocks,
-      `[... ${transcript.blocks.length - previous - 1} blocks omitted ...]`,
-      maxBodyLength,
-      bodyLength,
-    );
-    bodyLength = appendedTailGap.bodyLength;
+  if (previous < transcript.blocks.length - 1) {
+    reducedBlocks.push(gap(transcript.blocks.length - previous - 1));
   }
-
-  const reducedText = [prefix, reducedBlocks.join("\n\n")]
-    .filter(Boolean)
-    .join("\n\n")
-    .slice(0, REDUCED_TRANSCRIPT_MAX_CHARS)
-    .trim();
+  const reducedText = [prefix, ...reducedBlocks].join("\n\n");
 
   return {
     text: reducedText,
@@ -1313,32 +1251,17 @@ function prepareTranscriptForFacet(transcript: NormalizedTranscript): PreparedTr
   };
 }
 
-function appendReducedBlock(
-  blocks: string[],
-  block: string,
-  maxBodyLength: number,
-  currentBodyLength: number,
-): { bodyLength: number; didAppend: boolean } {
-  if (maxBodyLength <= currentBodyLength) {
-    return { bodyLength: currentBodyLength, didAppend: false };
-  }
+function reduceTranscriptBlock(text: string, maxChars: number): string | undefined {
+  if (text.length <= maxChars) return text;
 
-  const separatorLength = blocks.length > 0 ? 2 : 0;
-  const remaining = maxBodyLength - currentBodyLength - separatorLength;
-  if (remaining <= 0) {
-    return { bodyLength: currentBodyLength, didAppend: false };
-  }
+  const label = text.slice(0, text.indexOf("\n") + 1);
+  const omission = "\n[... message text omitted ...]\n";
+  const remaining = maxChars - label.length - omission.length;
+  if (remaining < 2) return undefined;
 
-  const nextBlock = truncateChars(block, remaining);
-  if (!nextBlock) {
-    return { bodyLength: currentBodyLength, didAppend: false };
-  }
-
-  blocks.push(nextBlock);
-  return {
-    bodyLength: currentBodyLength + separatorLength + nextBlock.length,
-    didAppend: true,
-  };
+  const head = Math.ceil(remaining / 2);
+  const tail = Math.floor(remaining / 2);
+  return `${label}${text.slice(label.length, label.length + head)}${omission}${text.slice(-tail)}`;
 }
 
 async function extractFacet(
@@ -1368,18 +1291,13 @@ async function extractFacet(
     timestamp: Date.now(),
   };
 
-  const response = await complete(
+  const response = await selection.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: FACET_SYSTEM_PROMPT,
       messages: [userMessage],
     },
-    {
-      apiKey: selection.apiKey,
-      headers: selection.headers,
-      env: selection.env,
-      signal,
-    },
+    { signal },
   );
 
   if (response.stopReason === "aborted") {
@@ -1541,18 +1459,13 @@ async function synthesizeReport(
     timestamp: Date.now(),
   };
 
-  const response = await complete(
+  const response = await selection.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: SYNTHESIS_SYSTEM_PROMPT,
       messages: [userMessage],
     },
-    {
-      apiKey: selection.apiKey,
-      headers: selection.headers,
-      env: selection.env,
-      signal,
-    },
+    { signal },
   );
 
   if (response.stopReason === "aborted") {
@@ -1728,15 +1641,20 @@ function setBorderedLoaderMessage(loader: BorderedLoader, message: string): void
   }
 }
 
-async function getCacheInfo(sessionFile: string | undefined): Promise<SessionCacheInfo> {
+async function getCacheInfo(target: SessionTarget): Promise<SessionCacheInfo> {
+  const sessionFile = target.path;
   if (!sessionFile) return {};
 
-  const cacheKey = hashText(sessionFile);
+  // A live selection can differ from the last entry restored from the same file.
+  // Keep each selected view separate, including the empty (null-leaf) branch.
+  const view = target.manager ? { leafId: target.manager.getLeafId() } : "saved";
+  const cacheKey = hashText(JSON.stringify({ sessionFile, view }));
   try {
     const stats = await fs.stat(sessionFile);
     const fingerprint = hashText(
       JSON.stringify({
         sessionFile,
+        view,
         mtimeMs: stats.mtimeMs,
         size: stats.size,
         schemaVersion: SESSION_FINGERPRINT_VERSION,

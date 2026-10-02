@@ -10,9 +10,13 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete } from "@earendil-works/pi-ai/compat";
 import type { Model, Api, UserMessage } from "@earendil-works/pi-ai";
-import { BorderedLoader, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+  BorderedLoader,
+  type ExtensionAPI,
+  type ModelRegistry,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   Editor,
@@ -25,6 +29,8 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+
+const MIN_QUESTIONNAIRE_WIDTH = 40;
 
 const SYSTEM_PROMPT = `You extract items that need user input from assistant text:
 
@@ -78,7 +84,7 @@ Example output:
   "questions": []
 }`;
 
-const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
+const OPENAI_FAST_MODEL_ID = "gpt-5.6-luna";
 const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
 
 // Structured output format for question extraction
@@ -91,25 +97,16 @@ interface ExtractionResult {
   questions: ExtractedQuestion[];
 }
 
-interface ModelRequestAuth {
+type ExtractionOutcome =
+  | { status: "success"; result: ExtractionResult }
+  | { status: "cancelled" }
+  | { status: "error"; message: string };
+
+interface ModelSelection {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
 }
 
-type ModelAuthLookup = {
-  find: (provider: string, modelId: string) => Model<Api> | undefined;
-  getApiKeyAndHeaders: (model: Model<Api>) => Promise<
-    | {
-        ok: true;
-        apiKey?: string;
-        headers?: Record<string, string>;
-        env?: Record<string, string>;
-      }
-    | { ok: false; error: string }
-  >;
-};
+type ModelLookup = Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
 
 type ModelFamily = "openai" | "anthropic";
 
@@ -125,10 +122,10 @@ function detectModelFamily(provider: string): ModelFamily | null {
  */
 async function selectExtractionModel(
   currentModel: Model<Api>,
-  modelRegistry: ModelAuthLookup,
-): Promise<ModelRequestAuth | null> {
+  modelRegistry: ModelLookup,
+): Promise<ModelSelection | null> {
   const family = detectModelFamily(currentModel.provider);
-  if (!family) return resolveModelRequestAuth(modelRegistry, currentModel);
+  if (!family) return resolveModelSelection(modelRegistry, currentModel);
 
   const modelId = family === "openai" ? OPENAI_FAST_MODEL_ID : ANTHROPIC_FAST_MODEL_ID;
   const providerCandidates =
@@ -140,21 +137,21 @@ async function selectExtractionModel(
     const model = modelRegistry.find(provider, modelId);
     if (!model) continue;
 
-    const auth = await resolveModelRequestAuth(modelRegistry, model);
-    if (auth) {
-      return auth;
+    const selection = await resolveModelSelection(modelRegistry, model);
+    if (selection) {
+      return selection;
     }
   }
 
-  return resolveModelRequestAuth(modelRegistry, currentModel);
+  return resolveModelSelection(modelRegistry, currentModel);
 }
 
-async function resolveModelRequestAuth(
-  modelRegistry: ModelAuthLookup,
+async function resolveModelSelection(
+  modelRegistry: ModelLookup,
   model: Model<Api>,
-): Promise<ModelRequestAuth | null> {
+): Promise<ModelSelection | null> {
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
-  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env } : null;
+  return auth.ok ? { model } : null;
 }
 
 /**
@@ -171,11 +168,25 @@ function parseExtractionResult(text: string): ExtractionResult | null {
       jsonStr = jsonMatch[1].trim();
     }
 
-    const parsed = JSON.parse(jsonStr);
-    if (parsed && Array.isArray(parsed.questions)) {
-      return parsed as ExtractionResult;
+    const parsed: unknown = JSON.parse(jsonStr);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !("questions" in parsed) ||
+      !Array.isArray(parsed.questions) ||
+      !parsed.questions.every(
+        (question: unknown): question is ExtractedQuestion =>
+          question !== null &&
+          typeof question === "object" &&
+          "question" in question &&
+          typeof question.question === "string" &&
+          question.question.trim().length > 0 &&
+          (!("context" in question) || typeof question.context === "string"),
+      )
+    ) {
+      return null;
     }
-    return null;
+    return { questions: parsed.questions };
   } catch {
     return null;
   }
@@ -195,6 +206,7 @@ class QnAComponent implements Component, Focusable {
   private showingConfirmation: boolean = false;
 
   // Cache
+  private renderWidth?: number;
   private cachedWidth?: number;
   private cachedLines?: string[];
 
@@ -244,7 +256,7 @@ class QnAComponent implements Component, Focusable {
   }
 
   private saveCurrentAnswer(): void {
-    this.answers[this.currentIndex] = this.editor.getText();
+    this.answers[this.currentIndex] = this.editor.getExpandedText();
   }
 
   private navigateTo(index: number): void {
@@ -287,6 +299,11 @@ class QnAComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if ((this.renderWidth ?? this.tui.terminal.columns) < MIN_QUESTIONNAIRE_WIDTH) {
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) this.cancel();
+      return;
+    }
+
     // Handle confirmation dialog
     if (this.showingConfirmation) {
       if (matchesKey(data, Key.enter) || data.toLowerCase() === "y") {
@@ -368,6 +385,19 @@ class QnAComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    this.renderWidth = width;
+    if (width < MIN_QUESTIONNAIRE_WIDTH) {
+      return [
+        truncateToWidth(
+          this.theme.fg(
+            "muted",
+            `Resize to ${MIN_QUESTIONNAIRE_WIDTH}+ columns to answer. Esc cancels.`,
+          ),
+          width,
+        ),
+      ];
+    }
+
     if (this.cachedLines && this.cachedWidth === width) {
       return this.cachedLines;
     }
@@ -416,7 +446,9 @@ class QnAComponent implements Component, Focusable {
         progressParts.push(theme.fg("dim", "○"));
       }
     }
-    lines.push(padToWidth(boxLine(progressParts.join(" "))));
+    for (const line of wrapTextWithAnsi(progressParts.join(" "), contentWidth)) {
+      lines.push(padToWidth(boxLine(line)));
+    }
     lines.push(padToWidth(emptyBoxLine()));
 
     // Current question
@@ -525,66 +557,84 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Run extraction with loader UI
-      const extractionResult = await ctx.ui.custom<ExtractionResult | null>(
-        (tui, theme, _kb, done) => {
-          const loader = new BorderedLoader(
-            tui,
-            theme,
-            `Extracting questions using ${extractionSelection.model.id}...`,
-          );
-          loader.onAbort = () => done(null);
+      const extraction = await ctx.ui.custom<ExtractionOutcome>((tui, theme, _kb, done) => {
+        const loader = new BorderedLoader(
+          tui,
+          theme,
+          `Extracting questions using ${extractionSelection.model.id}...`,
+        );
+        loader.onAbort = () => done({ status: "cancelled" });
 
-          const doExtract = async () => {
-            const userMessage: UserMessage = {
-              role: "user",
-              content: [{ type: "text", text: lastAssistantText! }],
-              timestamp: Date.now(),
-            };
-
-            const response = await complete(
-              extractionSelection.model,
-              { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-              {
-                apiKey: extractionSelection.apiKey,
-                headers: extractionSelection.headers,
-                env: extractionSelection.env,
-                signal: loader.signal,
-              },
-            );
-
-            if (response.stopReason === "aborted") {
-              return null;
-            }
-
-            const responseText = response.content
-              .filter((c): c is { type: "text"; text: string } => c.type === "text")
-              .map((c) => c.text)
-              .join("\n");
-
-            return parseExtractionResult(responseText);
+        const doExtract = async (): Promise<ExtractionOutcome> => {
+          const userMessage: UserMessage = {
+            role: "user",
+            content: [{ type: "text", text: lastAssistantText! }],
+            timestamp: Date.now(),
           };
 
-          doExtract()
-            .then(done)
-            .catch(() => done(null));
+          const response = await ctx.modelRegistry.complete(
+            extractionSelection.model,
+            { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+            { signal: loader.signal },
+          );
 
-          return loader;
-        },
-      );
+          if (loader.signal.aborted || response.stopReason === "aborted") {
+            return { status: "cancelled" };
+          }
+          if (response.stopReason !== "stop") {
+            return {
+              status: "error",
+              message: response.errorMessage
+                ? `Question extraction failed: ${response.errorMessage}`
+                : `Question extraction did not complete (${response.stopReason})`,
+            };
+          }
 
-      if (extractionResult === null) {
+          const responseText = response.content
+            .filter((c): c is { type: "text"; text: string } => c.type === "text")
+            .map((c) => c.text)
+            .join("\n");
+
+          const result = parseExtractionResult(responseText);
+          return result
+            ? { status: "success", result }
+            : { status: "error", message: "Question extraction returned an invalid response" };
+        };
+
+        doExtract()
+          .then(done)
+          .catch((error: unknown) => {
+            done(
+              loader.signal.aborted
+                ? { status: "cancelled" }
+                : {
+                    status: "error",
+                    message: `Question extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+                  },
+            );
+          });
+
+        return loader;
+      });
+
+      if (extraction.status === "cancelled") {
         ctx.ui.notify("Cancelled", "info");
         return;
       }
+      if (extraction.status === "error") {
+        ctx.ui.notify(extraction.message, "error");
+        return;
+      }
 
-      if (extractionResult.questions.length === 0) {
+      const { questions } = extraction.result;
+      if (questions.length === 0) {
         ctx.ui.notify("No questions found in the last message", "info");
         return;
       }
 
       // Show the Q&A component
       const answersResult = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-        return new QnAComponent(extractionResult.questions, tui, theme, done);
+        return new QnAComponent(questions, tui, theme, done);
       });
 
       if (answersResult === null) {

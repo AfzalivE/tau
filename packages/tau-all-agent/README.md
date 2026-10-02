@@ -23,6 +23,7 @@ pi install -l npm:tau-all-agent
 | `answer`            | `/answer`            | Extract and interactively answer agent questions.                                                                         |
 | `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
+| `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
 | `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`    | —                    | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    | Status bar PR number and link for the current branch.                                                                     |
@@ -31,29 +32,31 @@ pi install -l npm:tau-all-agent
 | `loop`              | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
 | `memory`            | `/memory`            | Opt-in project-local memory for learning and continuity across sessions.                                                  |
 | `notify`            | —                    | Terminal notification when the agent is waiting for input.                                                                |
-| `openai-fast`       | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
-| `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
+| `fast`              | `/fast`              | Toggle fast processing for compatible models.                                                                             |
+| `openai-verbosity`  | `/verbosity`         | Set verbosity for supported GPT models.                                                                                   |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`           | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
-| `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
-| `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
+| `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `subagent`          | —                    | Delegate work to background Pi agents and follow up with them.                                                            |
+| `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
+| `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot and local daemon.                                                                     |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
 
 ## Skills
 
-| Skill               | Description                                                                        |
-| ------------------- | ---------------------------------------------------------------------------------- |
-| `browser-tools`     | Interactive browser automation via Chrome DevTools Protocol.                       |
-| `git-clean-history` | Reimplement a branch on a fresh branch off `main` with a clean commit history.     |
-| `git-commit`        | Tidy, focused commits with clear rationale in messages.                            |
-| `homeassistant-ops` | Operate a Home Assistant instance via REST/WebSocket APIs.                         |
-| `openscad`          | Create and render OpenSCAD 3D models, export STL.                                  |
-| `oracle`            | Second opinion from another LLM for debugging, refactors, design, or code reviews. |
-| `sentry`            | Fetch and analyze Sentry issues, events, transactions, and logs.                   |
-| `update-changelog`  | Update CHANGELOG.md following Keep a Changelog.                                    |
-| `web-design`        | Distinctive, production-ready web interfaces.                                      |
+| Skill                 | Description                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `browser-tools`       | Interactive browser automation via Chrome DevTools Protocol.                       |
+| `git-clean-history`   | Reimplement a branch on a fresh branch off `main` with a clean commit history.     |
+| `git-commit`          | Tidy, focused commits with clear rationale in messages.                            |
+| `github-pull-request` | Create and steward pull requests through CI, review, and merge.                    |
+| `homeassistant-ops`   | Operate a Home Assistant instance via REST/WebSocket APIs.                         |
+| `openscad`            | Create and render OpenSCAD 3D models, export STL.                                  |
+| `oracle`              | Second opinion from another LLM for debugging, refactors, design, or code reviews. |
+| `sentry`              | Fetch and analyze Sentry issues, events, transactions, and logs.                   |
+| `update-changelog`    | Update CHANGELOG.md following Keep a Changelog.                                    |
+| `web-design`          | Distinctive, production-ready web interfaces.                                      |
 
 ## Themes
 

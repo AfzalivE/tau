@@ -1,24 +1,22 @@
+import { setTimeout as delay } from "node:timers/promises";
 import {
   keyText,
   type ExtensionCommandContext,
   type ExtensionContext,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import {
-  getKeybindings,
-  isKeyRelease,
-  truncateToWidth,
-  visibleWidth,
-  type Component,
-} from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 import {
   buildAdditionalContextSection,
   buildProjectReviewGuidelinesSection,
   REVIEW_DEDUP_PROMPT,
+  REVIEW_DIFF_SCOPE_PROMPT,
   REVIEW_FOCUSES,
   REVIEW_FOCUS_PROMPT,
   REVIEW_OUTPUT_CONTRACT_PROMPT,
+  REVIEW_RUBRIC_PROMPT,
+  REVIEW_SNAPSHOT_SCOPE_PROMPT,
 } from "./prompts.js";
 import {
   buildReviewedScopeLine,
@@ -72,13 +70,15 @@ import {
 } from "./models.js";
 import {
   notify,
+  publishReviewActivity,
   REVIEW_CANCELLED_ERROR,
-  REVIEW_STATUS_KEY,
+  REVIEW_PROGRESS_WIDGET_KEY,
+  renderReviewProgressHeader,
   STATUS_SPINNER_FRAMES,
   STATUS_SPINNER_INTERVAL_MS,
-  withManagedReviewRun,
+  joinAll,
   withSpinner,
-  type ReviewExecutionControl,
+  type ReviewRuntime,
 } from "./runtime.js";
 import {
   REVIEW_FOCUS_NAMES,
@@ -110,8 +110,6 @@ const REVIEW_STALE_FIX_NEXT_STEP =
   "No fixes were applied. Run /fix again to continue, or /review first to refresh.";
 const REVIEW_STALE_PAYLOAD_WARNING = "Repository changed since this review was generated.";
 const REVIEW_STALE_PAYLOAD_NEXT_STEP = "Run /review first to refresh it.";
-
-const REVIEW_PROGRESS_WIDGET_KEY = "review-progress";
 
 type ReviewTheme = ExtensionContext["ui"]["theme"];
 
@@ -148,7 +146,6 @@ type ReviewProgressTask = {
 
 type ReviewProgressState = {
   startedAtMs: number;
-  expanded: boolean;
   frame: number;
   tasks: ReviewProgressTask[];
 };
@@ -166,7 +163,11 @@ type PreparedReviewRun = {
   tasks: FocusTask[];
 };
 
-function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): ReviewProgressController {
+function createReviewProgress(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  tasks: FocusTask[],
+): ReviewProgressController {
   if (!ctx.hasUI) {
     return {
       update: () => {},
@@ -176,7 +177,6 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
 
   const state: ReviewProgressState = {
     startedAtMs: Date.now(),
-    expanded: false,
     frame: 0,
     tasks: tasks.map((task) => ({
       focus: task.focus,
@@ -186,27 +186,35 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
   };
   const progressTasks = new Map(tasks.map((task, index) => [task, state.tasks[index]!]));
 
+  let requestRender: (() => void) | undefined;
+  if (ctx.mode === "tui") {
+    ctx.ui.setWidget(
+      REVIEW_PROGRESS_WIDGET_KEY,
+      (tui, theme) => {
+        requestRender = () => tui.requestRender();
+        return new ReviewProgressComponent(
+          state,
+          theme,
+          () => ctx.ui.getToolsExpanded(),
+          () => publishReviewActivity(pi, ctx, `review ${buildReviewProgressStatus(state)}`),
+        );
+      },
+      { placement: "aboveEditor" },
+    );
+  }
   const render = () => {
-    if (state.expanded) {
-      ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
+    if (ctx.mode === "tui") {
+      publishReviewActivity(pi, ctx, `review ${buildReviewProgressStatus(state)}`);
+      requestRender?.();
+    } else
       ctx.ui.setWidget(
         REVIEW_PROGRESS_WIDGET_KEY,
-        (_tui, theme) => new ReviewProgressComponent(state, theme),
-        { placement: "belowEditor" },
+        [`Review · ${buildReviewProgressStatus(state)}`],
+        {
+          placement: "aboveEditor",
+        },
       );
-      return;
-    }
-
-    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined, { placement: "belowEditor" });
-    ctx.ui.setStatus(REVIEW_STATUS_KEY, buildCollapsedReviewProgressStatus(state));
   };
-  const unsubscribeToggle = ctx.ui.onTerminalInput((data) => {
-    if (isKeyRelease(data)) return undefined;
-    if (!getKeybindings().matches(data, "app.tools.expand")) return undefined;
-    state.expanded = !state.expanded;
-    render();
-    return { consume: true };
-  });
   const timer = setInterval(() => {
     state.frame = (state.frame + 1) % STATUS_SPINNER_FRAMES.length;
     render();
@@ -222,9 +230,8 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
     },
     stop: () => {
       clearInterval(timer);
-      unsubscribeToggle();
-      ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
-      ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined, { placement: "belowEditor" });
+      publishReviewActivity(pi, ctx, "review");
+      ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
     },
   };
 }
@@ -233,85 +240,82 @@ class ReviewProgressComponent implements Component {
   constructor(
     private state: ReviewProgressState,
     private theme: ReviewTheme,
+    private isExpanded: () => boolean,
+    private publishActivity: () => boolean,
   ) {}
 
   invalidate(): void {}
 
   render(width: number): string[] {
-    return buildExpandedReviewProgressLines(this.state, this.theme, width);
+    const handled = this.publishActivity();
+    if (!this.isExpanded() && handled) return [];
+    const hint = [formatDuration(Date.now() - this.state.startedAtMs), keyText("app.tools.expand")]
+      .filter(Boolean)
+      .join(" · ");
+    const header = renderReviewProgressHeader(
+      buildReviewProgressStatus(this.state),
+      this.theme,
+      width,
+      hint,
+    );
+    if (!this.isExpanded()) return [header];
+    return [
+      header,
+      ...buildReviewProgressRows(
+        groupReviewProgressTasks(this.state.tasks),
+        this.theme,
+        width,
+        getProgressSpinner(this.state),
+      ),
+    ];
   }
 }
 
-function buildCollapsedReviewProgressStatus(state: ReviewProgressState): string {
+function buildReviewProgressStatus(state: ReviewProgressState): string {
   const counts = countReviewProgressTasks(state.tasks);
-  const spinner = getProgressSpinner(state);
-  const failedText = counts.failed > 0 ? `, ${counts.failed} failed` : "";
-  return `${spinner} reviewing ${counts.finished}/${counts.total}${failedText} (${keyText("app.tools.expand")} to expand)`;
-}
-
-function buildExpandedReviewProgressLines(
-  state: ReviewProgressState,
-  theme: ReviewTheme,
-  width: number,
-): string[] {
-  const counts = countReviewProgressTasks(state.tasks);
-  const spinner = getProgressSpinner(state);
-  const hint = `${theme.fg("muted", `(${formatDuration(Date.now() - state.startedAtMs)}, `)}${theme.fg(
-    "dim",
-    keyText("app.tools.expand"),
-  )}${theme.fg("muted", " to collapse)")}`;
-  const header = truncateToWidth(
-    `${theme.fg("accent", spinner)} reviewing ${counts.finished}/${counts.total} ${hint}`,
-    width,
-    theme.fg("muted", "…"),
-  );
-  const groupedTasks = groupReviewProgressTasks(state.tasks);
-  const fullRows = buildReviewProgressRows(groupedTasks, theme, width, "full", spinner);
-  const rows = fullRows.fits
-    ? fullRows.lines
-    : buildReviewProgressRows(groupedTasks, theme, width, "short", spinner).lines;
-  return [header, ...rows, theme.fg("borderMuted", "─".repeat(Math.max(0, width)))];
+  const failedText = counts.failed > 0 ? ` · ${counts.failed} failed` : "";
+  return `${counts.finished}/${counts.total} complete${failedText}`;
 }
 
 function buildReviewProgressRows(
   groupedTasks: Map<string, ReviewProgressTask[]>,
   theme: ReviewTheme,
   width: number,
-  labelStyle: "full" | "short",
   spinner: string,
-): { fits: boolean; lines: string[] } {
+): string[] {
   const focuses = getReviewProgressFocuses(groupedTasks);
   const rowData = Array.from(groupedTasks, ([model, tasks]) => ({
     model,
-    chips: focuses
-      .map((focus) => {
-        const task = tasks.find((candidate) => candidate.focus === focus);
-        return formatReviewProgressChip(
-          task?.status ?? "running",
-          focus,
-          labelStyle,
-          spinner,
-          theme,
-        );
-      })
-      .join("  "),
+    chips: focuses.map((focus) => {
+      const task = tasks.find((candidate) => candidate.focus === focus);
+      return formatReviewProgressChip(task?.status ?? "running", focus, spinner, theme);
+    }),
   }));
+  const rowWidth = Math.max(0, width - 4);
   const maxModelWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.model)));
-  const maxChipWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.chips)));
-  const fullModelColumnWidth = Math.max(maxModelWidth, 1);
-  const fullRowsFit = rowData.every(
-    (row) => fullModelColumnWidth + 1 + visibleWidth(row.chips) <= width,
-  );
-  const availableModelWidth = width - 1 - maxChipWidth;
-  const minimumUsefulModelWidth = Math.min(16, fullModelColumnWidth);
-  const canFit = fullRowsFit || availableModelWidth >= minimumUsefulModelWidth;
-  const modelColumnWidth = fullRowsFit ? fullModelColumnWidth : Math.max(8, availableModelWidth);
-  const lines = rowData.map((row) => {
-    const model = padToWidth(truncateToWidth(row.model, modelColumnWidth, "…"), modelColumnWidth);
-    return truncateToWidth(`${model} ${row.chips}`, width, "…");
+  const maxChipWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.chips.join("  "))));
+  const modelWidth = Math.min(maxModelWidth, Math.max(0, rowWidth - maxChipWidth - 2));
+  return rowData.flatMap((row) => {
+    if (modelWidth >= Math.min(16, maxModelWidth)) {
+      const model = padToWidth(truncateToWidth(row.model, modelWidth), modelWidth);
+      return [truncateToWidth(`   ${theme.fg("dim", model)}  ${row.chips.join("  ")}`, width)];
+    }
+    // Keep focus names and their statuses together when the matrix cannot fit on one line.
+    const lines = [
+      truncateToWidth(`   ${theme.fg("dim", truncateToWidth(row.model, rowWidth))}`, width),
+    ];
+    const chipWidth = Math.max(0, rowWidth - 2);
+    let line = "";
+    for (const chip of row.chips) {
+      if (line && visibleWidth(line) + 2 + visibleWidth(chip) > chipWidth) {
+        lines.push(truncateToWidth(`     ${line}`, width));
+        line = "";
+      }
+      line += (line ? "  " : "") + truncateToWidth(chip, chipWidth);
+    }
+    if (line) lines.push(truncateToWidth(`     ${line}`, width));
+    return lines;
   });
-
-  return { fits: canFit, lines };
 }
 
 function getReviewProgressFocuses(groupedTasks: Map<string, ReviewProgressTask[]>): ReviewFocus[] {
@@ -327,18 +331,17 @@ function getReviewProgressFocuses(groupedTasks: Map<string, ReviewProgressTask[]
 function formatReviewProgressChip(
   status: ReviewProgressStatus,
   focus: ReviewFocus,
-  labelStyle: "full" | "short",
   spinner: string,
   theme: ReviewTheme,
 ): string {
-  const label = labelStyle === "full" ? focus : getShortReviewFocusLabel(focus);
+  const label = theme.fg("text", focus);
   switch (status) {
     case "success":
       return `${theme.fg("success", "✓")} ${label}`;
     case "failure":
       return `${theme.fg("error", "✕")} ${label}`;
     case "running":
-      return `${spinner} ${label}`;
+      return `${theme.fg("accent", spinner)} ${label}`;
   }
 }
 
@@ -373,23 +376,6 @@ function getProgressSpinner(state: ReviewProgressState): string {
   return STATUS_SPINNER_FRAMES[state.frame % STATUS_SPINNER_FRAMES.length];
 }
 
-function getShortReviewFocusLabel(focus: ReviewFocus): string {
-  switch (focus) {
-    case "general":
-      return "gen";
-    case "security":
-      return "sec";
-    case "reuse":
-      return "reuse";
-    case "quality":
-      return "qual";
-    case "testing":
-      return "test";
-    case "efficiency":
-      return "eff";
-  }
-}
-
 function padToWidth(value: string, width: number): string {
   return `${value}${" ".repeat(Math.max(0, width - visibleWidth(value)))}`;
 }
@@ -400,7 +386,7 @@ function priorityRank(priority: Priority): number {
 
 function buildFocusPrompt(
   focus: ReviewFocus,
-  scopeInstructions: string,
+  scope: ResolvedScope,
   projectGuidelines: string | null,
   additionalContext: string | undefined,
 ): string {
@@ -408,10 +394,18 @@ function buildFocusPrompt(
   const projectGuidelinesSection = buildProjectReviewGuidelinesSection(projectGuidelines);
 
   const def = REVIEW_FOCUSES[focus];
+  const scopePolicy =
+    scope.kind === "folder"
+      ? REVIEW_SNAPSHOT_SCOPE_PROMPT
+      : scope.kind === "custom"
+        ? `Use the custom instructions to determine the review scope and whether it is a diff or snapshot review. Apply the corresponding default below unless those instructions override it.\n\n${REVIEW_DIFF_SCOPE_PROMPT}\n\n${REVIEW_SNAPSHOT_SCOPE_PROMPT}`
+        : REVIEW_DIFF_SCOPE_PROMPT;
 
   return REVIEW_FOCUS_PROMPT.replace("{FOCUS_SUFFIX}", () => def.suffix)
     .replace("{FOCUS_QUALIFIER}", () => def.qualifier)
-    .replace("{SCOPE_INSTRUCTIONS}", () => scopeInstructions)
+    .replace("{SCOPE_INSTRUCTIONS}", () => buildScopeInstructions(scope))
+    .replace("{REVIEW_RUBRIC}", () => REVIEW_RUBRIC_PROMPT)
+    .replace("{SCOPE_POLICY}", () => scopePolicy)
     .replace("{FOCUS_CONTEXT}", () => def.context)
     .replace("{ADDITIONAL_CONTEXT_SECTION}", () => additionalContextSection)
     .replace("{PROJECT_GUIDELINES_SECTION}", () => projectGuidelinesSection)
@@ -562,7 +556,7 @@ function createFocusTaskAttempt(
 async function runFocusTaskOnce(
   task: FocusTaskAttempt,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
   const modelLabel = buildFocusTaskAttemptModelLabel(task);
   const modelArg = getFocusTaskAttemptModelArg(task);
@@ -588,7 +582,7 @@ async function runFocusTaskOnce(
     prompt: task.prompt,
     cwd,
     timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-    control,
+    signal,
     submitTool: SUBMIT_REVIEW_TOOL,
   });
 
@@ -680,21 +674,19 @@ async function runFocusTaskOnce(
 async function runFocusTaskWithRetry(
   task: FocusTaskAttempt,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
   for (let attempt = 0; ; attempt += 1) {
-    const result = await runFocusTaskOnce(task, cwd, control);
+    const result = await runFocusTaskOnce(task, cwd, signal);
     if (result.ok || attempt >= REVIEW_STARTUP_RETRY_DELAYS_MS.length) return result;
 
     if (result.errorKind !== "lock_contention") return result;
-    if (control?.isCancelled()) {
-      return createCancelledFocusAttemptResult(task);
-    }
+    signal.throwIfAborted();
 
     const baseDelayMs =
       REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
       REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
-    await new Promise((resolve) => setTimeout(resolve, withJitter(baseDelayMs)));
+    await delay(withJitter(baseDelayMs), undefined, { signal });
   }
 }
 
@@ -722,7 +714,7 @@ async function runFocusTaskForProviderCandidate(
   task: FocusTask,
   providerCandidate: ResolvedReviewProviderCandidate,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
   const thinkingLevels = getFocusTaskThinkingLevels(task, providerCandidate);
   const triedLevels: ReviewThinkingLevel[] = [];
@@ -736,7 +728,7 @@ async function runFocusTaskForProviderCandidate(
       return createUnsupportedReasoningFocusAttemptResult(attempt, explicitThinkingSupportError);
     }
 
-    const result = await runFocusTaskWithRetry(attempt, cwd, control);
+    const result = await runFocusTaskWithRetry(attempt, cwd, signal);
     if (result.ok) return result;
 
     lastResult = result;
@@ -761,9 +753,9 @@ async function runFocusTaskForProviderCandidate(
 async function runFocusTask(
   task: FocusTask,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
-  if (control?.isCancelled()) {
+  if (signal.aborted) {
     return createCancelledFocusResult(task);
   }
 
@@ -775,7 +767,7 @@ async function runFocusTask(
       continue;
     }
     if (availability === "supported") {
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
       if (result.ok) return result;
       lastResult = result;
       if (
@@ -795,7 +787,7 @@ async function runFocusTask(
         continue;
       }
 
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
       if (result.ok) return result;
       lastResult = result;
       if (
@@ -814,10 +806,12 @@ async function runFocusTask(
       resolveProbe = resolve;
       rejectProbe = reject;
     });
+    // The initiating task reports errors even when no sibling awaits this shared probe.
+    void probe.catch(() => {});
     setProviderCandidateProbe(task.model, providerCandidate, probe);
 
     try {
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
       lastResult = result;
       const probedAvailability = getProviderCandidateAvailabilityFromResult(result);
       setProviderCandidateAvailability(task.model, providerCandidate, probedAvailability);
@@ -839,19 +833,21 @@ async function runFocusTask(
 }
 
 async function runReviewDedupTask(options: {
+  pi: ExtensionAPI;
   ctx: ExtensionCommandContext;
   cwd: string;
   findings: ReviewReportFinding[];
-  control?: ReviewExecutionControl;
+  signal: AbortSignal;
 }): Promise<ReviewDedupGroup[] | null> {
-  const { ctx, cwd, findings, control } = options;
+  const { pi, ctx, cwd, findings, signal } = options;
   if (findings.length <= 1) return [];
-  if (control?.isCancelled()) return null;
+  if (signal.aborted) return null;
 
   const model = selectReviewDedupModel(ctx);
   if (!model) return null;
 
   const taskResult = await withSpinner(
+    pi,
     ctx,
     () => `deduplicating ${findings.length} review findings`,
     () =>
@@ -872,7 +868,7 @@ async function runReviewDedupTask(options: {
         prompt: buildReviewDedupPrompt(findings),
         cwd,
         timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-        control,
+        signal,
       }),
   );
 
@@ -975,7 +971,7 @@ function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null 
 }
 
 export function getLastMessageReviewDetails(ctx: ExtensionContext): ReviewMessageDetails | null {
-  const entry = ctx.sessionManager.getBranch().at(-1);
+  const entry = ctx.sessionManager.getBranch().findLast((entry) => entry.type !== "usage");
   if (!entry || entry.type !== "custom_message" || entry.customType !== "review") {
     return null;
   }
@@ -992,7 +988,6 @@ function buildReviewTasks(
   models: ResolvedReviewModel[],
   focuses: readonly ReviewFocus[],
 ): FocusTask[] {
-  const scopeInstructions = buildScopeInstructions(scope);
   const tasks: FocusTask[] = [];
 
   for (const model of models) {
@@ -1000,7 +995,7 @@ function buildReviewTasks(
       tasks.push({
         model,
         focus,
-        prompt: buildFocusPrompt(focus, scopeInstructions, guidelines, additionalContext),
+        prompt: buildFocusPrompt(focus, scope, guidelines, additionalContext),
       });
     }
   }
@@ -1012,12 +1007,14 @@ async function prepareReviewRun(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
+  signal: AbortSignal,
 ): Promise<{ ok: false; error: string } | { ok: true; data: PreparedReviewRun }> {
-  if (!(await isGitRepo(pi))) {
+  const workspace = { cwd: ctx.cwd, signal };
+  if (!(await isGitRepo(workspace))) {
     return { ok: false, error: "Not a git repository." };
   }
 
-  const resolved = await resolveScope(pi, request.target, (message, type) =>
+  const resolved = await resolveScope(workspace, request.target, (message, type) =>
     notify(ctx, message, type),
   );
   if (!resolved.scope) {
@@ -1027,10 +1024,10 @@ async function prepareReviewRun(
   const scope = resolved.scope;
   const includeUntracked = scope.kind === "working-tree" || scope.kind === "folder";
   const scopeUntrackedFiles = scope.kind === "working-tree" ? scope.untrackedFiles : undefined;
-  const [baselineFingerprint, guidelines, models] = await Promise.all([
-    computeCurrentFingerprint(pi, ctx.cwd, includeUntracked, scopeUntrackedFiles),
-    loadProjectReviewGuidelines(ctx.cwd),
-    resolveModels(ctx, request.models, pi.getThinkingLevel()),
+  const [baselineFingerprint, guidelines, models] = await joinAll([
+    computeCurrentFingerprint(workspace, includeUntracked, scopeUntrackedFiles),
+    loadProjectReviewGuidelines(workspace),
+    resolveModels(ctx, request.models, pi.getThinkingLevel(), signal),
   ]);
 
   return {
@@ -1052,18 +1049,19 @@ async function prepareReviewRun(
 }
 
 async function runFocusTasks(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   cwd: string,
   tasks: FocusTask[],
-  control: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult[]> {
-  const progress = createReviewProgress(ctx, tasks);
+  const progress = createReviewProgress(pi, ctx, tasks);
   try {
-    return await Promise.all(
+    return await joinAll(
       tasks.map(async (task) => {
-        const result = control.isCancelled()
+        const result = signal.aborted
           ? createCancelledFocusResult(task)
-          : await runFocusTask(task, cwd, control);
+          : await runFocusTask(task, cwd, signal);
         progress.update(task, result);
         return result;
       }),
@@ -1124,10 +1122,11 @@ function applyReviewDedupGroups(
 }
 
 async function buildReviewFindings(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   cwd: string,
   successfulFocuses: Array<FocusTaskResult & { output: FocusOutput }>,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<ReviewReportFinding[]> {
   const findings = successfulFocuses.flatMap((focus) =>
     focus.output.findings.map((finding) => ({
@@ -1143,10 +1142,11 @@ async function buildReviewFindings(
   }
 
   const dedupGroups = await runReviewDedupTask({
+    pi,
     ctx,
     cwd,
     findings,
-    control,
+    signal,
   });
   return dedupGroups ? applyReviewDedupGroups(findings, dedupGroups) : findings;
 }
@@ -1156,14 +1156,13 @@ export async function runReviewPipeline(
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
   source: ReviewRunSource,
+  runtime: ReviewRuntime,
 ): Promise<ReviewRunResult> {
   const startedAtMs = Date.now();
-  const prepared = await prepareReviewRun(pi, ctx, request);
-  if (!prepared.ok) {
-    return { ok: false, error: prepared.error };
-  }
-
-  return withManagedReviewRun(pi, ctx, source, async (managed) => {
+  return runtime.run(ctx, source, async (signal): Promise<ReviewRunResult> => {
+    const prepared = await prepareReviewRun(pi, ctx, request, signal);
+    signal.throwIfAborted();
+    if (!prepared.ok) return prepared;
     const { scope, includeUntracked, baselineFingerprint, models, tasks } = prepared.data;
     if (source === "review") {
       const modelsText = models
@@ -1172,11 +1171,8 @@ export async function runReviewPipeline(
       notify(ctx, `Review focuses: ${request.focuses.join(", ")} · models: ${modelsText}.`, "info");
     }
 
-    const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, managed.control);
-    if (managed.control.isCancelled()) {
-      managed.markCancelled();
-      return { ok: false, error: REVIEW_CANCELLED_ERROR };
-    }
+    const focusResults = await runFocusTasks(pi, ctx, ctx.cwd, tasks, signal);
+    signal.throwIfAborted();
 
     const failedFocuses = focusResults.filter((focus) => !focus.ok);
     const failedCount = failedFocuses.length;
@@ -1219,17 +1215,17 @@ export async function runReviewPipeline(
       };
     }
 
-    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, managed.control);
+    const findings = await buildReviewFindings(pi, ctx, ctx.cwd, successfulFocuses, signal);
 
-    const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
+    const endingFingerprint = await computeCurrentFingerprint(
+      { cwd: ctx.cwd, signal },
+      includeUntracked,
+    );
     const reviewStaleness = !fingerprintsEqual(baselineFingerprint, endingFingerprint)
       ? buildReviewStaleness(source)
       : undefined;
 
-    if (managed.control.isCancelled()) {
-      managed.markCancelled();
-      return { ok: false, error: REVIEW_CANCELLED_ERROR };
-    }
+    signal.throwIfAborted();
 
     const reviewedScopeLine = buildReviewedScopeLine(scope, Date.now() - startedAtMs);
     let findingsMarkdown = buildReviewFindingsMarkdown(
@@ -1299,7 +1295,6 @@ export async function runReviewPipeline(
       notify(ctx, `Review completed: ${findings.length} finding(s).`, "info");
     }
 
-    managed.markSuccessful();
     return { ok: true, details };
   });
 }

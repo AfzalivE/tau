@@ -1,36 +1,14 @@
 # websearch
 
-Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions.
+Search the web with Gemini, OpenAI, or Claude using Pi credentials or existing browser sessions. The `websearch` tool tries the configured routes and falls back when a search fails.
 
-Current routes:
+## Configuration
 
-- `pi:openai-codex`
-- `pi:anthropic`
-- `pi:gemini`
-- `firefox:gemini`
-- `firefox:openai-codex`
-- `chromium:gemini`
-- `chromium:openai-codex`
-
-## Config
-
-Optional config file:
-
-- `~/.pi/agent/websearch.json`
-
-Example:
+Optionally create `websearch.json` in your Pi agent directory (normally `~/.pi/agent`):
 
 ```json
 {
-  "routes": [
-    "pi:openai-codex",
-    "pi:anthropic",
-    "pi:gemini",
-    "firefox:gemini",
-    "firefox:openai-codex",
-    "chromium:gemini",
-    "chromium:openai-codex"
-  ],
+  "routes": ["pi:openai-codex", "pi:anthropic", "pi:gemini", "firefox:gemini", "chromium:gemini"],
   "profiles": {
     "firefox": "default-release",
     "chromium": "Default"
@@ -38,31 +16,18 @@ Example:
 }
 ```
 
-Defaults:
+The routes shown are the default order. Set `routes` to choose which routes to use and their order.
 
-- default routes match the example above
-- if `routes` is set, only those routes are tried, in that order
-- Pi routes try the current Pi model first within the matching provider family, then fall back to another available model from that family
+Pi routes use Pi's authentication. Browser routes use existing Google sessions for Gemini. Browser profiles are discovered automatically unless pinned with `profiles`.
 
-`profiles` only applies to browser-backed routes. It pins which local Firefox or Chromium profile to read cookies from.
+Browser access supports Firefox and Chromium-family browsers on macOS and Linux. macOS may prompt for Keychain access to decrypt cookies.
 
 ## Usage
 
-In Pi, the extension exposes:
+```js
+websearch({ query: "how does Pi compaction work" });
+```
 
-- tool: `websearch`
+## Output
 
-Examples:
-
-- `websearch({ query: "latest Todoist release notes" })`
-- `websearch({ query: "how does Pi compaction work" })`
-
-## Notes
-
-- Pi-backed API routes are preferred, with browser fallbacks after that.
-- Browser routes use existing local browser sessions.
-- Browser profiles are auto-discovered unless pinned in config.
-- Supported Chromium-family browsers are Chromium, Chrome, Brave, and Edge.
-- Browser discovery currently supports macOS and Linux, not Windows.
-- On macOS, Chromium-based browsers may prompt for Keychain access so cookies can be decrypted.
-- If one route fails, the extension falls through to the next one.
+Output is limited to 2,000 lines or 50 KB. Longer results include a path to the full text, including sources, in a temporary file.

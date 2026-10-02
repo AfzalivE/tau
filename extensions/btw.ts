@@ -31,6 +31,7 @@ import {
 
 const STATUS_KEY = "0-btw";
 const RESULT_MARKDOWN_THEME = getMarkdownTheme();
+const MIN_RESULT_WIDTH = 50;
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -380,6 +381,7 @@ function extractText(content: AssistantMessage["content"]): string {
 class BtwResultComponent implements Component {
   private readonly markdown: Markdown;
   private scrollOffset = 0;
+  private renderWidth?: number;
   private cachedBodyWidth?: number;
   private cachedBodyLines?: string[];
 
@@ -409,8 +411,11 @@ class BtwResultComponent implements Component {
       return;
     }
 
+    const width = this.renderWidth ?? this.tui.terminal.columns;
+    if (width < MIN_RESULT_WIDTH) return;
+
     const bodyHeight = this.getBodyHeight();
-    const boxWidth = this.getBoxWidth(this.tui.terminal.columns);
+    const boxWidth = this.getBoxWidth(width);
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
 
@@ -434,6 +439,16 @@ class BtwResultComponent implements Component {
   }
 
   render(width: number): string[] {
+    this.renderWidth = width;
+    if (width < MIN_RESULT_WIDTH) {
+      return [
+        truncateToWidth(
+          this.theme.fg("muted", `Resize to ${MIN_RESULT_WIDTH}+ columns to view answer.`),
+          width,
+        ),
+      ];
+    }
+
     const boxWidth = this.getBoxWidth(width);
     const contentWidth = this.getContentWidth(boxWidth);
     const questionLines = wrapTextWithAnsi(
@@ -486,7 +501,7 @@ class BtwResultComponent implements Component {
   }
 
   private getBoxWidth(width: number): number {
-    return Math.max(50, Math.min(width - 2, 140));
+    return Math.max(MIN_RESULT_WIDTH, Math.min(width - 2, 140));
   }
 
   private getContentWidth(boxWidth: number): number {

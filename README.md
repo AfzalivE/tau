@@ -2,7 +2,7 @@
 
 Tau is a batteries-included distribution for [Pi](https://pi.dev), a brilliant coding agent by @badlogic that's barebones yet highly (and elegantly) extensible by design.
 
-It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding a `websearch` tool to complement the four default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
+It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding `websearch` and `subagent` tools to complement the default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
 
 | Package                      | Purpose                                                                |
 | ---------------------------- | ---------------------------------------------------------------------- |
@@ -38,6 +38,12 @@ Project-local install allows you to pin Tau for everyone working on the project:
 pi install -l npm:tau-coding-agent
 ```
 
+## Agent configuration
+
+The published packages do not include agent configuration; those files are highly personal.
+
+Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
+
 ## Extensions
 
 The standalone `tau-acp-client` package provides the `acp-client` extension; the Tau bundle packages below do not include it.
@@ -45,8 +51,9 @@ The standalone `tau-acp-client` package provides the `acp-client` extension; the
 | Extension           | Command              | Coding | All | Description                                                                                                               |
 | ------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
 | `answer`            | `/answer`            |   ✓    |  ✓  | Extract and interactively answer agent questions.                                                                         |
-| `branch-term`       | `/branch`            |   ✓    |  ✓  | Open a new terminal on the current session's git branch.                                                                  |
+| `branch-term`       | `/branch`            |   ✓    |  ✓  | Fork the selected Pi conversation for a separate terminal or tmux pane.                                                   |
 | `btw`               | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |
+| `caffeinate`        | —                    |   ✓    |  ✓  | Prevent system sleep while the agent runs.                                                                                |
 | `ghostty`           | —                    |   ✓    |  ✓  | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`    | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    |   ✓    |  ✓  | Status bar PR number and link for the current branch.                                                                     |
@@ -55,16 +62,20 @@ The standalone `tau-acp-client` package provides the `acp-client` extension; the
 | `loop`              | `/loop`              |   ✓    |  ✓  | Repeat a prompt until the agent signals success.                                                                          |
 | `memory`            | `/memory`            |   ✓    |  ✓  | Opt-in project-local memory for learning and continuity across sessions.                                                  |
 | `notify`            | —                    |   ✓    |  ✓  | Terminal notification when the agent is waiting for input.                                                                |
-| `openai-fast`       | `/fast`              |   ✓    |  ✓  | Toggle priority service tier for supported OpenAI models.                                                                 |
-| `openai-verbosity`  | `/verbosity`         |   ✓    |  ✓  | Set verbosity for supported OpenAI models.                                                                                |
+| `fast`              | `/fast`              |   ✓    |  ✓  | Toggle fast processing for compatible models.                                                                             |
+| `openai-verbosity`  | `/verbosity`         |   ✓    |  ✓  | Set verbosity for supported GPT models.                                                                                   |
 | `review`            | `/review`, `/triage` |   ✓    |  ✓  | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`           | `/sandbox`           |   ✓    |  ✓  | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
-| `tool-display-mode` | `ctrl+o`             |   ✓    |  ✓  | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
+| `sandbox`           | `/sandbox`           |   ✓    |  ✓  | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `subagent`          | —                    |   ✓    |  ✓  | Delegate work to background Pi agents and follow up with them.                                                            |
+| `tool-display-mode` | `ctrl+o`             |   ✓    |  ✓  | Cycle tool output modes and combine background activity in the composer.                                                  |
 | `usage`             | `/usage`             |   ✓    |  ✓  | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    |   ✓    |  ✓  | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          |   ✓    |  ✓  | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
-| `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
-| `todoist`           | `/todoist`           |   —    |  —  | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
+| `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
+
+While Review or Subagent work is active, **Esc** asks **“Cancel all ongoing work?”**. **Enter** confirms cancellation. **Esc** again or **No** keeps the work running. One confirmation covers both extensions and the parent agent. Session cleanup remains unconditional.
+
+After confirmed cancellation, Review retains queued text and images for your next message instead of restarting the agent automatically.
 
 ### Git over SSH in the macOS sandbox
 
@@ -134,17 +145,18 @@ Any same-host process that can reach the random port while the adapter is active
 
 ## Skills
 
-| Skill               | Coding | All | Description                                                                        |
-| ------------------- | :----: | :-: | ---------------------------------------------------------------------------------- |
-| `browser-tools`     |   ✓    |  ✓  | Interactive browser automation via Chrome DevTools Protocol.                       |
-| `git-clean-history` |   ✓    |  ✓  | Reimplement a branch on a fresh branch off `main` with a clean commit history.     |
-| `git-commit`        |   ✓    |  ✓  | Tidy, focused commits with clear rationale in messages.                            |
-| `oracle`            |   ✓    |  ✓  | Second opinion from another LLM for debugging, refactors, design, or code reviews. |
-| `sentry`            |   ✓    |  ✓  | Fetch and analyze Sentry issues, events, transactions, and logs.                   |
-| `update-changelog`  |   ✓    |  ✓  | Update CHANGELOG.md following Keep a Changelog.                                    |
-| `web-design`        |   ✓    |  ✓  | Distinctive, production-ready web interfaces.                                      |
-| `homeassistant-ops` |   —    |  ✓  | Operate a Home Assistant instance via REST/WebSocket APIs.                         |
-| `openscad`          |   —    |  ✓  | Create and render OpenSCAD 3D models, export STL.                                  |
+| Skill                 | Coding | All | Description                                                                        |
+| --------------------- | :----: | :-: | ---------------------------------------------------------------------------------- |
+| `browser-tools`       |   ✓    |  ✓  | Interactive browser automation via Chrome DevTools Protocol.                       |
+| `git-clean-history`   |   ✓    |  ✓  | Reimplement a branch on a fresh branch off `main` with a clean commit history.     |
+| `git-commit`          |   ✓    |  ✓  | Tidy, focused commits with clear rationale in messages.                            |
+| `github-pull-request` |   ✓    |  ✓  | Create and steward pull requests through CI, review, and merge.                    |
+| `oracle`              |   ✓    |  ✓  | Second opinion from another LLM for debugging, refactors, design, or code reviews. |
+| `sentry`              |   ✓    |  ✓  | Fetch and analyze Sentry issues, events, transactions, and logs.                   |
+| `update-changelog`    |   ✓    |  ✓  | Update CHANGELOG.md following Keep a Changelog.                                    |
+| `web-design`          |   ✓    |  ✓  | Distinctive, production-ready web interfaces.                                      |
+| `homeassistant-ops`   |   —    |  ✓  | Operate a Home Assistant instance via REST/WebSocket APIs.                         |
+| `openscad`            |   —    |  ✓  | Create and render OpenSCAD 3D models, export STL.                                  |
 
 ## Themes
 
@@ -166,6 +178,10 @@ pi -e ./packages/afzal-tau-non-coding-agent
 ```
 
 The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`. An extension manifest entry ending in `index.ts` includes its containing directory and sibling modules; direct-file entries must be updated when upstream renames their source file.
+
+Run `npm test` for all extension tests or `npm test -- <extension>` for one extension. Node test options can follow the extension name, for example `npm test -- <extension> --test-name-pattern=reload`. Tests compile into disposable build output and run with isolated home/config directories and no inherited credentials. See [AGENTS.md](AGENTS.md) for extension development and testing guidelines.
+
+CI runs formatting, linting, compilation, extension tests, and package checks on macOS and Linux for pull requests and pushes to `main`.
 
 ## Publishing
 

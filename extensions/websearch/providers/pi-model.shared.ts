@@ -1,40 +1,43 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface PiModelSelection {
   model: Model<Api>;
   apiKey?: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   env?: Record<string, string>;
 }
 
-export async function selectCurrentPiModel(
+export function getPiModelCandidates(
   ctx: ExtensionContext,
   predicate: (model: Model<Api>) => boolean,
-): Promise<PiModelSelection | null> {
-  if (!ctx.model || !predicate(ctx.model)) return null;
-
-  return resolvePiModelSelection(ctx.model, ctx);
+  fallbackModels?: readonly string[],
+): Model<Api>[] {
+  const available = ctx.modelRegistry.getAvailable().filter(predicate);
+  const fallbacks = fallbackModels
+    ? fallbackModels.flatMap((id) => available.filter((model) => model.id === id))
+    : available.sort(comparePiModels);
+  const candidates = ctx.model && predicate(ctx.model) ? [ctx.model, ...fallbacks] : fallbacks;
+  const seen = new Set<string>();
+  return candidates.filter((model) => {
+    const key = `${model.provider}:${model.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-export async function selectFallbackPiModel(
+/** Consume candidates lazily so unused routes and alternate models never resolve credentials. */
+export async function selectNextPiModel(
   ctx: ExtensionContext,
-  predicate: (model: Model<Api>) => boolean,
+  remaining: Model<Api>[],
+  signal?: AbortSignal,
 ): Promise<PiModelSelection | null> {
-  const currentKey =
-    ctx.model && predicate(ctx.model) ? `${ctx.model.provider}:${ctx.model.id}` : null;
-  const candidates = rankPiModels(
-    ctx.modelRegistry.getAvailable().filter((model) => {
-      if (!predicate(model)) return false;
-      return `${model.provider}:${model.id}` !== currentKey;
-    }),
-  );
-
-  for (const model of candidates) {
-    const selection = await resolvePiModelSelection(model, ctx);
+  while (remaining.length > 0) {
+    signal?.throwIfAborted();
+    const selection = await resolvePiModelSelection(remaining.shift()!, ctx);
     if (selection) return selection;
   }
-
   return null;
 }
 
@@ -45,7 +48,7 @@ async function resolvePiModelSelection(
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   return auth.ok
     ? {
-        model: resolveModelEnv(model, auth.env),
+        model: resolveModelEndpoint(model, auth.baseUrl, auth.env),
         apiKey: auth.apiKey,
         headers: auth.headers,
         env: auth.env,
@@ -53,27 +56,18 @@ async function resolvePiModelSelection(
     : null;
 }
 
-function resolveModelEnv(model: Model<Api>, env?: Record<string, string>): Model<Api> {
-  if (!model.baseUrl || !env) return model;
+function resolveModelEndpoint(
+  model: Model<Api>,
+  resolvedBaseUrl?: string,
+  env?: Record<string, string>,
+): Model<Api> {
+  let baseUrl = resolvedBaseUrl ?? model.baseUrl;
+  if (!baseUrl) return model;
 
-  let baseUrl = model.baseUrl;
-  for (const [name, value] of Object.entries(env)) {
+  for (const [name, value] of Object.entries(env ?? {})) {
     baseUrl = baseUrl.replaceAll(`{${name}}`, value);
   }
   return baseUrl === model.baseUrl ? model : { ...model, baseUrl };
-}
-
-function rankPiModels(models: Model<Api>[]): Model<Api>[] {
-  const seen = new Set<string>();
-
-  return [...models]
-    .filter((model) => {
-      const key = `${model.provider}:${model.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort(comparePiModels);
 }
 
 function comparePiModels(left: Model<Api>, right: Model<Api>): number {
