@@ -18,8 +18,10 @@ Run browser commands from this skill directory. All command paths in this skill 
 "./scripts/browser-start.js" --profile               # Seed cookies/logins from your browser profile
 "./scripts/browser-start.js" --browser chromium      # Or chrome
 "./scripts/browser-start.js" --executable /path/to/browser
+"./scripts/browser-start.js" --profile-dir "Profile 2" # Seed a specific source profile
 ```
 
+- `--profile-dir` selects a source profile by name or absolute path and implies `--profile`. `BROWSER_TOOLS_PROFILE_DIR` is the environment equivalent.
 - An existing browser on `:9222` is reused. `--browser`, `--executable`, and `--profile` affect only new instances. Do not kill or restart a user's browser to apply launch options.
 - New instances use `~/.cache/browser-tools`. `--profile` syncs the source profile into that dedicated directory, excluding session/tab files. It does not operate directly on the source profile, but can overwrite tool-profile state. Use it when existing authentication is needed, not as a routine reset.
 - Preserve the user's tabs, drafts, and authentication. Open a new tab rather than navigating an unrelated one. Check the target URL before acting. Close only tabs you created and no longer need, not user-owned tabs or the reused browser.
