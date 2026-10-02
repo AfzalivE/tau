@@ -435,7 +435,7 @@ function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSand
 
   let overrideConfig: Partial<SandboxConfig>;
   try {
-    overrideConfig = JSON.parse(source);
+    overrideConfig = parseSandboxConfig(source);
   } catch (error) {
     throw new SandboxConfigLoadError(
       "parse-error",
@@ -468,7 +468,7 @@ export function loadConfig(
 
   if (existsSync(globalConfigPath)) {
     try {
-      globalConfig = JSON.parse(readFileSync(globalConfigPath, "utf-8"));
+      globalConfig = parseSandboxConfig(readFileSync(globalConfigPath, "utf-8"));
       paths.push({ label: "Global", path: globalConfigPath, status: "loaded" });
     } catch (e) {
       paths.push({ label: "Global", path: globalConfigPath, status: "parse-error" });
@@ -481,7 +481,7 @@ export function loadConfig(
       paths.push({ label: "Project", path: projectConfigPath, status: "skipped-untrusted" });
     } else {
       try {
-        projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
+        projectConfig = parseSandboxConfig(readFileSync(projectConfigPath, "utf-8"));
         paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
       } catch (e) {
         paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
@@ -496,6 +496,12 @@ export function loadConfig(
     config: finalizeConfig(merged),
     paths,
   };
+}
+
+function parseSandboxConfig(source: string): Partial<SandboxConfig> {
+  const config: unknown = JSON.parse(source);
+  if (!isPlainObject(config)) throw new Error("Sandbox config must be a JSON object.");
+  return config as Partial<SandboxConfig>;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
