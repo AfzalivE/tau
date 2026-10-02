@@ -43,7 +43,9 @@ function writeLine(text = "") {
 }
 
 function compact(value, maxLength = 180) {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength - 1)}…`;
 }
@@ -65,13 +67,21 @@ function formatUsage(usage) {
   const output = Number(usage.output || 0);
   const cache = Number(usage.cacheRead || 0) + Number(usage.cacheWrite || 0);
   const total = Number(usage.totalTokens || input + output + cache);
-  const parts = [`tok ${formatTokenCount(total)}`, `in ${formatTokenCount(input)}`, `out ${formatTokenCount(output)}`];
+  const parts = [
+    `tok ${formatTokenCount(total)}`,
+    `in ${formatTokenCount(input)}`,
+    `out ${formatTokenCount(output)}`,
+  ];
   if (cache > 0) parts.push(`cache ${formatTokenCount(cache)}`);
   return parts.join(" ");
 }
 
 function usageFromEvent(event) {
-  return event?.assistantMessageEvent?.partial?.usage || event?.assistantMessageEvent?.message?.usage || event?.message?.usage;
+  return (
+    event?.assistantMessageEvent?.partial?.usage ||
+    event?.assistantMessageEvent?.message?.usage ||
+    event?.message?.usage
+  );
 }
 
 function formatPath(args = {}) {
@@ -148,7 +158,8 @@ function createProgressRenderer() {
     if (state.edits > 0) parts.push(`edit ${state.edits}`);
     const usage = formatUsage(state.usage);
     if (usage) parts.push(usage);
-    else if (state.estimatedOutputTokens > 0) parts.push(`~out ${formatTokenCount(state.estimatedOutputTokens)}`);
+    else if (state.estimatedOutputTokens > 0)
+      parts.push(`~out ${formatTokenCount(state.estimatedOutputTokens)}`);
     if (state.writes > 0) parts.push(`write ${state.writes}`);
     parts.push(`tools ${state.finished}/${state.started}`);
     if (state.failed > 0) parts.push(red(`${state.failed} failed`));
@@ -186,7 +197,10 @@ function createProgressRenderer() {
       if (event.toolName === "read") state.readsStarted += 1;
       if (event.toolName === "edit") state.edits += 1;
       if (event.toolName === "write") state.writes += 1;
-      const details = event.toolName === "read" ? formatPath(event.args) : formatToolCall(event.toolName, event.args);
+      const details =
+        event.toolName === "read"
+          ? formatPath(event.args)
+          : formatToolCall(event.toolName, event.args);
       state.current = details ? `${event.toolName} ${details}` : event.toolName;
       render();
     },
@@ -234,7 +248,9 @@ function flushReadBatch({ force = false } = {}) {
   } else if (batch.every((call) => call.done)) {
     writeLine(`${dim("╰─")} ${green(`✓ ${plural(batch.length, "file")}`)}`);
   } else {
-    writeLine(`${dim("╰─")} ${yellow(`${batch.filter((call) => call.done).length}/${batch.length} finished`)}`);
+    writeLine(
+      `${dim("╰─")} ${yellow(`${batch.filter((call) => call.done).length}/${batch.length} finished`)}`,
+    );
   }
 }
 
@@ -318,7 +334,8 @@ function writeToolOutputDelta(toolCallId, result, options = {}) {
 
 function finishTool(event) {
   const call = toolCalls.get(event.toolCallId) || { name: event.toolName, outputLineStart: true };
-  const shouldPrintFinalOutput = event.isError || call.name === "bash" || toolOutputById.has(event.toolCallId);
+  const shouldPrintFinalOutput =
+    event.isError || call.name === "bash" || toolOutputById.has(event.toolCallId);
   writeToolOutputDelta(event.toolCallId, event.result, { onlyIfStarted: !shouldPrintFinalOutput });
 
   writeLine(`${dim("╰─")} ${event.isError ? red("✗") : green("✓")} ${event.toolName}`);

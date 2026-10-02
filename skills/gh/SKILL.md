@@ -22,23 +22,23 @@ Placeholders `{owner}`, `{repo}`, `{branch}` work in `gh api` endpoints. Quote e
 
 ## Quick Reference
 
-| Task | Command |
-|------|---------|
-| List open PRs | `gh pr list` |
-| View PR | `gh pr view <number>` |
-| Create PR | `gh pr create -t "title" -b "body"` |
-| PR diff | `gh pr diff <number>` |
-| PR checks | `gh pr checks <number>` |
-| Merge PR | `gh pr merge <number> --squash -d` |
-| Checkout PR | `gh pr checkout <number>` |
-| Review PR | `gh pr review <number> --approve` |
-| Comment on PR | `gh pr comment <number> -b "text"` |
-| List issues | `gh issue list` |
-| View issue | `gh issue view <number>` |
-| Create issue | `gh issue create -t "title" -b "body"` |
-| My status | `gh status` |
-| Open in browser | `gh browse <number>` |
-| Raw API call | `gh api <endpoint>` |
+| Task            | Command                                |
+| --------------- | -------------------------------------- |
+| List open PRs   | `gh pr list`                           |
+| View PR         | `gh pr view <number>`                  |
+| Create PR       | `gh pr create -t "title" -b "body"`    |
+| PR diff         | `gh pr diff <number>`                  |
+| PR checks       | `gh pr checks <number>`                |
+| Merge PR        | `gh pr merge <number> --squash -d`     |
+| Checkout PR     | `gh pr checkout <number>`              |
+| Review PR       | `gh pr review <number> --approve`      |
+| Comment on PR   | `gh pr comment <number> -b "text"`     |
+| List issues     | `gh issue list`                        |
+| View issue      | `gh issue view <number>`               |
+| Create issue    | `gh issue create -t "title" -b "body"` |
+| My status       | `gh status`                            |
+| Open in browser | `gh browse <number>`                   |
+| Raw API call    | `gh api <endpoint>`                    |
 
 ## Pull Requests
 
@@ -252,18 +252,18 @@ gh api user
 
 ## Other Commands
 
-| Command | Purpose |
-|---------|---------|
-| `gh status` | Assigned issues/PRs, review requests, mentions across all repos |
-| `gh browse [number\|path]` | Open in browser (`-n` prints URL instead) |
-| `gh browse main.go:312` | Open file at line in browser |
-| `gh gist create -f name file` | Create gist |
-| `gh gist list` | List your gists |
-| `gh release list` | List releases |
-| `gh release create tag` | Create release |
-| `gh repo view` | View repo info |
-| `gh repo clone OWNER/REPO` | Clone repo |
-| `gh label list [-S search]` | List/search labels |
+| Command                       | Purpose                                                         |
+| ----------------------------- | --------------------------------------------------------------- |
+| `gh status`                   | Assigned issues/PRs, review requests, mentions across all repos |
+| `gh browse [number\|path]`    | Open in browser (`-n` prints URL instead)                       |
+| `gh browse main.go:312`       | Open file at line in browser                                    |
+| `gh gist create -f name file` | Create gist                                                     |
+| `gh gist list`                | List your gists                                                 |
+| `gh release list`             | List releases                                                   |
+| `gh release create tag`       | Create release                                                  |
+| `gh repo view`                | View repo info                                                  |
+| `gh repo clone OWNER/REPO`    | Clone repo                                                      |
+| `gh label list [-S search]`   | List/search labels                                              |
 
 ## JSON Output
 

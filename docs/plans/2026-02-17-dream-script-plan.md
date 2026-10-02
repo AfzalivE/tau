@@ -13,6 +13,7 @@
 ### Task 1: Create the dream config file
 
 **Files:**
+
 - Create: `agent-brain/.dream-config.md`
 
 **Step 1: Write the config file**
@@ -51,6 +52,7 @@ git commit  # use git-commit skill
 ### Task 2: Create the dream skill
 
 **Files:**
+
 - Create: `skills/dream/SKILL.md`
 
 **Step 1: Write the skill file**
@@ -72,11 +74,13 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 ## Operations (in priority order)
 
 ### 1. Consolidation
+
 - Read files flagged as RECENTLY CHANGED in the audit
 - If multiple files contain overlapping content on the same topic, merge into the canonical location
 - Remove duplication after merging
 
 ### 2. Reorganization
+
 - Read files flagged as LARGE in the audit
 - If a file exceeds ~5KB or covers multiple distinct topics, split it into separate notes
 - If a MOC page has grown too large, split into sub-categories (e.g., "Troubleshooting - Python")
@@ -86,19 +90,21 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 
 Files move through three states based on staleness:
 
-| State | Location | MOC linked |
-|-------|----------|------------|
-| **Strong** | `agent-brain/` | Yes |
-| **Weak** | `agent-brain/` | No |
-| **Dormant** | `agent-brain/archive/` | No |
+| State       | Location               | MOC linked |
+| ----------- | ---------------------- | ---------- |
+| **Strong**  | `agent-brain/`         | Yes        |
+| **Weak**    | `agent-brain/`         | No         |
+| **Dormant** | `agent-brain/archive/` | No         |
 
 Use the thresholds from `agent-brain/.dream-config.md`:
+
 - **Strong → Weak**: File untouched for `weaken_days`+ days AND still linked in MOC. Action: remove its `[[wikilink]]` from the relevant MOC page.
 - **Weak → Dormant**: File untouched for `archive_days`+ days AND already unlinked. Action: `mv` the file to `agent-brain/archive/`.
 
 Never weaken or archive files listed in `.dream-config.md` under "Protected files".
 
 ### 4. Deletion
+
 - Only delete entries that are **factually wrong or superseded** (e.g., a tool path that changed, a version that's wrong)
 - High confidence required — when in doubt, skip
 - Never delete content that's merely old
@@ -130,6 +136,7 @@ git commit  # use git-commit skill
 ### Task 3: Create the srt sandbox config
 
 **Files:**
+
 - Create: `config/dream-srt.json`
 
 **Step 1: Write the srt settings file**
@@ -159,6 +166,7 @@ git commit  # use git-commit skill
 ### Task 4: Create the bash wrapper
 
 **Files:**
+
 - Create: `bin/dream`
 
 **Step 1: Write the bash wrapper**
@@ -166,6 +174,7 @@ git commit  # use git-commit skill
 The script does the cheap pre-audit on the host (no LLM), then invokes `srt claude -p` with OS-level sandboxing via `config/dream-srt.json`.
 
 Key details:
+
 - `VAULT_DIR="${HOME}/.agents/agent-brain"`
 - `ARCHIVE_DIR="${VAULT_DIR}/archive"`
 - Parse `.dream-config.md` for thresholds (grep for `weaken_days` and `archive_days` values)
@@ -426,6 +435,7 @@ git commit  # use git-commit skill
 ### Task 5: Update vault conventions
 
 **Files:**
+
 - Modify: `agent-brain/Conventions.md`
 
 **Step 1: Add archive convention**
@@ -451,6 +461,7 @@ git commit  # use git-commit skill
 ### Task 6: Register the dream skill in AGENTS.md
 
 **Files:**
+
 - Modify: `AGENTS.md`
 
 **Step 1: Add dream to the Skills section**
@@ -483,6 +494,7 @@ Expected: prints the audit summary showing current vault state, exits without Cl
 **Step 2: Verify audit output is reasonable**
 
 Check that:
+
 - File counts match actual vault contents
 - Strong/weak classification matches MOC link status
 - Days-since-modification values are plausible
@@ -510,7 +522,7 @@ srt --settings config/dream-srt.json bash -c 'echo test > /tmp/should-fail.txt'
 
 Expected: write denied by sandbox.
 
-**Step 3: Test sandbox blocks network outside *.anthropic.com**
+**Step 3: Test sandbox blocks network outside \*.anthropic.com**
 
 ```bash
 srt --settings config/dream-srt.json curl https://example.com

@@ -34,7 +34,14 @@ test("applies high-confidence fixes for wikilinks and markdown note links", asyn
     "docs/Patterns.md": "# Patterns\n",
   });
 
-  const { stdout } = await execFile("node", [SCRIPT, "--vault", vaultDir, "--apply", "--label", "test"]);
+  const { stdout } = await execFile("node", [
+    SCRIPT,
+    "--vault",
+    vaultDir,
+    "--apply",
+    "--label",
+    "test",
+  ]);
   assert.match(stdout, /SUMMARY files=3 references=2 fixed=2 unresolved=0/);
 
   const indexContents = await fs.readFile(path.join(vaultDir, "Index.md"), "utf8");

@@ -285,10 +285,9 @@ function analyzeReferences(notes, index) {
   let referenceCount = 0;
 
   for (const note of notes) {
-    const references = [
-      ...findWikilinks(note),
-      ...findMarkdownLinks(note),
-    ].sort((left, right) => left.start - right.start);
+    const references = [...findWikilinks(note), ...findMarkdownLinks(note)].sort(
+      (left, right) => left.start - right.start,
+    );
 
     referenceCount += references.length;
 
@@ -443,7 +442,9 @@ function resolveTargetNote(reference, sourceNote, index) {
   }
 
   const rawTarget = reference.rawTarget.replace(/\\/g, "/");
-  const exactPathMatches = uniqueMatches(index.byPath.get(normalizePathKey(stripMarkdownExtension(rawTarget))));
+  const exactPathMatches = uniqueMatches(
+    index.byPath.get(normalizePathKey(stripMarkdownExtension(rawTarget))),
+  );
 
   if (reference.kind === "markdown") {
     const exactMarkdownMatch = resolveMarkdownPath(rawTarget, sourceNote, index);
@@ -522,9 +523,10 @@ function resolveMarkdownPath(rawTarget, sourceNote, index) {
 function buildNoteFailure(reference, sourceNote, noteResolution) {
   const line = lineNumberAt(sourceNote.content, reference.start);
   const primarySuggestion = noteResolution.suggestions[0] ?? null;
-  const rewritten = primarySuggestion && primarySuggestion.confidence === "high"
-    ? rewriteReference(reference, sourceNote, primarySuggestion.note, reference.anchor)
-    : null;
+  const rewritten =
+    primarySuggestion && primarySuggestion.confidence === "high"
+      ? rewriteReference(reference, sourceNote, primarySuggestion.note, reference.anchor)
+      : null;
 
   return {
     kind: "missing-note",
@@ -532,16 +534,17 @@ function buildNoteFailure(reference, sourceNote, noteResolution) {
     note: sourceNote,
     original: reference.original,
     rawTarget: reference.displayTarget || reference.rawTarget,
-    safeFix: rewritten && primarySuggestion?.confidence === "high"
-      ? {
-          end: reference.end,
-          filePath: sourceNote.absolutePath,
-          line,
-          reason: primarySuggestion.reason,
-          replacement: rewritten,
-          start: reference.start,
-        }
-      : null,
+    safeFix:
+      rewritten && primarySuggestion?.confidence === "high"
+        ? {
+            end: reference.end,
+            filePath: sourceNote.absolutePath,
+            line,
+            reason: primarySuggestion.reason,
+            replacement: rewritten,
+            start: reference.start,
+          }
+        : null,
     suggestions: noteResolution.suggestions,
   };
 }
@@ -570,9 +573,10 @@ function resolveHeading(rawAnchor, note, kind) {
 function buildHeadingFailure(reference, sourceNote, targetNote, headingResolution) {
   const line = lineNumberAt(sourceNote.content, reference.start);
   const primarySuggestion = headingResolution.suggestions[0] ?? null;
-  const rewritten = primarySuggestion && primarySuggestion.confidence === "high"
-    ? rewriteReference(reference, sourceNote, targetNote, primarySuggestion.heading.rawText)
-    : null;
+  const rewritten =
+    primarySuggestion && primarySuggestion.confidence === "high"
+      ? rewriteReference(reference, sourceNote, targetNote, primarySuggestion.heading.rawText)
+      : null;
 
   return {
     kind: "missing-heading",
@@ -580,16 +584,17 @@ function buildHeadingFailure(reference, sourceNote, targetNote, headingResolutio
     note: sourceNote,
     original: reference.original,
     rawTarget: reference.displayTarget || reference.rawTarget,
-    safeFix: rewritten && primarySuggestion?.confidence === "high"
-      ? {
-          end: reference.end,
-          filePath: sourceNote.absolutePath,
-          line,
-          reason: `${primarySuggestion.reason} in ${formatNoteReference(targetNote)}`,
-          replacement: rewritten,
-          start: reference.start,
-        }
-      : null,
+    safeFix:
+      rewritten && primarySuggestion?.confidence === "high"
+        ? {
+            end: reference.end,
+            filePath: sourceNote.absolutePath,
+            line,
+            reason: `${primarySuggestion.reason} in ${formatNoteReference(targetNote)}`,
+            replacement: rewritten,
+            start: reference.start,
+          }
+        : null,
     suggestions: headingResolution.suggestions.map((suggestion) => ({
       confidence: suggestion.confidence,
       display: `${formatNoteReference(targetNote)}#${suggestion.heading.rawText}`,
@@ -626,9 +631,11 @@ function formatWikilinkTarget(sourceNote, targetNote, anchor) {
 
 function rewriteMarkdownLink(reference, sourceNote, targetNote, anchor) {
   const sourceDirectory = sourceNote.sourceDir || ".";
-  let destination = targetNote.absolutePath === sourceNote.absolutePath && anchor
-    ? ""
-    : path.posix.relative(sourceDirectory, targetNote.relativePath) || path.posix.basename(targetNote.relativePath);
+  let destination =
+    targetNote.absolutePath === sourceNote.absolutePath && anchor
+      ? ""
+      : path.posix.relative(sourceDirectory, targetNote.relativePath) ||
+        path.posix.basename(targetNote.relativePath);
 
   if (!reference.rawTarget.toLowerCase().endsWith(".md")) {
     destination = stripMarkdownExtension(destination);
@@ -694,7 +701,10 @@ function suggestHeadings(rawAnchor, note) {
   }
 
   return suggestions
-    .sort((left, right) => right.score - left.score || left.heading.rawText.localeCompare(right.heading.rawText))
+    .sort(
+      (left, right) =>
+        right.score - left.score || left.heading.rawText.localeCompare(right.heading.rawText),
+    )
     .slice(0, 3);
 }
 
@@ -777,7 +787,9 @@ async function applySafeFixes(fixes) {
     }
   }
 
-  return applied.sort((left, right) => left.filePath.localeCompare(right.filePath) || left.line - right.line);
+  return applied.sort(
+    (left, right) => left.filePath.localeCompare(right.filePath) || left.line - right.line,
+  );
 }
 
 function printReport({ label, filesScanned, appliedFixes, analysis }) {
@@ -803,14 +815,18 @@ function printReport({ label, filesScanned, appliedFixes, analysis }) {
 
   console.log("Broken references:");
   for (const issue of analysis.unresolved) {
-    console.log(`  - ${path.basename(issue.note.absolutePath)}:${issue.line} ${truncateForReport(issue.original)}`);
+    console.log(
+      `  - ${path.basename(issue.note.absolutePath)}:${issue.line} ${truncateForReport(issue.original)}`,
+    );
     if (issue.suggestions.length === 0) {
       console.log("    suggestion: none");
       continue;
     }
 
     for (const suggestion of issue.suggestions) {
-      console.log(`    suggestion (${suggestion.confidence}): ${suggestion.display} [${suggestion.reason}]`);
+      console.log(
+        `    suggestion (${suggestion.confidence}): ${suggestion.display} [${suggestion.reason}]`,
+      );
     }
   }
 }
@@ -821,11 +837,7 @@ function truncateForReport(value) {
 
 function maskIgnoredMarkdown(content) {
   let masked = content;
-  const patterns = [
-    /```[\s\S]*?```/g,
-    /~~~[\s\S]*?~~~/g,
-    /`[^`\n]*`/g,
-  ];
+  const patterns = [/```[\s\S]*?```/g, /~~~[\s\S]*?~~~/g, /`[^`\n]*`/g];
 
   for (const pattern of patterns) {
     masked = masked.replace(pattern, (match) => match.replace(/[^\n]/g, " "));
@@ -863,7 +875,11 @@ function splitAtFirst(value, separator) {
 }
 
 function normalizePathKey(value) {
-  return stripMarkdownExtension(value).replace(/\\/g, "/").replace(/^\.?\//, "").trim().toLowerCase();
+  return stripMarkdownExtension(value)
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .trim()
+    .toLowerCase();
 }
 
 function normalizeNameKey(value) {

@@ -26,18 +26,18 @@ Always use `--json` or `--ndjson` for programmatic parsing.
 
 ## Quick reference
 
-| Task | Command |
-|------|---------|
-| Today's tasks | `td today` |
-| This week | `td upcoming` |
-| Inbox | `td inbox` |
-| Add task | `td task add "content" --due tomorrow --priority p1 --project MyProject` |
-| Complete task | `td task complete <ref>` |
-| Reschedule recurring task | `td task reschedule <ref> <date>` |
-| List by project | `td task list --project "ProjectName"` |
-| Search with filter | `td task list --filter "today & p1"` |
-| View task | `td task view <ref>` |
-| View any Todoist URL | `td view <url>` |
+| Task                      | Command                                                                  |
+| ------------------------- | ------------------------------------------------------------------------ |
+| Today's tasks             | `td today`                                                               |
+| This week                 | `td upcoming`                                                            |
+| Inbox                     | `td inbox`                                                               |
+| Add task                  | `td task add "content" --due tomorrow --priority p1 --project MyProject` |
+| Complete task             | `td task complete <ref>`                                                 |
+| Reschedule recurring task | `td task reschedule <ref> <date>`                                        |
+| List by project           | `td task list --project "ProjectName"`                                   |
+| Search with filter        | `td task list --filter "today & p1"`                                     |
+| View task                 | `td task view <ref>`                                                     |
+| View any Todoist URL      | `td view <url>`                                                          |
 
 ## Daily views
 

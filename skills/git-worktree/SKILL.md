@@ -18,6 +18,7 @@ git worktree list
 ```
 
 This shows:
+
 - The main working tree
 - All linked worktrees
 - Their paths and current branches
@@ -25,26 +26,31 @@ This shows:
 ### Create a New Worktree
 
 **Basic creation:**
+
 ```bash
 git worktree add <path> <branch>
 ```
 
 **Create with a new branch:**
+
 ```bash
 git worktree add <path> -b <new-branch>
 ```
 
 **Create from a specific commit or branch:**
+
 ```bash
 git worktree add <path> -b <new-branch> <start-point>
 ```
 
 **Common patterns:**
+
 - `git worktree add ../feature-foo -b feature-foo` - Create new branch in sibling directory
 - `git worktree add ../hotfix -b hotfix/urgent main` - Branch from main
 - `git worktree add ../review pr-123` - Check out existing branch for review
 
 Rules:
+
 - Worktree paths should be outside the main repository (typically sibling directories)
 - Each worktree must use a different branch (can't check out same branch twice)
 - Use descriptive directory names that match the branch name
@@ -60,17 +66,20 @@ When you're done with a worktree:
    ```
 
 **Force removal (if there are uncommitted changes):**
+
 ```bash
 git worktree remove --force <path>
 ```
 
 **Alternative: Delete directory first, then prune:**
+
 ```bash
 rm -rf <path>
 git worktree prune
 ```
 
 Rules:
+
 - Always commit or stash changes before removing
 - Use `--force` only when you're certain you want to discard changes
 - Clean up after yourself to avoid stale entries
@@ -106,17 +115,20 @@ git worktree repair
 ### Working on Multiple Features
 
 1. **List current worktrees to see what exists:**
+
    ```bash
    git worktree list
    ```
 
 2. **Create worktrees for each feature:**
+
    ```bash
    git worktree add ../feature-a -b feature-a
    git worktree add ../feature-b -b feature-b
    ```
 
 3. **Switch between features by changing directories:**
+
    ```bash
    cd ../feature-a  # Work on feature A
    cd ../feature-b  # Work on feature B
@@ -131,12 +143,14 @@ git worktree repair
 ### Code Review
 
 1. **Create temporary worktree for PR review:**
+
    ```bash
    git fetch origin pull/123/head:pr-123
    git worktree add ../review-pr-123 pr-123
    ```
 
 2. **Review the code:**
+
    ```bash
    cd ../review-pr-123
    # Review, test, run builds
@@ -152,11 +166,13 @@ git worktree repair
 ### Hotfix While Working on Feature
 
 1. **You're working on a feature branch, but need to create a hotfix:**
+
    ```bash
    git worktree add ../hotfix -b hotfix/critical-bug main
    ```
 
 2. **Work on hotfix in the new worktree:**
+
    ```bash
    cd ../hotfix
    # Fix the bug, commit
@@ -164,6 +180,7 @@ git worktree repair
    ```
 
 3. **Return to feature work:**
+
    ```bash
    cd <back-to-feature-worktree>
    ```
@@ -185,20 +202,25 @@ git worktree repair
 ## Troubleshooting
 
 **Error: "fatal: '<branch>' is already checked out at '<path>'"**
+
 - Solution: You can't check out the same branch in multiple worktrees. Use a different branch or remove the existing worktree first.
 
 **Error: "fatal: '<path>' already exists"**
+
 - Solution: Choose a different path or remove the existing directory.
 
 **Stale worktree references after manual deletion:**
+
 - Solution: Run `git worktree prune` to clean up administrative files.
 
 **Can't remove worktree with uncommitted changes:**
+
 - Solution: Either commit/stash changes first, or use `git worktree remove --force` if you want to discard them.
 
 ## Integration with Other Tools
 
 When using worktrees, be aware:
+
 - **VSCode/IDEs:** Open each worktree as a separate workspace
 - **Shell Environment:** Each worktree is independent, so tools like nvm, virtualenv work per-worktree
 - **Build Artifacts:** Each worktree has its own working directory, so builds are isolated

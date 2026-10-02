@@ -12,6 +12,7 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 ## Operations (in priority order)
 
 ### 1. Reference integrity
+
 - Fix broken note references before any consolidation, weakening, archiving, or deletion decisions.
 - Validate both Obsidian wikilinks (`[[Note]]`, `[[Note#Heading]]`) and markdown note links (`[label](Note.md)` / relative `.md` paths).
 - Treat stale semantic references as first-class reference problems even when the literal link still resolves. Examples: a note says "see X under Y", quotes a heading/title that no longer exists, points at an old canonical note after a merge/rename, or describes a location that has moved.
@@ -24,6 +25,7 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 - Plans and decision notes often contain narrative references to implementation notes, rationale, or follow-up docs. Audit those sentences explicitly; they are common sources of stale references.
 
 ### 2. Consolidation
+
 - Read files flagged as RECENTLY CHANGED in the audit
 - If multiple files contain overlapping content on the same topic, merge into the canonical location
 - Remove duplication after merging
@@ -34,6 +36,7 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 - If `DREAM_AUDIT` includes a plan-integrity verifier command, run it before committing and treat any violation as a stop condition.
 
 ### 3. Reorganization
+
 - Read files flagged as LARGE in the audit
 - If a file exceeds ~5KB or covers multiple distinct topics, split it into separate notes
 - If a MOC page has grown too large, split into sub-categories (e.g., "Troubleshooting - Python")
@@ -43,19 +46,21 @@ The bash wrapper has already run a pre-audit and appended it to your system prom
 
 Files move through three states based on staleness:
 
-| State | Location | MOC linked |
-|-------|----------|------------|
-| **Strong** | `agent-brain/` | Yes |
-| **Weak** | `agent-brain/` | No |
-| **Dormant** | `agent-brain/archive/` | No |
+| State       | Location               | MOC linked |
+| ----------- | ---------------------- | ---------- |
+| **Strong**  | `agent-brain/`         | Yes        |
+| **Weak**    | `agent-brain/`         | No         |
+| **Dormant** | `agent-brain/archive/` | No         |
 
 Use the thresholds from the dream config summarized in `DREAM_AUDIT`:
+
 - **Strong → Weak**: File untouched for `weaken_days`+ days AND still linked in MOC. Action: remove its `[[wikilink]]` from the relevant MOC page.
 - **Weak → Dormant**: File untouched for `archive_days`+ days AND already unlinked. Action: `mv` the file to `agent-brain/archive/`.
 
 Never weaken or archive files listed there under `protected_files`.
 
 ### 5. Archiving shipped technical plans
+
 - When a technical plan file (tagged `planning`) has a **Status** of "Shipped", move it intact to `archive/plans/`.
 - "Shipped" means the work was merged in a PR. Other statuses like "Implemented" or "In Progress" mean the plan is still active — leave it in place.
 - Do NOT trim, summarize, or gut the plan content — move the full file as-is.
@@ -63,6 +68,7 @@ Never weaken or archive files listed there under `protected_files`.
 - Never determine shipped status on your own. Only act on an explicit `Status: Shipped` field in the plan file itself.
 
 ### 6. Deletion
+
 - Only delete entries that are **factually wrong or superseded** (e.g., a tool path that changed, a version that's wrong)
 - High confidence required — when in doubt, skip
 - Never delete content that's merely old

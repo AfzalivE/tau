@@ -296,7 +296,8 @@ function compareSnapshots(previousNotes, currentNotes) {
       preserved.push({
         from: previousNote.relativePath,
         to: exactMatches[0].relativePath,
-        type: exactMatches[0].relativePath === previousNote.relativePath ? "unchanged" : "moved-intact",
+        type:
+          exactMatches[0].relativePath === previousNote.relativePath ? "unchanged" : "moved-intact",
       });
       continue;
     }
@@ -358,12 +359,7 @@ function findBestCandidate(previousNote, currentNotes, currentByPath) {
     const candidate = {
       metrics,
       note,
-      score: [
-        pathBonus,
-        titleBonus,
-        metrics.retentionRatio,
-        metrics.shrinkRatio,
-      ],
+      score: [pathBonus, titleBonus, metrics.retentionRatio, metrics.shrinkRatio],
     };
 
     if (!best || compareScores(candidate.score, best.score) > 0) {
@@ -393,7 +389,8 @@ function comparePlanBodies(previousLines, currentLines) {
 function isAllowedPlanChange(metrics) {
   return (
     metrics.shrinkRatio >= MIN_SHRINK_RATIO &&
-    (metrics.retentionRatio >= MIN_RETENTION_RATIO || metrics.removedLines <= MAX_ABSOLUTE_LINE_CHANGES)
+    (metrics.retentionRatio >= MIN_RETENTION_RATIO ||
+      metrics.removedLines <= MAX_ABSOLUTE_LINE_CHANGES)
   );
 }
 

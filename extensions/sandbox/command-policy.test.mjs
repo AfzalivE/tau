@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { findBlockedCommand, findExcludedCommand, parseSingleSimpleCommand } from "./command-policy.ts";
+import {
+  findBlockedCommand,
+  findExcludedCommand,
+  parseSingleSimpleCommand,
+} from "./command-policy.ts";
 
 test("blocks a direct executable match", () => {
   assert.deepEqual(findBlockedCommand("npx create-vite@latest", ["npx"]), {

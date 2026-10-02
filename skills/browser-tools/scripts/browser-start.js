@@ -19,30 +19,16 @@ const usage = () => {
     "Usage: browser-start.js [--profile] [--profile-dir <name>] [--watch] [--browser <chromium|chrome>] [--executable <path>]",
   );
   console.log("\nOptions:");
-  console.log(
-    "  --profile              Copy your browser profile (cookies, logins)",
-  );
-  console.log(
-    '  --profile-dir <name>   Launch a specific profile directory name or exact path',
-  );
-  console.log(
-    "  --watch                Start browser-watch.js in the background (JSONL logs)",
-  );
-  console.log(
-    "  --browser <name>       Select browser: chromium, chrome (default: auto)",
-  );
+  console.log("  --profile              Copy your browser profile (cookies, logins)");
+  console.log("  --profile-dir <name>   Launch a specific profile directory name or exact path");
+  console.log("  --watch                Start browser-watch.js in the background (JSONL logs)");
+  console.log("  --browser <name>       Select browser: chromium, chrome (default: auto)");
   console.log("  --executable <path>    Explicit browser executable path");
   console.log("\nEnv:");
   console.log("  BROWSER_TOOLS_BROWSER  chromium|chrome (overrides auto)");
-  console.log(
-    "  BROWSER_TOOLS_EXECUTABLE  Explicit executable path (overrides auto)",
-  );
-  console.log(
-    "  BROWSER_TOOLS_PROFILE_SRC  Profile directory to rsync from (overrides auto)",
-  );
-  console.log(
-    "  BROWSER_TOOLS_PROFILE_DIRECTORY  Profile directory name",
-  );
+  console.log("  BROWSER_TOOLS_EXECUTABLE  Explicit executable path (overrides auto)");
+  console.log("  BROWSER_TOOLS_PROFILE_SRC  Profile directory to rsync from (overrides auto)");
+  console.log("  BROWSER_TOOLS_PROFILE_DIRECTORY  Profile directory name");
   console.log(
     "  BROWSER_TOOLS_LOG_ROOT  Directory for browser-watch logs (defaults to /tmp/agent-browser-tools/logs)",
   );
@@ -73,10 +59,8 @@ for (let i = 0; i < args.length; i++) {
 
 browserChoice = process.env.BROWSER_TOOLS_BROWSER || browserChoice;
 executableOverride = process.env.BROWSER_TOOLS_EXECUTABLE || executableOverride;
-profileSrcOverride =
-  process.env.BROWSER_TOOLS_PROFILE_SRC || profileSrcOverride;
-profileDirectoryOverride =
-  process.env.BROWSER_TOOLS_PROFILE_DIRECTORY || profileDirectoryOverride;
+profileSrcOverride = process.env.BROWSER_TOOLS_PROFILE_SRC || profileSrcOverride;
+profileDirectoryOverride = process.env.BROWSER_TOOLS_PROFILE_DIRECTORY || profileDirectoryOverride;
 if (!["auto", "chromium", "chrome"].includes(browserChoice)) {
   usage();
   process.exit(1);
@@ -148,11 +132,7 @@ const buildBrowserConfig = ({ label, candidates, profileSrc, profileDirectory })
 const getBrowserSelection = () => {
   if (executableOverride) {
     const label =
-      browserChoice === "chrome"
-        ? "Chrome"
-        : browserChoice === "chromium"
-          ? "Chromium"
-          : "Browser";
+      browserChoice === "chrome" ? "Chrome" : browserChoice === "chromium" ? "Chromium" : "Browser";
 
     return {
       selected: buildBrowserConfig({
@@ -277,7 +257,9 @@ spawn(
   [
     "--remote-debugging-port=9222",
     `--user-data-dir=${SCRAPING_DIR}`,
-    ...(browserConfig.profileDirectory ? [`--profile-directory=${browserConfig.profileDirectory}`] : []),
+    ...(browserConfig.profileDirectory
+      ? [`--profile-directory=${browserConfig.profileDirectory}`]
+      : []),
     "--no-first-run",
     "--no-default-browser-check",
   ],

@@ -16,18 +16,18 @@ description: "Apple Calendar CLI for listing calendars, reading events, and crea
 
 ## Quick Reference
 
-| Task | Command |
-|------|---------|
-| List calendars | `cald calendars` |
-| List calendars as JSON | `cald calendars --json` |
-| Show today's events | `cald events --date today` |
-| Show a range | `cald events --from today --to +7` |
-| Filter by calendar | `cald events --date today --calendar Work` |
-| Text search events | `cald events --date today --filter "standup"` |
-| Show raw IDs | `cald events --date today --id` |
-| Get one event | `cald event <id>` |
-| Create event | `cald create --title "..." --start ... --end ...` |
-| Create all-day event | `cald create --title "..." --start 2026-04-09 --end 2026-04-10 --all-day` |
+| Task                   | Command                                                                   |
+| ---------------------- | ------------------------------------------------------------------------- |
+| List calendars         | `cald calendars`                                                          |
+| List calendars as JSON | `cald calendars --json`                                                   |
+| Show today's events    | `cald events --date today`                                                |
+| Show a range           | `cald events --from today --to +7`                                        |
+| Filter by calendar     | `cald events --date today --calendar Work`                                |
+| Text search events     | `cald events --date today --filter "standup"`                             |
+| Show raw IDs           | `cald events --date today --id`                                           |
+| Get one event          | `cald event <id>`                                                         |
+| Create event           | `cald create --title "..." --start ... --end ...`                         |
+| Create all-day event   | `cald create --title "..." --start 2026-04-09 --end 2026-04-10 --all-day` |
 
 ## Common Workflows
 

@@ -22,21 +22,21 @@ Always use `--json` or `--ndjson` for programmatic parsing.
 
 ## Quick reference
 
-| Task | Command |
-|------|---------|
-| Check inbox | `tdc inbox` |
-| Unread inbox | `tdc inbox --unread` |
-| Unread DMs/groups | `tdc conversation unread` |
-| Mentions | `tdc mentions --json` or `tdc search "query" --mention-me` |
-| Read a thread | `tdc thread view <ref>` |
-| Reply to a thread | `tdc thread reply <ref> "text"` |
-| Create a thread | `tdc thread create <channel-ref> "Title" "Body"` |
-| Read a DM/group | `tdc conversation view <ref>` |
-| Reply in a DM/group | `tdc conversation reply <ref> "text"` |
-| Find 1:1 with a user | `tdc conversation with <user-ref>` |
-| Search | `tdc search "query"` |
-| React / unreact | `tdc react thread <ref> +1` / `tdc unreact thread <ref> +1` |
-| View by URL | `tdc view <url>` |
+| Task                 | Command                                                     |
+| -------------------- | ----------------------------------------------------------- |
+| Check inbox          | `tdc inbox`                                                 |
+| Unread inbox         | `tdc inbox --unread`                                        |
+| Unread DMs/groups    | `tdc conversation unread`                                   |
+| Mentions             | `tdc mentions --json` or `tdc search "query" --mention-me`  |
+| Read a thread        | `tdc thread view <ref>`                                     |
+| Reply to a thread    | `tdc thread reply <ref> "text"`                             |
+| Create a thread      | `tdc thread create <channel-ref> "Title" "Body"`            |
+| Read a DM/group      | `tdc conversation view <ref>`                               |
+| Reply in a DM/group  | `tdc conversation reply <ref> "text"`                       |
+| Find 1:1 with a user | `tdc conversation with <user-ref>`                          |
+| Search               | `tdc search "query"`                                        |
+| React / unreact      | `tdc react thread <ref> +1` / `tdc unreact thread <ref> +1` |
+| View by URL          | `tdc view <url>`                                            |
 
 ## Workspace and directory
 

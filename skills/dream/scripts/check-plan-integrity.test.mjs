@@ -26,14 +26,34 @@ test("allows intact plan moves", async () => {
   });
   const snapshot = path.join(vaultDir, "snapshot.json");
 
-  await execFile("node", [SCRIPT, "snapshot", "--vault", vaultDir, "--output", snapshot, "--tags", "agenda"]);
+  await execFile("node", [
+    SCRIPT,
+    "snapshot",
+    "--vault",
+    vaultDir,
+    "--output",
+    snapshot,
+    "--tags",
+    "agenda",
+  ]);
   await fs.mkdir(path.join(vaultDir, "archive", "plans"), { recursive: true });
   await fs.rename(
     path.join(vaultDir, "Agentist - Scope Reauth Plan.md"),
     path.join(vaultDir, "archive", "plans", "Agentist - Scope Reauth Plan.md"),
   );
 
-  const { stdout } = await execFile("node", [SCRIPT, "verify", "--vault", vaultDir, "--snapshot", snapshot, "--label", "test", "--tags", "agenda"]);
+  const { stdout } = await execFile("node", [
+    SCRIPT,
+    "verify",
+    "--vault",
+    vaultDir,
+    "--snapshot",
+    snapshot,
+    "--label",
+    "test",
+    "--tags",
+    "agenda",
+  ]);
   assert.match(stdout, /SUMMARY tags=agenda notes=1 preserved=1 changed=0 violations=0/);
 });
 
@@ -56,7 +76,16 @@ test("allows small surgical plan edits", async () => {
   });
   const snapshot = path.join(vaultDir, "snapshot.json");
 
-  await execFile("node", [SCRIPT, "snapshot", "--vault", vaultDir, "--output", snapshot, "--tags", "planning"]);
+  await execFile("node", [
+    SCRIPT,
+    "snapshot",
+    "--vault",
+    vaultDir,
+    "--output",
+    snapshot,
+    "--tags",
+    "planning",
+  ]);
   await fs.writeFile(
     path.join(vaultDir, "Agentist - Scope Reauth Plan.md"),
     [
@@ -76,7 +105,18 @@ test("allows small surgical plan edits", async () => {
     "utf8",
   );
 
-  const { stdout } = await execFile("node", [SCRIPT, "verify", "--vault", vaultDir, "--snapshot", snapshot, "--label", "test", "--tags", "planning"]);
+  const { stdout } = await execFile("node", [
+    SCRIPT,
+    "verify",
+    "--vault",
+    vaultDir,
+    "--snapshot",
+    snapshot,
+    "--label",
+    "test",
+    "--tags",
+    "planning",
+  ]);
   assert.match(stdout, /SUMMARY tags=planning notes=1 preserved=0 changed=1 violations=0/);
 });
 
@@ -105,7 +145,16 @@ test("fails when a plan is trimmed into a summary", async () => {
   });
   const snapshot = path.join(vaultDir, "snapshot.json");
 
-  await execFile("node", [SCRIPT, "snapshot", "--vault", vaultDir, "--output", snapshot, "--tags", "agenda"]);
+  await execFile("node", [
+    SCRIPT,
+    "snapshot",
+    "--vault",
+    vaultDir,
+    "--output",
+    snapshot,
+    "--tags",
+    "agenda",
+  ]);
   await fs.writeFile(
     path.join(vaultDir, "Agentist - Scope Reauth Plan.md"),
     [
@@ -122,7 +171,18 @@ test("fails when a plan is trimmed into a summary", async () => {
   );
 
   await assert.rejects(
-    execFile("node", [SCRIPT, "verify", "--vault", vaultDir, "--snapshot", snapshot, "--label", "test", "--tags", "agenda"]),
+    execFile("node", [
+      SCRIPT,
+      "verify",
+      "--vault",
+      vaultDir,
+      "--snapshot",
+      snapshot,
+      "--label",
+      "test",
+      "--tags",
+      "agenda",
+    ]),
     (error) => {
       assert.equal(error.code, 1);
       assert.match(error.stdout, /violations=1/);

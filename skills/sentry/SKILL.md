@@ -18,20 +18,20 @@ sentry <cmd>                   # auto-detect from DSN/config
 
 ## Quick Reference
 
-| Task | Command |
-|------|---------|
-| List unresolved issues | `sentry issues <target>` |
-| View issue details | `sentry issue view <issue>` |
+| Task                   | Command                        |
+| ---------------------- | ------------------------------ |
+| List unresolved issues | `sentry issues <target>`       |
+| View issue details     | `sentry issue view <issue>`    |
 | AI root cause analysis | `sentry issue explain <issue>` |
-| AI solution plan | `sentry issue plan <issue>` |
-| View specific event | `sentry event view <event-id>` |
-| List logs | `sentry logs <target>` |
-| Stream logs (follow) | `sentry logs -f <target>` |
-| View log entry | `sentry log view <log-id>` |
-| List traces | `sentry traces <target>` |
-| View trace | `sentry trace view <trace-id>` |
-| Raw API call | `sentry api <endpoint>` |
-| Open in browser | Add `-w` to any `view` command |
+| AI solution plan       | `sentry issue plan <issue>`    |
+| View specific event    | `sentry event view <event-id>` |
+| List logs              | `sentry logs <target>`         |
+| Stream logs (follow)   | `sentry logs -f <target>`      |
+| View log entry         | `sentry log view <log-id>`     |
+| List traces            | `sentry traces <target>`       |
+| View trace             | `sentry trace view <trace-id>` |
+| Raw API call           | `sentry api <endpoint>`        |
+| Open in browser        | Add `-w` to any `view` command |
 
 ## Issues
 
@@ -127,15 +127,15 @@ Field syntax: `key=value`, `key[sub]=value` (nested), `key[]=value` (array appen
 
 ## Admin
 
-| Command | Purpose |
-|---------|---------|
-| `sentry auth status` | Check auth + list orgs |
-| `sentry auth login` | Authenticate |
-| `sentry auth token` | Print token for scripts |
-| `sentry orgs` | List orgs |
+| Command                 | Purpose                                      |
+| ----------------------- | -------------------------------------------- |
+| `sentry auth status`    | Check auth + list orgs                       |
+| `sentry auth login`     | Authenticate                                 |
+| `sentry auth token`     | Print token for scripts                      |
+| `sentry orgs`           | List orgs                                    |
 | `sentry projects [org]` | List projects (optional `--platform` filter) |
-| `sentry teams [org]` | List teams |
-| `sentry repos [org]` | List repos |
+| `sentry teams [org]`    | List teams                                   |
+| `sentry repos [org]`    | List repos                                   |
 
 ## Query Syntax
 

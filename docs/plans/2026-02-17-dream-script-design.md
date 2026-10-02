@@ -10,22 +10,25 @@ Nightly maintenance for the agent-brain vault. Consolidates scattered knowledge,
 ## Operations
 
 ### Consolidation
+
 Merge scattered notes on the same topic. When multiple files contain overlapping content, combine them into the canonical location and remove duplication.
 
 ### Reorganization
+
 Split files that have grown too large. Ensure the MOC structure (Index.md → topic pages) stays coherent. Create new notes when a topic within a file deserves its own page. When a MOC page outgrows a single page, split it into sub-categories (e.g., "Troubleshooting - Python", "Troubleshooting - Infra") and update Index.md to link to the new pages.
 
 ### Three-tier memory weakening
 
 Files move through three states based on staleness (time since last git modification):
 
-| State | Location | MOC linked | Loaded into context |
-|-------|----------|------------|-------------------|
-| **Strong** | `agent-brain/` | Yes | Yes |
-| **Weak** | `agent-brain/` | No (unlinked from MOC) | Yes, but less discoverable |
-| **Dormant** | `agent-brain/archive/` | No | No |
+| State       | Location               | MOC linked             | Loaded into context        |
+| ----------- | ---------------------- | ---------------------- | -------------------------- |
+| **Strong**  | `agent-brain/`         | Yes                    | Yes                        |
+| **Weak**    | `agent-brain/`         | No (unlinked from MOC) | Yes, but less discoverable |
+| **Dormant** | `agent-brain/archive/` | No                     | No                         |
 
 Transitions:
+
 - **Strong → Weak**: File untouched for 60+ days. Unlink from MOC pages but keep in vault.
 - **Weak → Dormant**: File still untouched after another cycle (90+ days total). Move to `archive/`.
 - **Dormant → Strong**: When a session needs archived content, it checks `archive/`, restores the file to the main vault, and re-links it in the MOC. Fully automatic.
@@ -41,6 +44,7 @@ Fully autonomous. The vault is the agent's own memory — no human management re
 Safety relies on conservatism, not detection. Only archiving self-heals naturally (a session that needs archived content restores it). For consolidation, reorganization, and deletion there is no automatic way to detect a bad change — so the primary protection is not making bold changes in the first place. Git history is a last resort.
 
 Conservative guardrails:
+
 - Weakening thresholds default to 60/90 days, stored in `agent-brain/.dream-config.md` so the dream script can tune them over time based on vault behavior
 - Deletion requires high confidence
 - When in doubt: skip rather than weaken, weaken rather than archive, archive rather than delete

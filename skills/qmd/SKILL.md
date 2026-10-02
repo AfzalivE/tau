@@ -9,18 +9,18 @@ On-device search engine for markdown documents. Combines BM25 full-text search, 
 
 ## Quick Reference
 
-| Task | Command |
-|------|---------|
-| Keyword search | `qmd search "query"` |
-| Semantic search | `qmd query "query"` |
-| Vector search | `qmd vsearch "query"` |
-| Search in collection | `qmd search "query" -c <name>` |
-| Get a document | `qmd get <file>` |
-| Get multiple docs | `qmd multi-get <pattern>` |
-| List collection files | `qmd ls <collection>` |
-| Index status | `qmd status` |
-| Re-index after changes | `qmd update` |
-| Rebuild embeddings | `qmd embed` |
+| Task                   | Command                        |
+| ---------------------- | ------------------------------ |
+| Keyword search         | `qmd search "query"`           |
+| Semantic search        | `qmd query "query"`            |
+| Vector search          | `qmd vsearch "query"`          |
+| Search in collection   | `qmd search "query" -c <name>` |
+| Get a document         | `qmd get <file>`               |
+| Get multiple docs      | `qmd multi-get <pattern>`      |
+| List collection files  | `qmd ls <collection>`          |
+| Index status           | `qmd status`                   |
+| Re-index after changes | `qmd update`                   |
+| Rebuild embeddings     | `qmd embed`                    |
 
 ## Search Commands
 
