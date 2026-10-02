@@ -80,6 +80,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     type: "string",
   });
 
+  pi.registerFlag("sandbox-debug", {
+    description: "Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG)",
+    type: "boolean",
+    default: false,
+  });
+
   const runtime = createSandboxRuntime(pi);
   pi.events.on("subagent:unsandboxed-approval", (data) => {
     const request = data as {
@@ -133,6 +139,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         ...cloned,
         enabled: true,
         mode: runtime.promptMode,
+        debug: runtime.config?.debug,
         filesystem: {
           ...cloned.filesystem,
           allowTempDirs: false,

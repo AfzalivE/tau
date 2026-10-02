@@ -912,6 +912,7 @@ exit 73`,
               ...expectedPolicy,
               enabled: true,
               mode: "interactive",
+              debug: false,
               filesystem: {
                 ...expectedPolicy.filesystem,
                 allowTempDirs: false,

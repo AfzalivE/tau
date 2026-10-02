@@ -10,6 +10,7 @@ import {
   subscribeToNewViolations,
   type SandboxAuditLog,
 } from "./audit-log.js";
+import { createSandboxDebugLog, type SandboxDebugLine } from "./debug.js";
 
 import {
   DEFAULT_PROMPT_MODE,
@@ -80,6 +81,9 @@ export interface SandboxRuntime {
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
   readonly auditLog: string;
+  readonly debugLines: SandboxDebugLine[];
+  describeDebugLogging(): string;
+  setDebugLogging(enabled: boolean): void;
   getRuntimeConfig(): SandboxRuntimeConfig | null;
   captureContext(ctx: ExtensionContext): void;
   withPermissionContext<T>(
@@ -241,6 +245,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   const warnedSkippedProjectConfigPaths = new Set<string>();
   let permissionLifetime = new AbortController();
   const permissionInvocations = new Set<Promise<unknown>>();
+  const debug = createSandboxDebugLog();
   let auditLog: SandboxAuditLog | null = null;
   let auditPath: string | null = null;
   let auditError: string | null = null;
@@ -435,6 +440,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       notifySandboxConfigParseErrors(ctx, parseErrors);
     }
     sandboxConfig = loadedConfig.config;
+    debug.setEnabled(sandboxConfig.debug === true || pi.getFlag("sandbox-debug") === true);
     auditLog?.append("configuration", {
       configPaths: sandboxConfigPaths,
       policy: {
@@ -448,6 +454,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   async function start(ctx: ExtensionContext, reason = "startup"): Promise<void> {
     await cancelPermissionInvocations();
     stopAudit("session-restart");
+    debug.start();
     permissionLifetime = new AbortController();
     setSandboxStatus(ctx, false);
     sessionContext = permissionContext(ctx);
@@ -501,6 +508,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
 
     stopAudit(reason);
+    debug.stop();
     resetRuntimeState();
     sessionContext = null;
     sessionCwd = process.cwd();
@@ -682,6 +690,11 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     get auditLog() {
       return auditError ? `failed (${auditPath}): ${auditError}` : (auditPath ?? "not initialized");
     },
+    get debugLines() {
+      return debug.lines;
+    },
+    describeDebugLogging: debug.describe,
+    setDebugLogging: debug.setEnabled,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     captureContext(ctx) {
       sessionContext = permissionContext(ctx);

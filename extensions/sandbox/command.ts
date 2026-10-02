@@ -32,6 +32,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox disable|off",
     "  /sandbox show",
     "  /sandbox doctor",
+    "  /sandbox debug <on|off>",
     "  /sandbox mode <interactive|non-interactive>",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
     ...(IS_MACOS
@@ -45,6 +46,7 @@ function showHelp(ctx: ExtensionContext): void {
     "Startup flags:",
     "  --no-sandbox",
     "  --sandbox-config <path>",
+    "  --sandbox-debug",
   ];
   notify(ctx, lines.join("\n"), "info");
 }
@@ -93,6 +95,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "off", label: "off" },
   { value: "show", label: "show" },
   { value: "doctor", label: "doctor" },
+  { value: "debug ", label: "debug" },
   { value: "mode ", label: "mode" },
   { value: "network ", label: "network" },
   ...(IS_MACOS ? [{ value: "mach-lookup ", label: "mach-lookup" }] : []),
@@ -329,6 +332,8 @@ function renderSandboxDoctorReport(options: {
     "Sandbox doctor",
     `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`,
     `- Audit log: ${runtime.auditLog}`,
+    `- Runtime debug logs: ${runtime.describeDebugLogging()}`,
+    ...runtime.debugLines.map((line) => `  ${line.text}`),
   ];
 
   if (configPaths.length === 0) {
@@ -403,6 +408,16 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         return;
       }
 
+      if (subcommand === "debug") {
+        if (tokens.length !== 2 || !["on", "off"].includes(tokens[1])) {
+          notify(ctx, "Usage: /sandbox debug <on|off>", "warning");
+          return;
+        }
+        runtime.setDebugLogging(tokens[1] === "on");
+        notify(ctx, `Sandbox runtime debug logs ${runtime.describeDebugLogging()}`);
+        return;
+      }
+
       if (subcommand === "enable") {
         if (tokens.length > 1) {
           notify(ctx, "Usage: /sandbox enable|on", "warning");
@@ -441,6 +456,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           `  Mode: ${runtime.promptMode}`,
           `  Runtime state: ${getSandboxRunMode(runtime.state)}`,
           `  Audit log: ${runtime.auditLog}`,
+          `  Runtime debug logs: ${runtime.describeDebugLogging()}`,
           "",
           "  Network:",
           `    Allowed: ${runtimeConfig.network.allowedDomains.join(", ") || "(none)"}`,

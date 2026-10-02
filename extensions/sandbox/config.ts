@@ -17,6 +17,7 @@ type DefaultConfigExtension = {
 export type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
   enabled?: boolean;
   mode?: PromptMode;
+  debug?: boolean;
   filesystem: SandboxRuntimeConfig["filesystem"] & {
     allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
@@ -46,6 +47,7 @@ const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_]
 const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
+  debug: false,
   network: {
     allowedDomains: [
       // System
@@ -321,6 +323,13 @@ function cleanStringArray(value: unknown[], field: string): string[] {
   return cleaned;
 }
 
+function coerceBoolean(value: unknown, fallback: boolean, field: string): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  console.error(`Warning: Expected ${field} to be a boolean; using defaults.`);
+  return fallback;
+}
+
 function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
   if (!Array.isArray(value)) {
     console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
@@ -350,6 +359,7 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
+    debug: coerceBoolean(config.debug, false, "debug"),
     network: {
       ...config.network,
       allowedDomains: coerceStringArray(
@@ -508,6 +518,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   const result: SandboxConfig = { ...base };
 
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
+  if (overrides.debug !== undefined) result.debug = overrides.debug;
   if (overrides.mode !== undefined) {
     result.mode = normalizePromptMode(overrides.mode);
   }
