@@ -287,14 +287,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     isSuspended: () => sandboxState.status === "suspended",
     applyRuntimeConfigForSession,
-    recordEvent: (event) => {
-      recordSandboxEvent({
-        timestamp: Date.now(),
-        kind: "network",
-        cwd: sessionCwd,
-        ...event,
-      });
-    },
+    recordEvent: recordSandboxEvent,
     notify,
   });
 
