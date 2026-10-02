@@ -237,14 +237,14 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     localBashTool = createBashToolDefinition(ctx.cwd);
     sandboxedBashTool = createBashToolDefinition(ctx.cwd, { operations: sandboxedOps });
-    await runtime.start(ctx);
+    await runtime.start(ctx, event.reason);
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
-    await runtime.shutdown(ctx);
+  pi.on("session_shutdown", async (event, ctx) => {
+    await runtime.shutdown(ctx, event.reason);
   });
 
   registerFileToolGuard(pi, runtime);

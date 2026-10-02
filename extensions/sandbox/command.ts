@@ -322,9 +322,14 @@ function renderSandboxDoctorReport(options: {
   promptMode: PromptMode;
   configPaths: SandboxConfigPath[];
   events: SandboxEvent[];
+  runtime: SandboxRuntime;
 }): string {
-  const { state, promptMode, configPaths, events } = options;
-  const lines = ["Sandbox doctor", `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`];
+  const { state, promptMode, configPaths, events, runtime } = options;
+  const lines = [
+    "Sandbox doctor",
+    `- Runtime: ${describeSandboxRuntimeState(state, promptMode)}`,
+    `- Audit log: ${runtime.auditLog}`,
+  ];
 
   if (configPaths.length === 0) {
     lines.push("- Config paths: (none loaded)");
@@ -391,6 +396,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
             promptMode: runtime.promptMode,
             configPaths: runtime.configPaths,
             events: runtime.events,
+            runtime,
           }),
           "info",
         );
@@ -434,6 +440,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           `  State: enabled`,
           `  Mode: ${runtime.promptMode}`,
           `  Runtime state: ${getSandboxRunMode(runtime.state)}`,
+          `  Audit log: ${runtime.auditLog}`,
           "",
           "  Network:",
           `    Allowed: ${runtimeConfig.network.allowedDomains.join(", ") || "(none)"}`,
