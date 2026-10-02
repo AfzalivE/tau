@@ -35,6 +35,10 @@ For example:
 
 Select the configured model with `/model` before running `/insights`; `/insights` uses the active Pi model.
 
+## Tau 0.2.0 migration
+
+Use Pi 0.87.1 or later. Rename `openai-fast.json` to `fast.json`. Replace `PI_TELEGRAM_BOT_TOKEN` and `PI_TELEGRAM_DISABLE` with their `TAU_TELEGRAM_*` equivalents. Replace browser OpenAI routes in `websearch.json` with `pi:openai-codex`. The unused Todoist extension was removed.
+
 ## Extensions
 
 This package intentionally matches the `afzal-tau-all-agent` extension manifest.
@@ -44,7 +48,8 @@ This package intentionally matches the `afzal-tau-all-agent` extension manifest.
 | `answer`            | `/answer`            | Extract and interactively answer agent questions.                                                                         |
 | `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
-| `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
+| `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
+| `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
 | `raw`               | `/raw`, `alt+r`      | Open the full active-branch transcript in terminal scrollback for copying.                                                |
 | `converge`          | `/converge`          | Run multiple planner personas and synthesize one recommended plan.                                                        |
 | `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
@@ -54,13 +59,13 @@ This package intentionally matches the `afzal-tau-all-agent` extension manifest.
 | `stash`             | `alt+x`              | Stash the current message draft, send one message, then restore it.                                                       |
 | `loop`              | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
 | `notify`            | —                    | Terminal notification when the agent is waiting for input.                                                                |
-| `openai-fast`       | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
+| `fast`              | `/fast`              | Toggle fast processing for compatible models.                                                                             |
 | `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
 | `spotlight`         | `/spotlight`         | Mirror a linked worktree into the main worktree while you work elsewhere.                                                 |
 | `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
-| `todoist`           | `/todoist`           | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
+| `subagent`          | —                    | Delegate work to background Pi agents and follow up with them.                                                            |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |

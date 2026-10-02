@@ -20,61 +20,67 @@ pi install -l npm:afzal-tau-all-agent
 
 The bundled draft-stashing extension is now named `stash`. Its default `alt+x` shortcut is unchanged. If you configured it in `keybindings.json`, rename the `interlude` key to `stash`.
 
+## Tau 0.2.0 migration
+
+Use Pi 0.87.1 or later. Rename `openai-fast.json` to `fast.json`. Replace `PI_TELEGRAM_BOT_TOKEN` and `PI_TELEGRAM_DISABLE` with their `TAU_TELEGRAM_*` equivalents. Replace browser OpenAI routes in `websearch.json` with `pi:openai-codex`. The unused Todoist extension was removed; the `td` and `tdc` skills remain.
+
 ## Extensions
 
-| Extension          | Command              | Description                                                                                                               |
-| ------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `answer`           | `/answer`            | Extract and interactively answer agent questions.                                                                         |
-| `branch-term`      | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
-| `btw`              | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
-| `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                |
-| `raw`              | `/raw`, `alt+r`      | Open the full active-branch transcript in terminal scrollback for copying.                                                |
-| `converge`         | `/converge`          | Run multiple planner personas and synthesize one recommended plan.                                                        |
-| `ghostty`          | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
-| `git-diff-stats`   | —                    | Status bar diff stats for local changes in the current repo.                                                              |
-| `git-pr-status`    | —                    | Status bar PR number and link for the current branch.                                                                     |
-| `insights`         | `/insights`          | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
-| `stash`            | `alt+x`              | Stash the current message draft, send one message, then restore it.                                                        |
-| `loop`             | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
-| `notify`           | —                    | Terminal notification when the agent is waiting for input.                                                                |
-| `openai-fast`      | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
-| `openai-verbosity` | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
-| `review`           | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`          | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
-| `spotlight`        | `/spotlight`         | Mirror a linked worktree into the main worktree while you work elsewhere.                                                 |
-| `telegram`         | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                  |
-| `todoist`          | `/todoist`           | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
-| `usage`            | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
-| `websearch`        | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
-| `worktree`         | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
+| Extension           | Command              | Description                                                                                                               |
+| ------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | `/answer`            | Extract and interactively answer agent questions.                                                                         |
+| `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
+| `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
+| `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
+| `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
+| `raw`               | `/raw`, `alt+r`      | Open the full active-branch transcript in terminal scrollback for copying.                                                |
+| `converge`          | `/converge`          | Run multiple planner personas and synthesize one recommended plan.                                                        |
+| `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
+| `git-diff-stats`    | —                    | Status bar diff stats for local changes in the current repo.                                                              |
+| `git-pr-status`     | —                    | Status bar PR number and link for the current branch.                                                                     |
+| `insights`          | `/insights`          | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
+| `stash`             | `alt+x`              | Stash the current message draft, send one message, then restore it.                                                       |
+| `loop`              | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
+| `notify`            | —                    | Terminal notification when the agent is waiting for input.                                                                |
+| `fast`              | `/fast`              | Toggle fast processing for compatible models.                                                                             |
+| `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
+| `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
+| `sandbox`           | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
+| `spotlight`         | `/spotlight`         | Mirror a linked worktree into the main worktree while you work elsewhere.                                                 |
+| `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
+| `subagent`          | —                    | Delegate work to background Pi agents and follow up with them.                                                            |
+| `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
+| `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
+| `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
 
 ## Skills
 
-| Skill                           | Description                                                                                 |
-| ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `address-pr-comments`          | Address PR feedback through disposition, per-change commits, approval, push, and replies.   |
-| `fix-ci`                       | Fix failing CI through triage, focused commits, approval, reruns, and verification.          |
-| `browser-tools`                | Interactive browser automation via Chrome DevTools Protocol.                                |
-| `git-clean-history`            | Reimplement a branch on a fresh branch off `main` with a clean commit history.              |
-| `git-commit`                   | Tidy, focused commits with clear rationale in messages.                                     |
-| `oracle`                       | Second opinion from another LLM for debugging, refactors, design, or code reviews.          |
-| `sentry`                       | Fetch and analyze Sentry issues, events, transactions, and logs.                            |
-| `update-changelog`             | Update CHANGELOG.md following Keep a Changelog.                                             |
-| `web-design`                   | Distinctive, production-ready web interfaces.                                               |
-| `homeassistant-ops`            | Operate a Home Assistant instance via REST/WebSocket APIs.                                  |
-| `material-3`                   | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.       |
-| `openscad`                     | Create and render OpenSCAD 3D models, export STL.                                           |
-| `cald`                         | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac.   |
-| `dream`                        | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.       |
-| `gh`                           | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                              |
-| `git-rebase-check`             | Verify that a rebased branch preserved the same cumulative patch.                             |
-| `git-worktree`                 | Manage git worktrees for multiple branches in separate directories.                           |
-| `ms-openapi-explorer`          | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                             |
-| `qmd`                          | Local semantic search engine for markdown knowledge bases.                                    |
-| `pup/datadog/dashboards`       | Manage Datadog dashboards through the pup CLI and Datadog API.                                |
-| `review-breaker`               | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.      |
-| `td`                           | Todoist CLI for task and project management.                                                  |
-| `tdc`                          | Comms CLI for Twist team messaging, threads, DMs, and search.                               |
+| Skill                    | Description                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| `address-pr-comments`    | Address PR feedback through disposition, per-change commits, approval, push, and replies.  |
+| `fix-ci`                 | Fix failing CI through triage, focused commits, approval, reruns, and verification.        |
+| `browser-tools`          | Interactive browser automation via Chrome DevTools Protocol.                               |
+| `git-clean-history`      | Reimplement a branch on a fresh branch off `main` with a clean commit history.             |
+| `git-commit`             | Tidy, focused commits with clear rationale in messages.                                    |
+| `github-pull-request`    | Create and steward pull requests through CI, review, and merge.                            |
+| `oracle`                 | Second opinion from another LLM for debugging, refactors, design, or code reviews.         |
+| `sentry`                 | Fetch and analyze Sentry issues, events, transactions, and logs.                           |
+| `update-changelog`       | Update CHANGELOG.md following Keep a Changelog.                                            |
+| `web-design`             | Distinctive, production-ready web interfaces.                                              |
+| `homeassistant-ops`      | Operate a Home Assistant instance via REST/WebSocket APIs.                                 |
+| `material-3`             | Implement Google's Material Design 3 UI system, especially Jetpack Compose Material3.      |
+| `openscad`               | Create and render OpenSCAD 3D models, export STL.                                          |
+| `cald`                   | Apple Calendar CLI for listing calendars, reading events, and creating events on this Mac. |
+| `dream`                  | Nightly vault maintenance for consolidating, reorganizing, and weakening stale content.    |
+| `gh`                     | GitHub CLI for issues, PRs, Actions, search, and raw API calls.                            |
+| `git-rebase-check`       | Verify that a rebased branch preserved the same cumulative patch.                          |
+| `git-worktree`           | Manage git worktrees for multiple branches in separate directories.                        |
+| `ms-openapi-explorer`    | Explore Microsoft Graph API v1.0 OpenAPI specs from cached YAML.                           |
+| `qmd`                    | Local semantic search engine for markdown knowledge bases.                                 |
+| `pup/datadog/dashboards` | Manage Datadog dashboards through the pup CLI and Datadog API.                             |
+| `review-breaker`         | Break a large review branch into a temporary stack of smaller reviewer-friendly commits.   |
+| `td`                     | Todoist CLI for task and project management.                                               |
+| `tdc`                    | Comms CLI for Twist team messaging, threads, DMs, and search.                              |
 
 ## Themes
 
