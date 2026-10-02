@@ -492,7 +492,23 @@ export async function handleFilesystemViolation(options: {
   const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
   return showPermissionDialog({
     ctx,
-    title: `Sandbox blocked filesystem ${target}`,
+    prompt: {
+      request:
+        violation.readAccess === "metadata"
+          ? "Filesystem metadata read"
+          : `Filesystem ${violation.kind === "unknown" ? "access" : violation.kind}`,
+      target: violation.path!,
+      requester: violation.processName,
+      command,
+      typeCode:
+        violation.kind === "write"
+          ? "FS_WRITE"
+          : violation.readAccess === "metadata"
+            ? "FS_META"
+            : violation.kind === "read"
+              ? "FS_READ"
+              : "FS_ACCESS",
+    },
     promptKey,
     pendingDialogs,
     autoRetryAvailable,

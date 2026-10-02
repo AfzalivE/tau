@@ -2,6 +2,7 @@ import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PromptMode } from "../config.js";
 import { createNetworkAskCallback, type NetworkSandboxEvent } from "../network-permission.js";
+import { showSandboxPermissionSelect } from "./prompt.js";
 
 export function createNetworkPermissions(options: {
   getContext: () => ExtensionContext | null;
@@ -22,12 +23,19 @@ export function createNetworkPermissions(options: {
       canPrompt: () => Boolean(options.getContext()?.hasUI),
       requestApproval: async ({ target }) => {
         const ctx = options.getContext();
-        return ctx?.hasUI
-          ? ctx.ui.confirm(
-              `Sandbox blocked network access to ${target}`,
-              "\nAllow for this session?",
-            )
-          : false;
+        if (!ctx?.hasUI) return false;
+        return (
+          (await showSandboxPermissionSelect(
+            ctx,
+            {
+              request: "Network connection",
+              target,
+              targetLabel: "host",
+              typeCode: "NET_OUT",
+            },
+            ["Yes", "No"],
+          )) === "Yes"
+        );
       },
       applyRuntimeConfig: (config) => {
         const ctx = options.getContext();

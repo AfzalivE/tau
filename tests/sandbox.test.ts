@@ -358,6 +358,7 @@ describe("sandbox", { concurrency: false }, () => {
       ]);
       let approvals = 0;
       pi = await openSandbox(cwd, sandbox, failures, {
+        mode: "tui",
         ui: {
           async custom(factory, options) {
             approvals++;
@@ -430,6 +431,7 @@ describe("sandbox", { concurrency: false }, () => {
         const command = "printf 'escaped\\n' > forbidden.txt";
         // No local script or wrapped attempt is allowed. Any execution fails the boundary.
         pi = await openSandbox(cwd, sandbox, failures, {
+          mode: "tui",
           ui: {
             async custom(factory, options) {
               if (decision === "UI failure") throw new Error("The octopus closed the window");
@@ -469,6 +471,7 @@ describe("sandbox", { concurrency: false }, () => {
       );
       const command = `printf 'escaped\\n' > forbidden.txt; # ${pearls.join(" ")}`;
       pi = await openSandbox(cwd, sandbox, failures, {
+        mode: "tui",
         ui: {
           async custom(factory, options) {
             const view = await mountCustomUI(
@@ -517,6 +520,7 @@ describe("sandbox", { concurrency: false }, () => {
 
     test("an unreadable viewport cannot approve through hidden controls", async () => {
       pi = await openSandbox(cwd, sandbox, failures, {
+        mode: "tui",
         ui: {
           async custom(factory, options) {
             const view = await mountCustomUI(
@@ -567,6 +571,7 @@ describe("sandbox", { concurrency: false }, () => {
       const ordinary = "printf 'still sandboxed\\n'";
       boundary.attempts(ordinary, [{ script: ordinary }]);
       pi = await openSandbox(cwd, sandbox, failures, {
+        mode: "tui",
         ui: {
           // Deliberately non-cooperative UI: an approval reply can arrive after cancellation.
           custom: async <T>() => {
@@ -644,6 +649,7 @@ describe("sandbox", { concurrency: false }, () => {
       const revoked = deferred<void>();
       const decision = deferred<string | undefined>();
       pi = await openSandbox(cwd, sandbox, failures, {
+        mode: "tui",
         ui: {
           custom: async <T>(
             factory: Parameters<ExtensionUIContext["custom"]>[0],
@@ -1074,7 +1080,11 @@ async function openSandbox(
   cwd: string,
   extension: ExtensionFactory,
   failures: unknown[],
-  options: { flags?: Record<string, string | boolean>; ui?: Partial<ExtensionUIContext> } = {},
+  options: {
+    mode?: "tui" | "rpc";
+    flags?: Record<string, string | boolean>;
+    ui?: Partial<ExtensionUIContext>;
+  } = {},
 ) {
   let permissionCount = 0;
   let handoff!: () => { config?: unknown; extension?: string; error?: string };
@@ -1123,7 +1133,7 @@ async function openSandbox(
     for (const [name, value] of Object.entries(options.flags ?? {}))
       session.extensionRunner.setFlagValue(name, value);
     await session.bindExtensions({
-      mode: "tui",
+      mode: options.mode ?? "rpc",
       onError: (error) => failures.push(error),
       uiContext: uiBoundary(
         {

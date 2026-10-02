@@ -682,7 +682,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       cancelled: T,
       signal?: AbortSignal,
     ): Promise<T> {
-      const signals = [contextSignal, signal].filter(
+      const signals = [permissionLifetime.signal, contextSignal, signal].filter(
         (value): value is AbortSignal => value !== undefined,
       );
       const combined = signals.length ? AbortSignal.any(signals) : undefined;
@@ -703,7 +703,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
         throw error;
       });
     }
-    const overrides: Pick<ExtensionContext["ui"], "select" | "confirm"> = {
+    const overrides: Pick<ExtensionContext["ui"], "select" | "confirm" | "custom"> = {
       select: (title, options, opts) =>
         queued(
           (signal) =>
@@ -719,6 +719,26 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
           false,
           opts?.signal,
         ),
+      custom: (factory, options) => {
+        type Result = Parameters<Parameters<typeof factory>[3]>[0];
+        const invocation = queued(async (signal) => {
+          let cancel: (() => void) | undefined;
+          try {
+            return await ctx.ui.custom<Result>((tui, theme, keybindings, done) => {
+              cancel = () => done(undefined as Result);
+              signal?.addEventListener("abort", cancel, { once: true });
+              if (signal?.aborted) cancel();
+              return factory(tui, theme, keybindings, (result) =>
+                done(signal?.aborted ? (undefined as Result) : result),
+              );
+            }, options);
+          } finally {
+            if (cancel) signal?.removeEventListener("abort", cancel);
+          }
+        }, undefined as Result);
+        permissionInvocations.add(invocation);
+        return invocation.finally(() => permissionInvocations.delete(invocation));
+      },
     };
     const ui = new Proxy(ctx.ui, {
       get(_target, key) {

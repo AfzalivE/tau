@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { showSandboxPermissionSelect, type SandboxPermissionPrompt } from "./prompt.js";
 
 type PermissionDecision = "allow-retry" | "allow-adapt" | "deny";
 
@@ -19,19 +20,23 @@ const DENY_OPTION = "Deny";
 
 export async function showPermissionDialog<T>(options: {
   ctx: ExtensionContext;
-  title: string;
+  prompt: SandboxPermissionPrompt;
   promptKey: string;
   pendingDialogs?: Map<string, Promise<T | null>>;
   autoRetryAvailable: boolean;
   onDecision: (decision: PermissionDecision) => T | Promise<T>;
 }): Promise<T | null> {
-  const { ctx, title, promptKey, pendingDialogs, autoRetryAvailable, onDecision } = options;
+  const { ctx, prompt, promptKey, pendingDialogs, autoRetryAvailable, onDecision } = options;
   const existingDialog = pendingDialogs?.get(promptKey);
   if (existingDialog) return existingDialog;
 
   const dialogTask: Promise<T | null> = (async () => {
     try {
-      const selection = await ctx.ui.select(title, getPermissionDialogOptions(autoRetryAvailable));
+      const selection = await showSandboxPermissionSelect(
+        ctx,
+        prompt,
+        getPermissionDialogOptions(autoRetryAvailable),
+      );
       return await onDecision(parsePermissionDialogSelection(selection, autoRetryAvailable));
     } catch {
       return onDecision("deny");

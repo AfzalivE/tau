@@ -163,7 +163,13 @@ export async function handleMachLookupViolation(options: {
   const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
   return showPermissionDialog({
     ctx,
-    title: `Sandbox blocked access to macOS service ${service}`,
+    prompt: {
+      request: "macOS service lookup",
+      target: service,
+      targetLabel: "service",
+      command,
+      typeCode: "MACH_LU",
+    },
     promptKey,
     pendingDialogs,
     autoRetryAvailable,
