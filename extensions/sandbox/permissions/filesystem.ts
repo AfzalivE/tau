@@ -4,13 +4,11 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   cloneRuntimeConfig,
   escapeSlashCommandArg,
-  inferExactSandboxRuleMatch,
-  inferSandboxRuleMatch,
-  isSandboxWritablePath,
   mutateStringList,
   type ListOp,
   type PromptMode,
 } from "../config.js";
+import { inferExactSandboxRuleMatch, inferSandboxRuleMatch } from "../utils.js";
 import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
 import {
   createPermissionResolution,
@@ -30,45 +28,10 @@ export interface FilesystemViolation {
   processName?: string;
   readAccess?: FilesystemReadAccess;
   writeAccess?: FilesystemWriteAccess;
+  matchedRule?: string;
 }
 
 export type FilesystemList = "deny-read" | "allow-write" | "deny-write";
-
-export function isRuntimeProtectedWriteViolation(
-  runtimeConfig: SandboxRuntimeConfig | null,
-  violation: FilesystemViolation,
-  cwd?: string,
-): boolean {
-  if (
-    !runtimeConfig ||
-    runtimeConfig.filesystem.disabled ||
-    !violation.path ||
-    violation.kind !== "write"
-  ) {
-    return false;
-  }
-
-  return isSandboxWritablePath(runtimeConfig, violation.path, cwd);
-}
-
-export function getRuntimeProtectedWriteViolations(
-  runtimeConfig: SandboxRuntimeConfig | null,
-  violations: FilesystemViolation[],
-  cwd?: string,
-): FilesystemViolation[] {
-  const violationsByPath = new Map<string, FilesystemViolation>();
-
-  for (const violation of violations) {
-    if (!isRuntimeProtectedWriteViolation(runtimeConfig, violation, cwd) || !violation.path) {
-      continue;
-    }
-    if (!violationsByPath.has(violation.path)) {
-      violationsByPath.set(violation.path, violation);
-    }
-  }
-
-  return Array.from(violationsByPath.values());
-}
 
 function extractSandboxViolationLines(output: string): string[] {
   // sandbox-runtime annotateStderrWithSandboxFailures wraps violations in this tag.
@@ -271,20 +234,16 @@ function buildFilesystemAllowAction(
   if (!violation.path) return null;
 
   if (violation.kind === "read") {
-    const matchedRule = inferSandboxRuleMatch(
-      violation.path,
-      runtimeConfig.filesystem.denyRead,
-      cwd,
-    );
+    const matchedRule =
+      violation.matchedRule ??
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd);
     return { list: "deny-read", op: "remove", value: matchedRule ?? violation.path };
   }
 
   if (violation.kind === "write") {
-    const matchedDeny = inferSandboxRuleMatch(
-      violation.path,
-      runtimeConfig.filesystem.denyWrite,
-      cwd,
-    );
+    const matchedDeny =
+      violation.matchedRule ??
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, cwd);
     if (matchedDeny) {
       return { list: "deny-write", op: "remove", value: matchedDeny };
     }
@@ -436,6 +395,7 @@ export async function handleFilesystemViolation(options: {
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
   output: string;
   rawOutput: string;
+  explicitViolation?: FilesystemViolation;
   command: string;
   cwd?: string;
   pendingDialogs?: Map<string, Promise<PermissionResolution | null>>;
@@ -455,6 +415,7 @@ export async function handleFilesystemViolation(options: {
     getRuntimeConfig,
     output,
     rawOutput,
+    explicitViolation,
     command,
     cwd,
     pendingDialogs,
@@ -464,7 +425,9 @@ export async function handleFilesystemViolation(options: {
     runtimeProtectedWriteViolations = [],
     allowOutputFallback = true,
   } = options;
-  const violations = detectFilesystemViolations(output, rawOutput, allowOutputFallback);
+  const violations = explicitViolation
+    ? [explicitViolation]
+    : detectFilesystemViolations(output, rawOutput, allowOutputFallback);
   const runtimeProtectedWritePaths = new Set(
     runtimeProtectedWriteViolations.map((violation) => violation.path).filter(Boolean),
   );

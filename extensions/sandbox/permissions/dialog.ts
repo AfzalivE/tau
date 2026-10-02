@@ -34,7 +34,7 @@ export async function showPermissionDialog<T>(options: {
       const selection = await ctx.ui.select(title, getPermissionDialogOptions(autoRetryAvailable));
       return await onDecision(parsePermissionDialogSelection(selection, autoRetryAvailable));
     } catch {
-      return null;
+      return onDecision("deny");
     }
   })();
 

@@ -1,5 +1,5 @@
 /**
- * Sandbox Extension - OS-level bash sandboxing and native file-tool guardrails
+ * Sandbox Extension - OS-level sandboxing for bash commands
  *
  * Uses @anthropic-ai/sandbox-runtime to enforce filesystem and network
  * restrictions on bash commands at the OS level (sandbox-exec on macOS,
@@ -20,17 +20,9 @@
  * {
  *   "enabled": true,
  *   "mode": "interactive",
- *   "debug": false,
- *   "commands": {
- *     "blocked": ["npx"],
- *     "exclusionsEnabled": true,
- *     "excluded": ["tdc"]
- *   },
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
  *     "deniedDomains": [],
- *     "jvmProxy": false,
- *     "allowLocalBinding": true,
  *     "allowMachLookup": [
  *       "com.apple.dnssd.service",
  *       "com.apple.SystemConfiguration.configd",
@@ -48,20 +40,11 @@
  * }
  * ```
  *
- * `network.jvmProxy` is an opt-in macOS compatibility adapter for JVM HTTP
- * clients. It requires `network.allowLocalBinding: true`. See README.md for
- * its same-host security effect.
- *
  * Usage:
  * - `pi -e ./sandbox` - sandbox enabled with default/config settings
- * - `pi -e ./sandbox --no-sandbox` - disable sandboxing and file-tool guardrails
- * - `pi -e ./sandbox --sandbox-debug` - print sandbox-runtime proxy/network debug logs
+ * - `pi -e ./sandbox --no-sandbox` - disable sandboxing
  * - `pi -e ./sandbox --sandbox-config ./sandbox.json` - use a custom sandbox config file
  * - `/sandbox` - show command help
- *
- * Sandbox policy events and raw runtime violations are written to
- * `~/.pi/agent/logs/sandbox/<session-id>.jsonl`. `/sandbox doctor` prints the
- * exact path for the current session.
  *
  * Setup for source checkouts:
  * - Run `npm install` from the repository root.
@@ -80,18 +63,13 @@ import { Type } from "typebox";
 
 import { createSandboxedBashOps, createUnsandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
+import { registerFileToolGuard } from "./file-tools.js";
 import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
 import { createSandboxRuntime, getSandboxRunMode } from "./runtime.js";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
   pi.registerFlag("no-sandbox", {
     description: "Disable OS-level bash sandboxing and native file-tool guardrails",
-    type: "boolean",
-    default: false,
-  });
-
-  pi.registerFlag("sandbox-required", {
-    description: "Require sandboxed Bash tool execution; refuse disabled configs and exclusions",
     type: "boolean",
     default: false,
   });
@@ -177,8 +155,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     recordEvent: runtime.recordEvent,
   });
 
-  const localBashTool = createBashToolDefinition(process.cwd());
-  const sandboxedBashTool = createBashToolDefinition(process.cwd(), { operations: sandboxedOps });
+  let localBashTool = createBashToolDefinition(process.cwd());
+  let sandboxedBashTool = createBashToolDefinition(process.cwd(), { operations: sandboxedOps });
 
   pi.registerTool({
     ...localBashTool,
@@ -240,14 +218,15 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               "Sandbox session initialization is incomplete. Retry after session startup or run /sandbox enable.";
           }
 
-          if (requiresSandbox) {
-            reason = `Sandbox is required but is not active (${runMode}). Check the configuration and sandbox startup diagnostics.`;
-          }
-
-          recordUnavailableSandboxBlock(
-            params.command,
-            "bash execution was blocked because the sandbox runtime is unavailable",
-          );
+          runtime.recordEvent({
+            timestamp: Date.now(),
+            kind: "runtime",
+            outcome: "blocked",
+            reason: state.status === "blocked" ? state.reason : "unknown",
+            command,
+            cwd: ctx.cwd,
+            summary: reason,
+          });
           throw new Error(reason);
         }
         return localBashTool.execute(id, params, signal, onUpdate, ctx);
@@ -259,6 +238,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    localBashTool = createBashToolDefinition(ctx.cwd);
+    sandboxedBashTool = createBashToolDefinition(ctx.cwd, { operations: sandboxedOps });
     await runtime.start(ctx);
   });
 
@@ -266,5 +247,6 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     await runtime.shutdown(ctx);
   });
 
+  registerFileToolGuard(pi, runtime);
   registerSandboxCommand(pi, runtime);
 }

@@ -2,11 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import {
-  containsGlobChars,
-  globToRegex,
-  normalizePathForSandbox,
-} from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
+import { normalizePathForSandbox } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type PromptMode = "interactive" | "non-interactive";
@@ -687,58 +683,6 @@ export function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
 
 export function cloneRuntimeConfig(config: SandboxRuntimeConfig): SandboxRuntimeConfig {
   return structuredClone(config);
-}
-
-function normalizeSandboxPath(value: string, cwd?: string): string {
-  return normalizePathForSandbox(expandPath(value, cwd));
-}
-
-function matchesSandboxRule(path: string, rule: string, cwd?: string): boolean {
-  const normalizedPath = normalizeSandboxPath(path);
-  const normalizedRule = normalizeSandboxPath(rule, cwd);
-
-  if (containsGlobChars(rule)) {
-    return new RegExp(globToRegex(normalizedRule)).test(normalizedPath);
-  }
-
-  if (normalizedPath === normalizedRule) return true;
-
-  const prefix = normalizedRule.endsWith("/") ? normalizedRule : `${normalizedRule}/`;
-  return normalizedPath.startsWith(prefix);
-}
-
-export function inferSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
-  for (const rule of rules) {
-    if (matchesSandboxRule(path, rule, cwd)) return rule;
-  }
-
-  return null;
-}
-
-function matchesSandboxRuleExactly(path: string, rule: string, cwd?: string): boolean {
-  if (containsGlobChars(rule)) return false;
-  return normalizeSandboxPath(path) === normalizeSandboxPath(rule, cwd);
-}
-
-export function inferExactSandboxRuleMatch(
-  path: string,
-  rules: string[],
-  cwd?: string,
-): string | null {
-  for (const rule of rules) {
-    if (matchesSandboxRuleExactly(path, rule, cwd)) return rule;
-  }
-
-  return null;
-}
-
-export function isSandboxWritablePath(
-  runtimeConfig: SandboxRuntimeConfig,
-  path: string,
-  cwd?: string,
-): boolean {
-  if (!inferSandboxRuleMatch(path, runtimeConfig.filesystem.allowWrite, cwd)) return false;
-  return inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, cwd) === null;
 }
 
 export function escapeSlashCommandArg(value: string): string {

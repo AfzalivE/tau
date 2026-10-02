@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import {
@@ -28,7 +29,15 @@ export function resolveSandboxPath(value: string, cwd = process.cwd()): string {
 }
 
 export function normalizeSandboxPath(value: string, cwd?: string): string {
-  return normalizePathForSandbox(resolveSandboxPath(value, cwd));
+  let ancestor = resolveSandboxPath(value, cwd);
+  const suffix: string[] = [];
+  // SRT only resolves existing paths. Normalize the existing ancestor of new
+  // targets too, so /tmp and /private/tmp spellings use the same policy rules.
+  while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) {
+    suffix.unshift(basename(ancestor));
+    ancestor = dirname(ancestor);
+  }
+  return join(normalizePathForSandbox(ancestor), ...suffix);
 }
 
 export function inferSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {

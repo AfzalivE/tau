@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { BeforeToolCallResult } from "@earendil-works/pi-agent-core";
 import childProcess from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -15,7 +16,13 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
-import { createPiResources, fixtureModel, isolatePiHome, uiBoundary } from "./helpers/pi.js";
+import {
+  assistantMessage,
+  createPiResources,
+  fixtureModel,
+  isolatePiHome,
+  uiBoundary,
+} from "./helpers/pi.js";
 import { mountCustomUI } from "./helpers/custom-ui.js";
 
 const dinnerCommand =
@@ -140,6 +147,42 @@ describe("sandbox", { concurrency: false }, () => {
     ]);
     boundary.attempts(probe, [{ script: "printf 'sandboxed squid\\n'" }]);
     assert.equal(await pi.bash(probe), "sandboxed squid\n");
+  });
+
+  test("native tool calls enforce read, write, and mandatory policy through Pi's interception", async () => {
+    const config = JSON.parse(configBytes);
+    config.filesystem.denyRead = [target];
+    await writeFile(configPath, JSON.stringify({ ...config, mode: "non-interactive" }));
+    pi = await openSandbox(cwd, sandbox, failures);
+    for (const [name, args] of [
+      ["read", { path: target }],
+      ["write", { path: target, content: "overwrite" }],
+      ["write", { path: path.join(cwd, ".git", "hooks", "pre-commit"), content: "overwrite" }],
+    ] as [string, Record<string, string>][]) {
+      const toolCall = { type: "toolCall" as const, id: "guarded-tool", name, arguments: args };
+      const result: BeforeToolCallResult | undefined = await pi.session.agent.beforeToolCall?.({
+        toolCall,
+        args,
+        assistantMessage: { ...assistantMessage(""), content: [toolCall] },
+        context: pi.session.agent.state,
+      });
+      assert.equal(result?.block, true, name);
+      assert.match(result?.reason ?? "", /[Ss]andbox/);
+    }
+    assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+    const args = { path: path.join(cwd, "safe.txt"), content: "eight arms" };
+    const toolCall = { type: "toolCall" as const, id: "safe-tool", name: "write", arguments: args };
+    const allowed: BeforeToolCallResult | undefined = await pi.session.agent.beforeToolCall?.({
+      toolCall,
+      args,
+      assistantMessage: { ...assistantMessage(""), content: [toolCall] },
+      context: pi.session.agent.state,
+    });
+    assert.equal(allowed?.block, undefined, allowed?.reason);
+    const write = pi.session.agent.state.tools.find((tool) => tool.name === "write");
+    assert.ok(write);
+    await write.execute(toolCall.id, args);
+    assert.equal(await readFile(args.path, "utf8"), "eight arms");
   });
 
   describe("recovering a blocked shell", () => {
@@ -681,6 +724,18 @@ describe("sandbox", { concurrency: false }, () => {
       },
       { name: "generic EPERM", errorLine: "Error: EPERM", initializationFailure: false },
       {
+        name: "Gradle network failure",
+        errorLine:
+          "Could not GET 'https://dl.google.com/example.pom'\nOperation not permitted\nhttps://docs.gradle.org/9.6/userguide\nProblems report: file:///tmp/problems.html",
+        initializationFailure: false,
+      },
+      {
+        name: "URL with permission error",
+        errorLine:
+          "Could not GET https://example.com?redirect=/private/data: Operation not permitted",
+        initializationFailure: false,
+      },
+      {
         name: "generic Operation not permitted",
         errorLine: "Error: Operation not permitted",
         initializationFailure: false,
@@ -944,7 +999,7 @@ async function openSandbox(
   const { session } = await createAgentSession({
     ...resources,
     model: fixtureModel,
-    tools: ["bash"],
+    tools: ["bash", "read", "write"],
   });
   const statuses = new Map<string, string>();
   const notifications: string[] = [];

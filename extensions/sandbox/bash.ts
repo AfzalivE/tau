@@ -11,22 +11,23 @@ import {
 
 import {
   cloneRuntimeConfig,
-  inferSandboxRuleMatch,
-  isSandboxWritablePath,
   mutateStringList,
   type PromptMode,
   type SandboxConfig,
 } from "./config.js";
+import { inferSandboxRuleMatch, isSandboxWritablePath } from "./utils.js";
+import {
+  getRuntimeProtectedWriteViolations,
+  isRuntimeProtectedWriteViolation,
+} from "./runtime-protected-write.js";
 import type { PermissionResolution } from "./permissions/dialog.js";
 import {
   detectFilesystemViolationFromLine,
   extractAppendedSandboxAnnotation,
   formatRuntimeProtectedWriteNotice,
   formatTraversalNotice,
-  getRuntimeProtectedWriteViolations,
   getTraversalPaths,
   handleFilesystemViolation,
-  isRuntimeProtectedWriteViolation,
   isTraversalViolation,
   type FilesystemViolation,
 } from "./permissions/filesystem.js";
