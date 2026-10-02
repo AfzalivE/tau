@@ -10,6 +10,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  formatJvmProxyEndpoint,
+  JVM_PROXY_ENV,
+  type JvmProxyEndpoint,
+} from "./jvm-proxy-options.js";
+import {
   cloneRuntimeConfig,
   mutateStringList,
   type PromptMode,
@@ -119,6 +124,7 @@ interface SandboxedBashOpsOptions {
   getSandboxConfig: () => SandboxConfig | null;
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
   getPromptMode: () => PromptMode;
+  getJvmProxyEndpoint: () => JvmProxyEndpoint | null;
   applyRuntimeConfigForSession: (
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
@@ -272,6 +278,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     getSandboxConfig,
     getRuntimeConfig,
     getPromptMode,
+    getJvmProxyEndpoint,
     applyRuntimeConfigForSession,
     recordEvent,
   } = options;
@@ -310,8 +317,14 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
 
   function withSandboxDefaultEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     const baseEnv = env ?? process.env;
-    if (baseEnv.GIT_OPTIONAL_LOCKS !== undefined) return baseEnv;
-    return { ...baseEnv, GIT_OPTIONAL_LOCKS: "0" };
+    const sandboxEnv: NodeJS.ProcessEnv = {
+      ...baseEnv,
+      GIT_OPTIONAL_LOCKS: baseEnv.GIT_OPTIONAL_LOCKS ?? "0",
+    };
+    delete sandboxEnv[JVM_PROXY_ENV];
+    const endpoint = getJvmProxyEndpoint();
+    if (endpoint) sandboxEnv[JVM_PROXY_ENV] = formatJvmProxyEndpoint(endpoint);
+    return sandboxEnv;
   }
 
   async function runSandboxAttempt(

@@ -11,6 +11,8 @@ import {
   type SandboxAuditLog,
 } from "./audit-log.js";
 import { createSandboxDebugLog, type SandboxDebugLine } from "./debug.js";
+import { JvmProxyAdapter } from "./jvm-proxy-adapter.js";
+import type { JvmProxyEndpoint } from "./jvm-proxy-options.js";
 
 import {
   DEFAULT_PROMPT_MODE,
@@ -84,6 +86,7 @@ export interface SandboxRuntime {
   readonly debugLines: SandboxDebugLine[];
   describeDebugLogging(): string;
   setDebugLogging(enabled: boolean): void;
+  getJvmProxyEndpoint(): JvmProxyEndpoint | null;
   getRuntimeConfig(): SandboxRuntimeConfig | null;
   captureContext(ctx: ExtensionContext): void;
   withPermissionContext<T>(
@@ -250,6 +253,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let auditPath: string | null = null;
   let auditError: string | null = null;
   let unsubscribeAudit: (() => void) | undefined;
+  let jvmProxyAdapter: JvmProxyAdapter | null = null;
 
   function auditPolicy(config: SandboxRuntimeConfig) {
     return {
@@ -307,6 +311,23 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     auditLog?.append("session-stop", { reason });
     auditLog?.close();
     auditLog = null;
+  }
+
+  async function closeJvmProxy(): Promise<void> {
+    await jvmProxyAdapter?.close();
+    jvmProxyAdapter = null;
+  }
+
+  async function configureJvmProxy(config: SandboxConfig): Promise<void> {
+    jvmProxyAdapter?.suspend();
+    if (!config.network.jvmProxy) return;
+    const port = SandboxManager.getProxyPort();
+    const authToken = SandboxManager.getProxyAuthToken();
+    if (!port || !authToken)
+      throw new Error("network.jvmProxy requires SRT's authenticated local HTTP proxy");
+    jvmProxyAdapter ??= new JvmProxyAdapter();
+    await jvmProxyAdapter.start();
+    jvmProxyAdapter.activate({ port, authToken });
   }
 
   function recordSandboxEvent(event: SandboxEvent): void {
@@ -398,13 +419,30 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
     const runtimeConfig = toRuntimeConfig(config);
 
+    let initialized = false;
     try {
+      if (config.network.jvmProxy) {
+        if (process.platform !== "darwin")
+          throw new Error("network.jvmProxy is supported only on macOS");
+        if (!config.network.allowLocalBinding)
+          throw new Error("network.jvmProxy requires network.allowLocalBinding: true on macOS");
+      }
       await SandboxManager.initialize(runtimeConfig, networkPermissions.ask, true);
+      initialized = true;
+      await configureJvmProxy(config);
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
       auditLog?.append("runtime-policy", { reason: "initialize", ...auditPolicy(activeConfig) });
       return activeConfig;
     } catch (error) {
+      jvmProxyAdapter?.suspend();
+      if (initialized) {
+        try {
+          await SandboxManager.reset();
+        } catch {
+          /* Preserve the startup error. */
+        }
+      }
       const errorMessage = error instanceof Error ? error.message : `${error}`;
       promptMode = DEFAULT_PROMPT_MODE;
       networkPermissions.clear();
@@ -445,7 +483,10 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       configPaths: sandboxConfigPaths,
       policy: {
         ...sandboxConfig,
-        network: auditPolicy(sandboxConfig).network,
+        network: {
+          ...auditPolicy(sandboxConfig).network,
+          jvmProxy: sandboxConfig.network.jvmProxy,
+        },
       },
     });
     return loadedConfig.config;
@@ -453,6 +494,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
   async function start(ctx: ExtensionContext, reason = "startup"): Promise<void> {
     await cancelPermissionInvocations();
+    await closeJvmProxy();
     stopAudit("session-restart");
     debug.start();
     permissionLifetime = new AbortController();
@@ -498,6 +540,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
   async function shutdown(ctx: ExtensionContext, reason = "quit"): Promise<void> {
     await cancelPermissionInvocations();
+    jvmProxyAdapter?.suspend();
     setSandboxStatus(ctx, false);
     if (getStateRuntimeConfig(sandboxState)) {
       try {
@@ -507,6 +550,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       }
     }
 
+    await closeJvmProxy();
     stopAudit(reason);
     debug.stop();
     resetRuntimeState();
@@ -548,6 +592,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
 
     sandboxState = { status: "suspended" };
+    jvmProxyAdapter?.suspend();
     await cancelPermissionInvocations();
     permissionLifetime = new AbortController();
     networkPermissions.clear();
@@ -695,6 +740,10 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     },
     describeDebugLogging: debug.describe,
     setDebugLogging: debug.setEnabled,
+    getJvmProxyEndpoint() {
+      const port = jvmProxyAdapter?.activePort;
+      return port ? { host: "127.0.0.1", port } : null;
+    },
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     captureContext(ctx) {
       sessionContext = permissionContext(ctx);

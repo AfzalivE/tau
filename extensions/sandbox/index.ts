@@ -140,6 +140,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         enabled: true,
         mode: runtime.promptMode,
         debug: runtime.config?.debug,
+        network: { ...cloned.network, jvmProxy: runtime.config?.network.jvmProxy },
         filesystem: {
           ...cloned.filesystem,
           allowTempDirs: false,
@@ -158,6 +159,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     getSandboxConfig: () => runtime.config,
     getRuntimeConfig: () => runtime.getRuntimeConfig(),
     getPromptMode: () => runtime.promptMode,
+    getJvmProxyEndpoint: runtime.getJvmProxyEndpoint,
     applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
     recordEvent: runtime.recordEvent,
   });

@@ -149,6 +149,32 @@ describe("sandbox", { concurrency: false }, () => {
     assert.equal(await pi.bash(probe), "sandboxed squid\n");
   });
 
+  test(
+    "JVM sessions pass the adapter endpoint to Bash, retain its port on re-enable, and configure children",
+    { skip: process.platform !== "darwin" },
+    async () => {
+      const config = JSON.parse(configBytes);
+      config.network.jvmProxy = true;
+      config.network.allowLocalBinding = true;
+      await writeFile(configPath, JSON.stringify(config));
+      mock.method(SandboxManager, "getProxyPort", () => 34567);
+      mock.method(SandboxManager, "getProxyAuthToken", () => "synthetic-auth");
+      const probe = "printf '%s' \"$TAU_SANDBOX_JVM_PROXY\"";
+      boundary.attempts(probe, [{ script: probe }, { script: probe }]);
+      pi = await openSandbox(cwd, sandbox, failures);
+      const endpoint = await pi.bash(probe);
+      assert.match(endpoint, /^127\.0\.0\.1:\d+$/);
+      assert.equal("jvmProxy" in SandboxManager.getConfig()!.network, false);
+      assert.equal(
+        (pi.handoff().config as { network: { jvmProxy: boolean } }).network.jvmProxy,
+        true,
+      );
+      await pi.command("disable");
+      await pi.command("enable");
+      assert.equal(await pi.bash(probe), endpoint);
+    },
+  );
+
   test("native tool calls enforce read, write, and mandatory policy through Pi's interception", async () => {
     const config = JSON.parse(configBytes);
     config.filesystem.denyRead = [target];
@@ -913,6 +939,7 @@ exit 73`,
               enabled: true,
               mode: "interactive",
               debug: false,
+              network: { ...expectedPolicy.network, jvmProxy: false },
               filesystem: {
                 ...expectedPolicy.filesystem,
                 allowTempDirs: false,

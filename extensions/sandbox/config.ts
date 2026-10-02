@@ -14,10 +14,11 @@ type DefaultConfigExtension = {
   ignoreViolations?: string[];
 };
 
-export type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
+export type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem" | "network"> & {
   enabled?: boolean;
   mode?: PromptMode;
   debug?: boolean;
+  network: SandboxRuntimeConfig["network"] & { jvmProxy?: boolean };
   filesystem: SandboxRuntimeConfig["filesystem"] & {
     allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
@@ -49,6 +50,7 @@ const GLOBAL_DEFAULT_CONFIG = {
   mode: DEFAULT_PROMPT_MODE,
   debug: false,
   network: {
+    jvmProxy: false,
     allowedDomains: [
       // System
       "localhost",
@@ -362,6 +364,7 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     debug: coerceBoolean(config.debug, false, "debug"),
     network: {
       ...config.network,
+      jvmProxy: coerceBoolean(config.network?.jvmProxy, false, "network.jvmProxy"),
       allowedDomains: coerceStringArray(
         config.network?.allowedDomains,
         DEFAULT_CONFIG.network.allowedDomains,
@@ -668,7 +671,8 @@ function expandFilesystemPathConfig(
 
 export function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
-  const expandedNetwork = expandNetworkPathConfig(config.network);
+  const { jvmProxy: _jvmProxy, ...network } = config.network;
+  const expandedNetwork = expandNetworkPathConfig(network);
   const expandedFilesystem = expandFilesystemPathConfig(filesystem);
   const allowWrite = allowTempDirs
     ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]

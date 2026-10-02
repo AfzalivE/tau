@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -53,6 +53,30 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
       ...defaults,
       network: { ...defaults.network, allowMachLookup: [] },
     });
+  });
+
+  test("the shell wrapper applies JVM options and removes its private endpoint variable", () => {
+    const shell = fileURLToPath(
+      new URL("../../extensions/sandbox/macos-sandbox-shell.mjs", import.meta.url),
+    );
+    const output = execFileSync(
+      shell,
+      ["-c", 'printf "%s\\n%s" "$JAVA_TOOL_OPTIONS" "${TAU_SANDBOX_JVM_PROXY-unset}"'],
+      {
+        cwd,
+        encoding: "utf8",
+        timeout: 5_000,
+        env: {
+          ...process.env,
+          JAVA_TOOL_OPTIONS: "-Xmx64m",
+          TAU_SANDBOX_JVM_PROXY: "127.0.0.1:17891",
+        },
+      },
+    );
+    assert.equal(
+      output,
+      "-Xmx64m -Djava.net.preferIPv4Stack=true -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=17891 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=17891\nunset",
+    );
   });
 
   // Native Seatbelt behavior, not the scripted OS boundary in sandbox.test.ts.
