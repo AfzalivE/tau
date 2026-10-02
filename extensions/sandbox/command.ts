@@ -83,6 +83,23 @@ function normalizeSubcommand(token?: string): string | undefined {
   }
 }
 
+function parseDebugToggle(token?: string): boolean | null {
+  switch (token?.toLowerCase()) {
+    case "on":
+    case "enable":
+    case "enabled":
+    case "true":
+      return true;
+    case "off":
+    case "disable":
+    case "disabled":
+    case "false":
+      return false;
+    default:
+      return null;
+  }
+}
+
 type CommandCompletionOption = {
   value: string;
   label?: string;
@@ -335,7 +352,9 @@ function renderSandboxDoctorReport(options: {
     `- Excluded-command execution: ${runtime.config?.commands.exclusionsEnabled === false ? "disabled" : "enabled"}`,
     `- Audit log: ${runtime.auditLog}`,
     `- Runtime debug logs: ${runtime.describeDebugLogging()}`,
-    ...runtime.debugLines.map((line) => `  ${line.text}`),
+    ...runtime.debugLines.map(
+      (line) => `  [${formatSandboxEventTimestamp(line.timestamp)}] ${line.text}`,
+    ),
   ];
 
   if (configPaths.length === 0) {
@@ -411,11 +430,12 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
       }
 
       if (subcommand === "debug") {
-        if (tokens.length !== 2 || !["on", "off"].includes(tokens[1])) {
+        const enabled = parseDebugToggle(tokens[1]);
+        if (tokens.length !== 2 || enabled === null) {
           notify(ctx, "Usage: /sandbox debug <on|off>", "warning");
           return;
         }
-        runtime.setDebugLogging(tokens[1] === "on");
+        runtime.setDebugLogging(enabled);
         notify(ctx, `Sandbox runtime debug logs ${runtime.describeDebugLogging()}`);
         return;
       }

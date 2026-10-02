@@ -118,6 +118,8 @@ Tau writes a private JSONL audit log for each Pi session under `~/.pi/agent/logs
 
 The log can contain commands and local paths. Tau creates it with mode `0600` inside a `0700` directory on POSIX systems. Runtime coverage depends on sandbox-runtime and the operating system. Violations filtered by `ignoreViolations` are not reported. Linux runtime monitoring currently reports denied writes but cannot report every denied read.
 
+Runtime debug logging is off by default. Use `/sandbox debug on` or `/sandbox debug off` to change it for the session. Toggle values are case-insensitive: `enable`, `enabled`, and `true` also turn logging on; `disable`, `disabled`, and `false` turn it off. `/sandbox doctor` shows captured debug lines with timestamps.
+
 ### JVM HTTP clients in the macOS sandbox
 
 Java and Kotlin HTTP clients can ignore `HTTP_PROXY` and `HTTPS_PROXY`. On macOS, opt in to Tau's JVM proxy adapter when these clients need sandboxed network access:

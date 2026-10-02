@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
 - Restored compact sandbox permission panels for filesystem, network, and macOS service requests.
+- Accepted case-insensitive sandbox debug aliases and included capture timestamps in `/sandbox doctor` diagnostics.
 
 ### Security
 
