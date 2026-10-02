@@ -149,6 +149,42 @@ describe("sandbox", { concurrency: false }, () => {
     assert.equal(await pi.bash(probe), "sandboxed squid\n");
   });
 
+  test("strict sandbox mode rejects every outside-sandbox route and passes restrictions to children", async () => {
+    const commands = { blocked: ["touch"], excluded: ["printf"], exclusionsEnabled: true };
+    await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), commands }));
+    pi = await openSandbox(cwd, sandbox, failures, { flags: { "sandbox-required": true } });
+    await assert.rejects(
+      pi.bash("printf escaped", { requestUnsandboxed: true }),
+      /Sandbox is required/,
+    );
+    await assert.rejects(pi.bash("printf escaped"), /matches commands.excluded/);
+    await assert.rejects(
+      pi.bash("touch escaped", { requestUnsandboxed: true }),
+      /blocked executable/,
+    );
+    assert.equal(pi.permissionCount(), 0);
+    const inheritedPolicy = structuredClone(pi.handoff().config);
+    const handoff = pi.handoff().config as { required: boolean; commands: typeof commands };
+    assert.equal(handoff.required, true);
+    assert.deepEqual(handoff.commands, commands);
+    handoff.commands.blocked.length = 0;
+    await assert.rejects(pi.bash("touch escaped"), /blocked executable/);
+    await pi.command("disable");
+    await assert.rejects(pi.bash("printf escaped"), /Sandbox is required but is not active/);
+    assert.match(pi.handoff().error ?? "", /required/);
+    assert.match(await pi.command("doctor"), /excluded-command/);
+    await pi.dispose();
+    const childConfig = path.join(directory, "child-sandbox.json");
+    await writeFile(childConfig, JSON.stringify(inheritedPolicy));
+    pi = await openSandbox(cwd, sandbox, failures, { flags: { "sandbox-config": childConfig } });
+    await assert.rejects(
+      pi.bash("printf escaped", { requestUnsandboxed: true }),
+      /Sandbox is required/,
+    );
+    await assert.rejects(pi.bash("touch escaped"), /blocked executable/);
+    assert.equal(pi.permissionCount(), 0);
+  });
+
   test("disabled exclusions stay sandboxed and audit runtime violations even after command success", async () => {
     const commands = { blocked: [], excluded: ["printf"], exclusionsEnabled: false };
     await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), commands }));
@@ -974,6 +1010,7 @@ exit 73`,
               ...expectedPolicy,
               enabled: true,
               mode: "interactive",
+              required: false,
               debug: false,
               commands: { blocked: [], excluded: [], exclusionsEnabled: true },
               network: { ...expectedPolicy.network, jvmProxy: false },

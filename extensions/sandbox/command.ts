@@ -47,6 +47,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  --no-sandbox",
     "  --sandbox-config <path>",
     "  --sandbox-debug",
+    "  --sandbox-required (Bash tool must stay sandboxed)",
   ];
   notify(ctx, lines.join("\n"), "info");
 }

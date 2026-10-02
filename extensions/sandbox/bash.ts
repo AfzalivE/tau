@@ -127,6 +127,7 @@ interface SandboxedBashOpsOptions {
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
   getPromptMode: () => PromptMode;
   getJvmProxyEndpoint: () => JvmProxyEndpoint | null;
+  isRequired: () => boolean;
   checkCommand: (command: string, cwd: string) => string | undefined;
   applyRuntimeConfigForSession: (
     ctx: ExtensionContext,
@@ -228,6 +229,7 @@ export function createUnsandboxedBashOps(
 ): BashOperations {
   function assertAvailable(): void {
     if (invocationSignal.aborted) throw new Error("aborted");
+    if (runtime.required) throw new Error("Sandbox is required; unsandboxed execution is blocked.");
     if (runtime.state.status !== "active") {
       throw new Error("Unsandboxed request denied: the sandbox must be active.");
     }
@@ -284,6 +286,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     getRuntimeConfig,
     getPromptMode,
     getJvmProxyEndpoint,
+    isRequired,
     checkCommand,
     applyRuntimeConfigForSession,
     recordEvent,
@@ -751,17 +754,21 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
         const config = getSandboxConfig()?.commands ?? DEFAULT_COMMAND_CONFIG;
         const excluded = findExcludedCommand(command, config.excluded, config.exclusionsEnabled);
         if (excluded) {
-          const summary = `command bypassed sandbox via commands.excluded entry \`${excluded.pattern}\``;
+          const required = isRequired();
+          const summary = required
+            ? `Sandbox is required, but this command matches commands.excluded entry \`${excluded.pattern}\`. Disable exclusions to test it inside the sandbox.`
+            : `command bypassed sandbox via commands.excluded entry \`${excluded.pattern}\``;
           recordEvent?.({
             timestamp: Date.now(),
             kind: "command",
-            outcome: "allowed",
+            outcome: required ? "blocked" : "allowed",
             reason: "excluded-command",
             target: excluded.executable,
             command,
             cwd,
             summary,
           });
+          if (required) throw new Error(summary);
           const message = `[sandbox] Running excluded command outside sandbox: ${excluded.rawExecutable} (matched ${excluded.pattern})`;
           onData(Buffer.from(`${message}\n`));
           const ctx = getContext();

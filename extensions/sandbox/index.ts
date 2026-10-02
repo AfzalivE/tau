@@ -80,6 +80,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     type: "string",
   });
 
+  pi.registerFlag("sandbox-required", {
+    description:
+      "Require sandboxed Bash execution; refuse disabled configs, exclusions, and unsandboxed approval",
+    type: "boolean",
+    default: false,
+  });
   pi.registerFlag("sandbox-debug", {
     description: "Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG)",
     type: "boolean",
@@ -109,6 +115,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       .withPermissionContext(ctx, request.signal, async (_ctx, signal) => {
         if (
           !ctx.hasUI ||
+          runtime.required ||
           runtime.state.status !== "active" ||
           runtime.promptMode !== "interactive"
         ) {
@@ -123,6 +130,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               ? await ctx.ui.select(title, choices, { signal })
               : undefined;
         return signal.aborted ||
+          runtime.required ||
           runtime.state.status !== "active" ||
           runtime.promptMode !== "interactive"
           ? undefined
@@ -139,6 +147,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         ...cloned,
         enabled: true,
         mode: runtime.promptMode,
+        required: runtime.required,
         debug: runtime.config?.debug,
         commands: structuredClone(runtime.config?.commands),
         network: { ...cloned.network, jvmProxy: runtime.config?.network.jvmProxy },
@@ -149,7 +158,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         },
       };
     } else if (runtime.state.status === "bypassed" || runtime.state.status === "suspended") {
-      handoff.config = { enabled: false, commands: structuredClone(runtime.config?.commands) };
+      if (runtime.required) handoff.error = "Sandbox is required but is not active.";
+      else handoff.config = { enabled: false, commands: structuredClone(runtime.config?.commands) };
     } else {
       handoff.error = "Sandbox is not ready. Fix its setup before starting a subagent.";
     }
@@ -161,6 +171,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     getRuntimeConfig: () => runtime.getRuntimeConfig(),
     getPromptMode: () => runtime.promptMode,
     getJvmProxyEndpoint: runtime.getJvmProxyEndpoint,
+    isRequired: () => runtime.required,
     checkCommand: runtime.checkCommand,
     applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
     recordEvent: runtime.recordEvent,
@@ -211,7 +222,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       }
       const state = runtime.state;
       if (state.status !== "active") {
-        const allowsUnsandboxed = state.status === "bypassed" || state.status === "suspended";
+        const allowsUnsandboxed =
+          !runtime.required && (state.status === "bypassed" || state.status === "suspended");
         if (!allowsUnsandboxed) {
           const runMode = getSandboxRunMode(state);
 
@@ -231,6 +243,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               "Sandbox session initialization is incomplete. Retry after session startup or run /sandbox enable.";
           }
 
+          if (runtime.required)
+            reason = `Sandbox is required but is not active (${runMode}). Check the configuration and sandbox startup diagnostics.`;
           runtime.recordEvent({
             timestamp: Date.now(),
             kind: "runtime",

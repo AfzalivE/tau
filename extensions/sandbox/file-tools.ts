@@ -15,7 +15,7 @@ export function registerFileToolGuard(pi: ExtensionAPI, runtime: SandboxRuntime)
     const inactiveReason =
       "Sandbox is not active and native file-tool execution is blocked. Fix sandbox setup and run /sandbox enable, or restart with --no-sandbox.";
     if (runtime.state.status !== "active") {
-      if (["bypassed", "suspended"].includes(runtime.state.status)) return;
+      if (!runtime.required && ["bypassed", "suspended"].includes(runtime.state.status)) return;
       runtime.recordEvent({
         timestamp: Date.now(),
         kind: "runtime",

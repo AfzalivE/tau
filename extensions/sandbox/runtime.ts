@@ -85,6 +85,7 @@ export interface SandboxRuntime {
   readonly context: ExtensionContext | null;
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
+  readonly required: boolean;
   readonly auditLog: string;
   readonly debugLines: SandboxDebugLine[];
   describeDebugLogging(): string;
@@ -497,6 +498,13 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
     if (parseErrors.length > 0) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
+      if (pi.getFlag("sandbox-required") === true || loadedConfig.config.required) {
+        requestShutdownWithError(
+          ctx,
+          "Sandbox is required; refusing to run with invalid configuration.",
+        );
+        return null;
+      }
     }
     sandboxConfig = loadedConfig.config;
     debug.setEnabled(sandboxConfig.debug === true || pi.getFlag("sandbox-debug") === true);
@@ -752,6 +760,9 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     },
     get events() {
       return sandboxEvents;
+    },
+    get required() {
+      return pi.getFlag("sandbox-required") === true || sandboxConfig?.required === true;
     },
     get auditLog() {
       return auditError ? `failed (${auditPath}): ${auditError}` : (auditPath ?? "not initialized");
