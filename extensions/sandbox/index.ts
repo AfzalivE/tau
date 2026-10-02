@@ -140,6 +140,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         enabled: true,
         mode: runtime.promptMode,
         debug: runtime.config?.debug,
+        commands: structuredClone(runtime.config?.commands),
         network: { ...cloned.network, jvmProxy: runtime.config?.network.jvmProxy },
         filesystem: {
           ...cloned.filesystem,
@@ -148,7 +149,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         },
       };
     } else if (runtime.state.status === "bypassed" || runtime.state.status === "suspended") {
-      handoff.config = { enabled: false };
+      handoff.config = { enabled: false, commands: structuredClone(runtime.config?.commands) };
     } else {
       handoff.error = "Sandbox is not ready. Fix its setup before starting a subagent.";
     }
@@ -160,6 +161,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     getRuntimeConfig: () => runtime.getRuntimeConfig(),
     getPromptMode: () => runtime.promptMode,
     getJvmProxyEndpoint: runtime.getJvmProxyEndpoint,
+    checkCommand: runtime.checkCommand,
     applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
     recordEvent: runtime.recordEvent,
   });
@@ -184,6 +186,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     }),
     async execute(id, params, signal, onUpdate, ctx) {
       const { command, timeout, requestUnsandboxed } = params;
+      const blocked = runtime.checkCommand(command, ctx.cwd);
+      if (blocked) throw new Error(blocked);
       if (requestUnsandboxed !== undefined && typeof requestUnsandboxed !== "boolean") {
         throw new Error("requestUnsandboxed must be a boolean.");
       }
@@ -244,6 +248,19 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       runtime.captureContext(ctx);
       return sandboxedBashTool.execute(id, params, signal, onUpdate, ctx);
     },
+  });
+
+  pi.on("tool_call", (event, ctx) => {
+    if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
+    const reason = runtime.checkCommand(event.input.command, ctx.cwd);
+    return reason ? { block: true, reason } : undefined;
+  });
+  pi.on("user_bash", (event, ctx) => {
+    const reason = runtime.checkCommand(event.command, ctx.cwd);
+    if (reason)
+      return {
+        result: { output: `${reason}\n`, exitCode: 126, cancelled: false, truncated: false },
+      };
   });
 
   pi.on("session_start", async (event, ctx) => {

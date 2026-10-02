@@ -10,6 +10,7 @@ import {
   subscribeToNewViolations,
   type SandboxAuditLog,
 } from "./audit-log.js";
+import { findBlockedCommand } from "./command-policy.js";
 import { createSandboxDebugLog, type SandboxDebugLine } from "./debug.js";
 import { JvmProxyAdapter } from "./jvm-proxy-adapter.js";
 import type { JvmProxyEndpoint } from "./jvm-proxy-options.js";
@@ -48,8 +49,10 @@ export type SandboxState =
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
 
-type SandboxEventKind = "filesystem" | "network" | "mach-lookup" | "init" | "runtime";
+type SandboxEventKind = "filesystem" | "network" | "mach-lookup" | "init" | "runtime" | "command";
 export type SandboxEventReason =
+  | "blocked-command"
+  | "excluded-command"
   | "explicit-deny-read"
   | "explicit-deny-write"
   | "explicit-deny-domain"
@@ -87,6 +90,7 @@ export interface SandboxRuntime {
   describeDebugLogging(): string;
   setDebugLogging(enabled: boolean): void;
   getJvmProxyEndpoint(): JvmProxyEndpoint | null;
+  checkCommand(command: string, cwd: string): string | undefined;
   getRuntimeConfig(): SandboxRuntimeConfig | null;
   captureContext(ctx: ExtensionContext): void;
   withPermissionContext<T>(
@@ -311,6 +315,23 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     auditLog?.append("session-stop", { reason });
     auditLog?.close();
     auditLog = null;
+  }
+
+  function checkCommand(command: string, cwd: string): string | undefined {
+    const match = findBlockedCommand(command, sandboxConfig?.commands.blocked ?? []);
+    if (!match) return undefined;
+    const summary = `Sandbox blocked executable \`${match.rawExecutable}\` (matched commands.blocked entry \`${match.blocked}\`).`;
+    recordSandboxEvent({
+      timestamp: Date.now(),
+      kind: "command",
+      outcome: "blocked",
+      reason: "blocked-command",
+      target: match.executable,
+      command,
+      cwd,
+      summary,
+    });
+    return summary;
   }
 
   async function closeJvmProxy(): Promise<void> {
@@ -744,6 +765,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       const port = jvmProxyAdapter?.activePort;
       return port ? { host: "127.0.0.1", port } : null;
     },
+    checkCommand,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     captureContext(ctx) {
       sessionContext = permissionContext(ctx);

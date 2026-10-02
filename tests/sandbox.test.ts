@@ -149,6 +149,39 @@ describe("sandbox", { concurrency: false }, () => {
     assert.equal(await pi.bash(probe), "sandboxed squid\n");
   });
 
+  test("disabled exclusions stay sandboxed and audit runtime violations even after command success", async () => {
+    const commands = { blocked: [], excluded: ["printf"], exclusionsEnabled: false };
+    await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), commands }));
+    const probe = "printf 'sandboxed squid\\n'";
+    const violation = `bash(42) deny(1) file-write-data ${target}`;
+    boundary.attempts(probe, [{ script: probe, violation }]);
+    pi = await openSandbox(cwd, sandbox, failures);
+    assert.equal(await pi.bash(probe), "sandboxed squid\n");
+    const sessionId = pi.session.sessionId;
+    await pi.dispose();
+    const records = (
+      await readFile(path.join(getAgentDir(), "logs", "sandbox", `${sessionId}.jsonl`), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.ok(
+      records.some(
+        (record) =>
+          record.type === "configuration" &&
+          record.data.policy.commands.exclusionsEnabled === false,
+      ),
+    );
+    assert.ok(
+      records.some(
+        (record) => record.type === "runtime-violation" && record.data.line === violation,
+      ),
+    );
+    assert.ok(
+      records.some((record) => record.type === "session-stop" && record.data.reason === "quit"),
+    );
+  });
+
   test(
     "JVM sessions pass the adapter endpoint to Bash, retain its port on re-enable, and configure children",
     { skip: process.platform !== "darwin" },
@@ -249,7 +282,10 @@ describe("sandbox", { concurrency: false }, () => {
 
         await pi.command("disable");
         assert.equal(pi.status(), "");
-        assert.deepEqual(pi.handoff().config, { enabled: false });
+        assert.deepEqual(pi.handoff().config, {
+          enabled: false,
+          commands: { blocked: [], excluded: [], exclusionsEnabled: true },
+        });
         assert.equal(
           await pi.bash(probe),
           "kraken ready\n",
@@ -939,6 +975,7 @@ exit 73`,
               enabled: true,
               mode: "interactive",
               debug: false,
+              commands: { blocked: [], excluded: [], exclusionsEnabled: true },
               network: { ...expectedPolicy.network, jvmProxy: false },
               filesystem: {
                 ...expectedPolicy.filesystem,

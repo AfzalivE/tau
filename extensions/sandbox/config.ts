@@ -14,10 +14,23 @@ type DefaultConfigExtension = {
   ignoreViolations?: string[];
 };
 
+export interface SandboxCommandConfig {
+  blocked: string[];
+  excluded: string[];
+  exclusionsEnabled: boolean;
+}
+
+export const DEFAULT_COMMAND_CONFIG: SandboxCommandConfig = {
+  blocked: [],
+  excluded: [],
+  exclusionsEnabled: true,
+};
+
 export type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem" | "network"> & {
   enabled?: boolean;
   mode?: PromptMode;
   debug?: boolean;
+  commands: SandboxCommandConfig;
   network: SandboxRuntimeConfig["network"] & { jvmProxy?: boolean };
   filesystem: SandboxRuntimeConfig["filesystem"] & {
     allowTempDirs?: boolean;
@@ -49,6 +62,7 @@ const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
   debug: false,
+  commands: DEFAULT_COMMAND_CONFIG,
   network: {
     jvmProxy: false,
     allowedDomains: [
@@ -362,6 +376,15 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
     debug: coerceBoolean(config.debug, false, "debug"),
+    commands: {
+      blocked: coerceStringArray(config.commands?.blocked, [], "commands.blocked"),
+      excluded: coerceStringArray(config.commands?.excluded, [], "commands.excluded"),
+      exclusionsEnabled: coerceBoolean(
+        config.commands?.exclusionsEnabled,
+        true,
+        "commands.exclusionsEnabled",
+      ),
+    },
     network: {
       ...config.network,
       jvmProxy: coerceBoolean(config.network?.jvmProxy, false, "network.jvmProxy"),
@@ -522,6 +545,9 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
 
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
   if (overrides.debug !== undefined) result.debug = overrides.debug;
+  if (isPlainObject(overrides.commands)) {
+    result.commands = { ...base.commands, ...overrides.commands };
+  }
   if (overrides.mode !== undefined) {
     result.mode = normalizePromptMode(overrides.mode);
   }
