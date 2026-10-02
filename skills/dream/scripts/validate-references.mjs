@@ -116,7 +116,6 @@ async function walkMarkdownFiles(rootDir, relativeDir) {
     }
 
     const entryRelativePath = relativeDir ? path.posix.join(relativeDir, entry.name) : entry.name;
-    const entryAbsolutePath = path.join(rootDir, entryRelativePath);
 
     if (entry.isDirectory()) {
       files.push(...(await walkMarkdownFiles(rootDir, entryRelativePath)));
@@ -735,7 +734,9 @@ function similarityScore(left, right) {
 }
 
 function levenshteinDistance(left, right) {
-  const matrix = Array.from({ length: left.length + 1 }, () => new Array(right.length + 1).fill(0));
+  const matrix = Array.from({ length: left.length + 1 }, () =>
+    Array.from({ length: right.length + 1 }, () => 0),
+  );
 
   for (let row = 0; row <= left.length; row += 1) {
     matrix[row][0] = row;

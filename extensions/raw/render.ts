@@ -55,12 +55,14 @@ function stringify(value: unknown): string | undefined {
  * Raw mode must not let model or tool output alter terminal rendering.
  */
 export function sanitizeRawText(value: string): string {
+  /* eslint-disable no-control-regex -- Strip terminal controls from untrusted transcript text. */
   return value
     .replace(/\r\n?/g, "\n")
     .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\x1b[()][0-?]*[ -/]*[@-~]?/g, "")
     .replace(/[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F-\u009F]/g, "");
+  /* eslint-enable no-control-regex */
 }
 
 export function assistantRawText(message: unknown, includeThinking = true): string {

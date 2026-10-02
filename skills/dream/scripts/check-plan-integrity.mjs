@@ -397,7 +397,7 @@ function isAllowedPlanChange(metrics) {
 function longestCommonSubsequence(left, right) {
   const rows = left.length + 1;
   const columns = right.length + 1;
-  const matrix = Array.from({ length: rows }, () => new Array(columns).fill(0));
+  const matrix = Array.from({ length: rows }, () => Array.from({ length: columns }, () => 0));
 
   for (let row = 1; row < rows; row += 1) {
     for (let column = 1; column < columns; column += 1) {
