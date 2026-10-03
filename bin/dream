@@ -20,6 +20,7 @@ DRY_RUN=0
 CHECK_ONLY=0
 VERBOSE=0
 RUNNER="$DEFAULT_RUNNER"
+PI_MODEL_PATTERN=""
 WEAKEN_DAYS="$DEFAULT_WEAKEN_DAYS"
 ARCHIVE_DAYS="$DEFAULT_ARCHIVE_DAYS"
 declare -a PROTECTED=("Index.md")
@@ -44,6 +45,10 @@ Dependencies:
   srt       npm install -g @anthropic-ai/sandbox-runtime (if runner=claude)
   claude    npm install -g @anthropic-ai/claude-code (if runner=claude)
   pi        npm install -g @mariozechner/pi-coding-agent (if runner=pi)
+
+Configuration (AGENTS_DIR/config/dream.yaml):
+  pi_model    Optional Pi model pattern, e.g. openai-codex/gpt-6-astra:high
+              Omit or leave empty to use Pi defaults. Only used when runner=pi.
 
 Environment:
   AGENTS_DIR       Personal config root (default: ~/.agents)
@@ -105,6 +110,9 @@ print_audit_summary() {
 print_run_intro() {
   echo "╭─ Dream maintenance"
   box_line "Runner" "$([[ "$RUNNER" == "claude" ]] && echo "claude via srt" || echo "pi via sandbox")"
+  if [[ "$RUNNER" == "pi" ]]; then
+    box_line "Model" "${PI_MODEL_PATTERN:-Pi default}"
+  fi
   box_line "Mode" "$([[ "$VERBOSE" -eq 1 ]] && echo "verbose" || echo "compact")"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     box_line "Dry run" "yes — agent invocation skipped"
@@ -190,6 +198,17 @@ parse_config() {
   val=$(yq '.runner' "$CONFIG_FILE" 2>/dev/null || true)
   [[ -n "$val" && "$val" != "null" ]] && RUNNER="$val"
 
+  if [[ "$RUNNER" == "pi" ]]; then
+    case "$(yq '.pi_model | tag' "$CONFIG_FILE")" in
+      '!!null') ;;
+      '!!str') PI_MODEL_PATTERN=$(yq -r '.pi_model' "$CONFIG_FILE") ;;
+      *)
+        echo "error: pi_model in $CONFIG_FILE must be a string" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
   val=$(yq '.thresholds.weaken_days' "$CONFIG_FILE" 2>/dev/null || true)
   [[ -n "$val" && "$val" != "null" ]] && WEAKEN_DAYS="$val"
 
@@ -263,6 +282,9 @@ run_pi_maintenance() {
     --mode json
   )
 
+  if [[ -n "$PI_MODEL_PATTERN" ]]; then
+    cmd+=(--model "$PI_MODEL_PATTERN")
+  fi
   if [[ "$VERBOSE" -eq 1 ]]; then
     cmd+=(--verbose)
   fi

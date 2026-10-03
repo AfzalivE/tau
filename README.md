@@ -263,6 +263,15 @@ Nightly vault maintenance also lives here:
 
 That wrapper reads dream config from the personal agent-config repo via `AGENTS_DIR`, runs the bundled `dream` skill helpers from this repo, and targets the configured agent-brain vault by default. Set `AGENT_BRAIN_DIR` to override the vault path.
 
+To select a model for the Pi runner, set `pi_model` in `${AGENTS_DIR:-$HOME/.agents}/config/dream.yaml`:
+
+```yaml
+runner: pi
+pi_model: openai-codex/gpt-6-astra:high
+```
+
+The value is passed directly to Pi’s `--model` option. It supports `provider/model` and an optional `:thinking` suffix. Omit `pi_model`, set it to `null`, or leave it empty to use Pi defaults. The Claude runner ignores this setting.
+
 ### Extensions in this fork
 
 Bundled in `afzal-tau-all-agent`.

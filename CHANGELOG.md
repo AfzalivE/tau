@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
+- Added an optional `pi_model` setting to select Dream’s Pi model and thinking level without changing Pi defaults.
 - Added “Always allow and retry” for global sandbox permissions that persist across Pi sessions, while preserving project overrides and one-time unsandboxed approvals.
 - Added per-session sandbox audit logs, an exclusion disable switch, and a strict standalone `sandbox-run` command.
 - Added the `fix-ci` skill for gated CI diagnosis, focused fixes, approved reruns, and post-push verification.
