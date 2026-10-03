@@ -13,6 +13,7 @@ Verified against `gh` 2.100.0. Check `gh --version` and command `--help` when fl
 - Treat merges, reviews, comments, edits, and workflow reruns as remote changes. Run them only within the approved task.
 - `gh pr create --dry-run` can still push commits. Use `--head` to skip automatic pushing and forking.
 - Use `--body-file` for multiline Markdown to avoid shell quoting errors.
+- Use `--attach` to upload images or videos. Do not ask the user to upload files in a browser (see Attachments).
 
 ## Repo Targeting
 
@@ -62,7 +63,7 @@ gh pr create -t "title" -b "body" [-B base] [-H head] [-r reviewer] [-l label] [
 - `--fill-verbose` uses commit msg+body for description
 - `-F file` reads body from file; `-F -` reads stdin
 - `--head branch` selects an already-pushed branch without automatic pushing or forking
-- `--attach` uploads images or videos (see Attachments)
+- `--attach file[#alt]` uploads images or videos (see Attachments)
 
 ### Edit
 
@@ -74,28 +75,6 @@ gh pr edit 123 -R OWNER/REPO --add-label bug --remove-label triage
 ```
 
 `--add-reviewer` also re-requests review. Project changes require the `project` auth scope.
-
-### Attachments
-
-Use `gh pr create --attach` or `gh pr edit --attach` with the existing CLI login. A browser upload is unnecessary.
-
-```bash
-# body.md contains: ![Login error](./login.png)
-gh pr create -R OWNER/REPO --head feature --base main \
-  --title "Fix login" --body-file body.md \
-  --attach './login.png#Login error'
-
-# Preserve the existing body and append an image.
-gh pr edit 123 -R OWNER/REPO --attach './after.png#After the fix'
-```
-
-- Repeat `--attach` for multiple files, up to 50 per command.
-- Use the exact same file path in the body and attachment flag. An absolute attachment path does not match a `./filename.png` body reference.
-- Matching body references are rewritten to uploaded URLs. Otherwise, attachments are appended. Existing body references keep their alt text.
-- Images accept `#alt text`; videos render as players and do not accept alt text.
-- For more than 50 files, upload in batches. Fetch the updated body before each later body replacement to preserve uploaded URLs.
-- For a PR template with sized images, upload first, then use the returned URLs in HTML such as `<img src="UPLOADED_URL" width="150">`.
-- Partial upload failure can still create or update the PR. A nonzero exit status does not mean no change occurred. Check the printed PR URL and body before retrying.
 
 ### View
 
@@ -138,7 +117,7 @@ gh pr diff [<number>] [--name-only] [--patch]
 ### Comment
 
 ```
-gh pr comment [<number>] -b "text"
+gh pr comment [<number>] -b "text" [--attach file[#alt]]
 gh pr comment [<number>] --edit-last -b "updated"
 gh pr comment [<number>] --delete-last --yes
 ```
@@ -160,6 +139,7 @@ gh issue create -t "title" -b "body" [-l label] [-a assignee] [-m milestone] [-p
 ```
 
 - `-a @me` self-assigns
+- `--attach file[#alt]` uploads images or videos (see Attachments)
 
 ### View
 
@@ -172,10 +152,42 @@ gh issue view <number> [-c] [--json fields] [-w]
 ```
 gh issue close <number>
 gh issue reopen <number>
-gh issue comment <number> -b "text"
-gh issue edit <number> [--add-label x] [--title "new"]
+gh issue comment <number> -b "text" [--attach file[#alt]]
+gh issue edit <number> [--add-label x] [--title "new"] [--attach file[#alt]]
 gh issue develop <number>          # manage linked branches
 ```
+
+## Attachments
+
+These commands accept `--attach` and use the existing CLI login:
+
+- `gh pr create`, `gh pr edit`, `gh pr comment`
+- `gh issue create`, `gh issue edit`, `gh issue comment`
+
+`gh pr review`, `gh release create`, and `gh api` do not accept `--attach`. To include media there, upload it with one of the commands above first and reuse the returned URL.
+
+```bash
+# body.md contains: ![Login error](./login.png)
+gh pr create -R OWNER/REPO --head feature --base main \
+  --title "Fix login" --body-file body.md \
+  --attach './login.png#Login error'
+
+# Preserve the existing body and append an image.
+gh pr edit 123 -R OWNER/REPO --attach './after.png#After the fix'
+
+# Comment with before/after screenshots.
+gh issue comment 45 -R OWNER/REPO -b "Repro on Pixel 8" \
+  --attach ./before.png --attach ./after.png
+```
+
+- Repeat `--attach` for multiple files, up to 50 per command.
+- Use the exact same file path in the body and attachment flag. An absolute attachment path does not match a `./filename.png` body reference.
+- Matching body references are rewritten to uploaded URLs. Otherwise, attachments are appended. Existing body references keep their alt text.
+- Images accept `#alt text`; videos render as players and do not accept alt text.
+- For more than 50 files, upload in batches. Fetch the updated body before each later body replacement to preserve uploaded URLs.
+- For a PR template with sized images, upload first, then use the returned URLs in HTML such as `<img src="UPLOADED_URL" width="150">`.
+- `edit` without a body flag keeps the existing body and appends the attachments. `issue edit --attach` accepts only one issue.
+- Partial upload failure can still create or update the PR, issue, or comment. A nonzero exit status does not mean no change occurred. Check the printed URL and body before retrying.
 
 ## Search
 

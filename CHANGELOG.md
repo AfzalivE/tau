@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
+- Documented `gh --attach` uploads for issues and PR/issue comments in the `gh` skill, in addition to PR create and edit.
 - Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
 - Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
 - Installed the Claude and Codex ACP adapters with `tau-acp-client` instead of downloading them at runtime through `npx`.
