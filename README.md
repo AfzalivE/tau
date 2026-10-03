@@ -100,6 +100,14 @@ ssh-add --apple-load-keychain
 
 A user LaunchAgent can run this command at login. While a key is loaded, sandboxed processes that can reach `$SSH_AUTH_SOCK` can ask the agent to sign with it.
 
+### Saved sandbox approvals
+
+**Always allow and retry** saves the selected permission in the global `<agent-dir>/sandbox.json` (normally `~/.pi/agent/sandbox.json`). Future Pi sessions use that permission across projects. Other approval choices and `/sandbox` policy commands remain session-only.
+
+Project configuration and `--sandbox-config` keep their existing precedence. If they still block the requested access, the global save is rejected without changing the file or granting access. Save failures also prevent retry. After the file is saved, cancellation or a new deny rule can block retry without removing the saved approval. Explicit network denies and mandatory filesystem protections remain in force. To revoke a saved approval, edit the global sandbox configuration; existing sessions retain their live policy until restarted or reloaded.
+
+Per-command approval to run **outside** the sandbox remains one-time and cannot be saved.
+
 ### Sandbox exclusions and audit logs
 
 `commands.excluded` runs matching commands outside the OS sandbox. Disable that execution path while keeping the configured list intact with:

@@ -16,7 +16,8 @@ export interface NetworkPermissionOptions {
   isSuspended: () => boolean;
   getPromptMode: () => PromptMode;
   canPrompt: () => boolean;
-  requestApproval: (request: NetworkApprovalRequest) => Promise<boolean>;
+  requestApproval: (request: NetworkApprovalRequest) => Promise<boolean | "always">;
+  saveApproval?: (host: string) => Promise<boolean>;
   applyRuntimeConfig: (runtimeConfig: SandboxRuntimeConfig) => void;
   recordEvent: (event: NetworkSandboxEvent) => void;
   notify: (message: string, level: "info" | "warning") => void;
@@ -81,7 +82,7 @@ async function resolveNetworkPermission(
       return false;
     }
 
-    const latestConfig = options.getRuntimeConfig();
+    let latestConfig = options.getRuntimeConfig();
     if (!latestConfig) return false;
     if (matchesDomainList(host, latestConfig.network.deniedDomains)) {
       recordNetworkEvent(options, "blocked", "explicit-deny-domain", host, port);
@@ -91,16 +92,49 @@ async function resolveNetworkPermission(
       );
       return false;
     }
+    if (approved === "always") {
+      if (!(await options.saveApproval?.(host))) {
+        recordNetworkEvent(options, "blocked", "missing-allowed-domain", host, port);
+        return false;
+      }
+      latestConfig = options.getRuntimeConfig();
+      if (!latestConfig) return false;
+      if (matchesDomainList(host, latestConfig.network.deniedDomains)) {
+        recordNetworkEvent(options, "blocked", "explicit-deny-domain", host, port);
+        options.notify(
+          `Permission saved globally, but current policy still denies ${host}.`,
+          "warning",
+        );
+        return false;
+      }
+    }
     if (matchesDomainList(host, latestConfig.network.allowedDomains)) {
-      recordNetworkEvent(options, "allowed", "missing-allowed-domain", host, port);
+      recordNetworkEvent(
+        options,
+        "allowed",
+        "missing-allowed-domain",
+        host,
+        port,
+        approved === "always",
+      );
       return true;
     }
 
     const nextConfig = structuredClone(latestConfig);
     nextConfig.network.allowedDomains.push(host);
     options.applyRuntimeConfig(nextConfig);
-    recordNetworkEvent(options, "allowed", "missing-allowed-domain", host, port);
-    options.notify(`Allowed network domain for this session: ${host}`, "info");
+    recordNetworkEvent(
+      options,
+      "allowed",
+      "missing-allowed-domain",
+      host,
+      port,
+      approved === "always",
+    );
+    options.notify(
+      `Allowed network domain ${approved === "always" ? "globally" : "for this session"}: ${host}`,
+      "info",
+    );
     return true;
   } catch (error) {
     options.notify(
@@ -117,6 +151,7 @@ function recordNetworkEvent(
   reason: NetworkEventReason,
   host: string,
   port?: number,
+  saved = false,
 ): void {
   options.recordEvent({
     timestamp: options.now?.() ?? Date.now(),
@@ -125,7 +160,9 @@ function recordNetworkEvent(
     reason,
     target: port ? `${host}:${port}` : host,
     cwd: options.getCwd(),
-    summary: describeNetworkEventSummary(reason, outcome),
+    summary: saved
+      ? "user allowed network domain globally"
+      : describeNetworkEventSummary(reason, outcome),
     suggestedCommand: outcome === "blocked" ? buildNetworkBlockCommand(reason, host) : undefined,
   });
 }

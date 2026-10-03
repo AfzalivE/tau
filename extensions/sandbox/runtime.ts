@@ -30,6 +30,11 @@ import {
   type SandboxConfigPath,
 } from "./config.js";
 import { createNetworkPermissions } from "./permissions/network.js";
+import {
+  saveGlobalPermission,
+  SandboxPermissionSaveError,
+  type SandboxPermissionChange,
+} from "./permissions/persistence.js";
 import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
 
 const STATUS_KEY = "sandbox";
@@ -94,6 +99,7 @@ export interface SandboxRuntime {
   checkCommand(command: string, cwd: string): string | undefined;
   getRuntimeConfig(): SandboxRuntimeConfig | null;
   captureContext(ctx: ExtensionContext): void;
+  withBashContext<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T>;
   withPermissionContext<T>(
     ctx: ExtensionContext,
     signal: AbortSignal | undefined,
@@ -105,6 +111,11 @@ export interface SandboxRuntime {
   disable(ctx: ExtensionContext): Promise<void>;
   setPromptMode(ctx: ExtensionContext, mode: PromptMode): void;
   applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxRuntimeConfig): void;
+  savePermission(
+    ctx: ExtensionContext,
+    change: SandboxPermissionChange,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   recordEvent(event: SandboxEvent): void;
 }
 
@@ -248,6 +259,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let sandboxConfig: SandboxConfig | null = null;
   let promptMode: PromptMode = DEFAULT_PROMPT_MODE;
   let sessionContext: ExtensionContext | null = null;
+  let commandSignal: AbortSignal | undefined;
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
   const warnedSkippedProjectConfigPaths = new Set<string>();
@@ -404,12 +416,63 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
+  function savePermission(
+    ctx: ExtensionContext,
+    change: SandboxPermissionChange,
+    operationSignal?: AbortSignal,
+  ): Promise<boolean> {
+    const signals = [permissionLifetime.signal, ctx.signal, operationSignal].filter(
+      (signal): signal is AbortSignal => signal !== undefined,
+    );
+    const signal = AbortSignal.any(signals);
+    const operation = (async () => {
+      if (signal.aborted || sandboxState.status !== "active") return false;
+      try {
+        const saved = await saveGlobalPermission(ctx.cwd, change, {
+          projectTrusted: ctx.isProjectTrusted(),
+          overrideConfigPath: getStringFlag(pi, "sandbox-config"),
+          signal,
+        });
+        auditLog?.append("persistent-permission", {
+          ...change,
+          ...saved,
+          cancelled: signal.aborted,
+        });
+        if (signal.aborted) return false;
+        notify(
+          ctx,
+          `${saved.changed ? "Saved sandbox permission globally" : "Sandbox permission is already allowed globally"}: ${saved.path}`,
+        );
+        return sandboxState.status === "active";
+      } catch (error) {
+        const published = error instanceof SandboxPermissionSaveError && error.saved;
+        auditLog?.append("persistent-permission", {
+          ...change,
+          path: error instanceof SandboxPermissionSaveError ? error.path : undefined,
+          saved: published,
+          error: error instanceof Error ? error.message : String(error),
+          cancelled: signal.aborted,
+        });
+        if (!signal.aborted)
+          notify(
+            ctx,
+            `${published ? "Permission is saved globally; retry was cancelled" : "Could not save sandbox permission"}: ${error instanceof Error ? error.message : String(error)}`,
+            published ? "warning" : "error",
+          );
+        return false;
+      }
+    })();
+    permissionInvocations.add(operation);
+    return operation.finally(() => permissionInvocations.delete(operation));
+  }
+
   const networkPermissions = createNetworkPermissions({
-    getContext: () => sessionContext,
+    getContext: getPermissionContext,
     getPromptMode: () => promptMode,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     isSuspended: () => sandboxState.status === "suspended",
     applyRuntimeConfigForSession,
+    savePermission,
     recordEvent: recordSandboxEvent,
     notify,
   });
@@ -528,7 +591,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     debug.start();
     permissionLifetime = new AbortController();
     setSandboxStatus(ctx, false);
-    sessionContext = permissionContext(ctx);
+    sessionContext = ctx;
     resetRuntimeState();
     sessionCwd = ctx.cwd;
     startAudit(ctx, reason);
@@ -652,6 +715,32 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
   }
 
+  function getPermissionContext(): ExtensionContext | null {
+    return sessionContext ? permissionContext(sessionContext, commandSignal) : null;
+  }
+
+  /** Bash runs serially; bind proxy requests to that command rather than a later tool invocation. */
+  async function withBashContext<T>(
+    signal: AbortSignal | undefined,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const lifetime = new AbortController();
+    const signals = [
+      lifetime.signal,
+      permissionLifetime.signal,
+      sessionContext?.signal,
+      signal,
+    ].filter((value): value is AbortSignal => value !== undefined);
+    const previousSignal = commandSignal;
+    commandSignal = AbortSignal.any(signals);
+    try {
+      return await run();
+    } finally {
+      lifetime.abort();
+      commandSignal = previousSignal;
+    }
+  }
+
   /** Own invocation-local permission work until its dialog or command has settled. */
   function withPermissionContext<T>(
     ctx: ExtensionContext,
@@ -750,6 +839,14 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       {},
       {
         ...Object.getOwnPropertyDescriptors(ctx),
+        signal: {
+          enumerable: true,
+          configurable: true,
+          get() {
+            const currentSignal = ctx.signal;
+            return contextSignal ?? currentSignal;
+          },
+        },
         ui: {
           enumerable: true,
           configurable: true,
@@ -773,7 +870,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       return promptMode;
     },
     get context() {
-      return sessionContext;
+      return getPermissionContext();
     },
     get configPaths() {
       return sandboxConfigPaths;
@@ -799,8 +896,9 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     checkCommand,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     captureContext(ctx) {
-      sessionContext = permissionContext(ctx);
+      sessionContext = ctx;
     },
+    withBashContext,
     withPermissionContext,
     start,
     shutdown,
@@ -808,6 +906,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     disable,
     setPromptMode,
     applyRuntimeConfigForSession,
+    savePermission,
     recordEvent: recordSandboxEvent,
   };
 }

@@ -73,6 +73,7 @@ export function registerFileToolGuard(pi: ExtensionAPI, runtime: SandboxRuntime)
               },
               pendingDialogs,
               applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
+              savePermission: runtime.savePermission,
               recordEvent: runtime.recordEvent,
               autoRetryAvailable: true,
             });

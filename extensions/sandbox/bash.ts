@@ -133,6 +133,8 @@ interface SandboxedBashOpsOptions {
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
   ) => void;
+  savePermission: SandboxRuntime["savePermission"];
+  withBashContext: SandboxRuntime["withBashContext"];
   recordEvent?: (event: SandboxEvent) => void;
 }
 
@@ -289,6 +291,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     isRequired,
     checkCommand,
     applyRuntimeConfigForSession,
+    savePermission,
+    withBashContext,
     recordEvent,
   } = options;
   const pendingFilesystemDialogs = new Map<string, Promise<PermissionResolution | null>>();
@@ -598,8 +602,9 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     cwd: string;
     runtimeConfig: SandboxRuntimeConfig | null;
     autoRetryAvailable: boolean;
+    signal?: AbortSignal;
   }): Promise<ProcessedSandboxAttempt> {
-    const { attempt, command, commandId, cwd, runtimeConfig, autoRetryAvailable } = options;
+    const { attempt, command, commandId, cwd, runtimeConfig, autoRetryAvailable, signal } = options;
     const annotatedOutput = SandboxManager.annotateStderrWithSandboxFailures(
       commandId,
       attempt.combinedOutput,
@@ -705,6 +710,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
         command,
         cwd,
         pendingDialogs: pendingFilesystemDialogs,
+        savePermission: (ctx, change) => savePermission(ctx, change, signal),
         applyRuntimeConfigForSession,
         recordEvent,
         autoRetryAvailable,
@@ -717,6 +723,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
           ctx: getContext(),
           promptMode: getPromptMode(),
           runtimeConfig: currentRuntimeConfig,
+          getRuntimeConfig,
+          savePermission: (ctx, change) => savePermission(ctx, change, signal),
           violations: machLookupViolations,
           command,
           cwd,
@@ -744,7 +752,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     runSerially,
     async exec(command, cwd, { onData, signal, timeout, env }) {
       validateTimeout(timeout);
-      return runSerially(async () => {
+      const execute = async () => {
         if (!existsSync(cwd)) {
           throw new Error(`Working directory does not exist: ${cwd}`);
         }
@@ -797,6 +805,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
             cwd,
             runtimeConfig: initialRun.runtimeConfig,
             autoRetryAvailable: true,
+            signal,
           });
         } catch (postProcessError) {
           reportPostProcessingError(postProcessError);
@@ -841,6 +850,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
             cwd,
             runtimeConfig: retryRun.runtimeConfig,
             autoRetryAvailable: false,
+            signal,
           });
         } catch (postProcessError) {
           reportPostProcessingError(postProcessError);
@@ -869,7 +879,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
         if (retryPostamble) onData(Buffer.from(retryPostamble));
         safeCleanupAfterCommand();
         return { exitCode: processedRetry.exitCode };
-      }, signal);
+      };
+      return runSerially(() => withBashContext(signal, execute), signal);
     },
   };
 }

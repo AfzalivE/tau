@@ -174,6 +174,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     isRequired: () => runtime.required,
     checkCommand: runtime.checkCommand,
     applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
+    savePermission: runtime.savePermission,
+    withBashContext: runtime.withBashContext,
     recordEvent: runtime.recordEvent,
   });
 

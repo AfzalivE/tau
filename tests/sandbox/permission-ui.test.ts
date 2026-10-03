@@ -372,11 +372,18 @@ describe("sandbox permission UI", () => {
       ),
     });
     const ctx = session.extensionRunner.createContext();
+    let operationSignal: AbortSignal | undefined;
     const request = (signal?: AbortSignal) =>
-      runtime.withPermissionContext(ctx, signal, (invocation) =>
-        showSandboxPermissionSelect(invocation, prompt, choices),
-      );
+      runtime.withPermissionContext(ctx, signal, (invocation) => {
+        operationSignal = invocation.signal;
+        return showSandboxPermissionSelect(invocation, prompt, choices);
+      });
     assert.equal(await request(controller.signal), undefined);
+    assert.equal(
+      operationSignal?.aborted,
+      true,
+      "Post-dialog work must inherit operation cancellation",
+    );
     await assert.rejects(request(controller.signal), /aborted/);
     assert.equal(dialogs, 1, "An already aborted operation must not mount a dialog");
     assert.equal(await request(), choices[1]);

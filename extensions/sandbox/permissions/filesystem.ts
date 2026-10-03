@@ -9,7 +9,13 @@ import {
   type PromptMode,
 } from "../config.js";
 import { inferExactSandboxRuleMatch, inferSandboxRuleMatch } from "../utils.js";
-import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
+import type {
+  SandboxEvent,
+  SandboxEventOutcome,
+  SandboxEventReason,
+  SandboxRuntime,
+} from "../runtime.js";
+import { findFileToolPolicyViolation } from "../file-tool-guard.js";
 import {
   createPermissionResolution,
   showPermissionDialog,
@@ -403,6 +409,7 @@ export async function handleFilesystemViolation(options: {
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
   ) => void;
+  savePermission?: SandboxRuntime["savePermission"];
   recordEvent?: (event: SandboxEvent) => void;
   autoRetryAvailable?: boolean;
   runtimeProtectedWriteViolations?: FilesystemViolation[];
@@ -420,6 +427,7 @@ export async function handleFilesystemViolation(options: {
     cwd,
     pendingDialogs,
     applyRuntimeConfigForSession,
+    savePermission,
     recordEvent,
     autoRetryAvailable = true,
     runtimeProtectedWriteViolations = [],
@@ -456,7 +464,7 @@ export async function handleFilesystemViolation(options: {
   const eventReason = classifyFilesystemEventReason(runtimeConfig, violation, cwd, alreadyApproved);
   const blockedSuggestedCommand = alreadyApproved ? undefined : (allowCommand ?? undefined);
 
-  const recordFilesystemEvent = (outcome: SandboxEventOutcome): void => {
+  const recordFilesystemEvent = (outcome: SandboxEventOutcome, saved = false): void => {
     recordEvent?.({
       timestamp: Date.now(),
       kind: "filesystem",
@@ -465,7 +473,9 @@ export async function handleFilesystemViolation(options: {
       target: violation.path,
       command,
       cwd,
-      summary: describeFilesystemEventSummary(eventReason, violation, outcome),
+      summary: saved
+        ? "user allowed filesystem access globally"
+        : describeFilesystemEventSummary(eventReason, violation, outcome),
       suggestedCommand: outcome === "blocked" ? blockedSuggestedCommand : undefined,
     });
   };
@@ -489,6 +499,7 @@ export async function handleFilesystemViolation(options: {
     return createPermissionResolution("allow-adapt", blockedTarget, false);
   }
 
+  const access = violation.kind === "read" || allowAction.list === "deny-read" ? "read" : "write";
   const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
   return showPermissionDialog({
     ctx,
@@ -512,10 +523,50 @@ export async function handleFilesystemViolation(options: {
     promptKey,
     pendingDialogs,
     autoRetryAvailable,
-    onDecision(decision) {
+    canSave: Boolean(savePermission),
+    async onDecision(decision) {
       if (decision === "deny") {
         recordFilesystemEvent("blocked");
         return createPermissionResolution(decision, blockedTarget);
+      }
+
+      if (decision === "allow-always") {
+        const current = getRuntimeConfig();
+        if (!current) return createPermissionResolution("deny", blockedTarget);
+        const proposed = cloneRuntimeConfig(current);
+        applyFilesystemAllowAction(proposed, allowAction);
+        if (
+          findFileToolPolicyViolation(
+            [{ kind: access, path: violation.path! }],
+            proposed,
+            cwd ?? ctx.cwd,
+          )
+        ) {
+          recordFilesystemEvent("blocked");
+          return {
+            kind: "deny",
+            message: `${blockedTarget}\nCurrent policy still blocks this path. No global approval was saved.`,
+          };
+        }
+        const list =
+          allowAction.list === "deny-read"
+            ? "denyRead"
+            : allowAction.list === "deny-write"
+              ? "denyWrite"
+              : "allowWrite";
+        if (
+          !(await savePermission?.(ctx, {
+            section: "filesystem",
+            list,
+            op: allowAction.op,
+            value: allowAction.value,
+            target: violation.path!,
+            access,
+          }))
+        ) {
+          recordFilesystemEvent("blocked");
+          return createPermissionResolution("deny", blockedTarget);
+        }
       }
 
       const latestConfig = getRuntimeConfig();
@@ -527,11 +578,25 @@ export async function handleFilesystemViolation(options: {
       // Preserve policy edits made during the dialog, applying only the original exception.
       const nextConfig = cloneRuntimeConfig(latestConfig);
       const changed = applyFilesystemAllowAction(nextConfig, allowAction);
+      if (
+        decision === "allow-always" &&
+        findFileToolPolicyViolation(
+          [{ kind: access, path: violation.path! }],
+          nextConfig,
+          cwd ?? ctx.cwd,
+        )
+      ) {
+        recordFilesystemEvent("blocked");
+        return {
+          kind: "deny",
+          message: `${blockedTarget}\nPermission saved globally, but current policy still blocks this path. The command was not retried.`,
+        };
+      }
       if (changed) {
         applyRuntimeConfigForSession?.(ctx, nextConfig);
       }
 
-      recordFilesystemEvent("allowed");
+      recordFilesystemEvent("allowed", decision === "allow-always");
       return createPermissionResolution(decision, blockedTarget, changed);
     },
   });

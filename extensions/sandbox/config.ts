@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
@@ -446,12 +446,16 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
   };
 }
 
-function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSandboxConfig {
+function loadOverrideConfig(
+  cwd: string,
+  overrideConfigPath: string,
+  globalConfig?: Partial<SandboxConfig>,
+): LoadedSandboxConfig {
   const resolvedPath = expandPath(overrideConfigPath, cwd);
 
   let source: string;
   try {
-    source = readFileSync(resolvedPath, "utf-8");
+    source = readConfigSource(resolvedPath, globalConfig);
   } catch (error) {
     const code =
       error instanceof Error && "code" in error && typeof error.code === "string"
@@ -488,20 +492,22 @@ function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSand
 export function loadConfig(
   cwd: string,
   overrideConfigPath?: string,
-  options: { projectTrusted?: boolean } = {},
+  options: { projectTrusted?: boolean; globalConfig?: Partial<SandboxConfig> } = {},
 ): LoadedSandboxConfig {
   if (overrideConfigPath) {
-    return loadOverrideConfig(cwd, overrideConfigPath);
+    return loadOverrideConfig(cwd, overrideConfigPath, options.globalConfig);
   }
 
   const projectConfigPath = join(cwd, CONFIG_DIR_NAME, "sandbox.json");
   const globalConfigPath = join(getAgentDir(), "sandbox.json");
 
-  let globalConfig: Partial<SandboxConfig> = {};
+  let globalConfig: Partial<SandboxConfig> = options.globalConfig ?? {};
   let projectConfig: Partial<SandboxConfig> = {};
   const paths: SandboxConfigPath[] = [];
 
-  if (existsSync(globalConfigPath)) {
+  if (options.globalConfig !== undefined) {
+    paths.push({ label: "Global", path: globalConfigPath, status: "loaded" });
+  } else if (existsSync(globalConfigPath)) {
     try {
       globalConfig = parseSandboxConfig(readFileSync(globalConfigPath, "utf-8"));
       paths.push({ label: "Global", path: globalConfigPath, status: "loaded" });
@@ -516,7 +522,9 @@ export function loadConfig(
       paths.push({ label: "Project", path: projectConfigPath, status: "skipped-untrusted" });
     } else {
       try {
-        projectConfig = parseSandboxConfig(readFileSync(projectConfigPath, "utf-8"));
+        projectConfig = parseSandboxConfig(
+          readConfigSource(projectConfigPath, options.globalConfig),
+        );
         paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
       } catch (e) {
         paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
@@ -531,6 +539,23 @@ export function loadConfig(
     config: finalizeConfig(merged),
     paths,
   };
+}
+
+// A global publication also changes symlink aliases, but not distinct hard links after atomic rename.
+function readConfigSource(path: string, globalConfig?: Partial<SandboxConfig>): string {
+  if (globalConfig !== undefined) {
+    const globalPath = join(getAgentDir(), "sandbox.json");
+    let sameTarget = resolve(path) === resolve(globalPath);
+    if (!sameTarget) {
+      try {
+        sameTarget = realpathSync(path) === realpathSync(globalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    if (sameTarget) return JSON.stringify(globalConfig);
+  }
+  return readFileSync(path, "utf-8");
 }
 
 function parseSandboxConfig(source: string): Partial<SandboxConfig> {
@@ -616,7 +641,11 @@ function containsControlCharacter(value: string): boolean {
   return false;
 }
 
-function expandPathConfigEntry(value: string, field: string): string | null {
+export function hasPathConfigReference(value: string): boolean {
+  return value.search(ENV_PATH_REFERENCE_PATTERN) !== -1;
+}
+
+export function expandPathConfigEntry(value: string, field: string): string | null {
   const source = value.trim();
   if (!source) return null;
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { BeforeToolCallResult } from "@earendil-works/pi-agent-core";
 import childProcess from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -385,6 +385,7 @@ describe("sandbox", { concurrency: false }, () => {
               assert.match(rendered, /descendants|child processes/i);
               assert.match(rendered, /host filesystem and network access/);
               assert.ok(rendered.includes("Deny") && rendered.includes("Run once outside sandbox"));
+              assert.doesNotMatch(rendered, /Always allow/);
               assert.ok(view.component.handleInput);
               view.component.handleInput("\x1b[B");
               assert.match(
@@ -762,6 +763,7 @@ describe("sandbox", { concurrency: false }, () => {
                 assert.ok(title.includes(target));
                 assert.deepEqual(choices, [
                   "Allow and retry now",
+                  "Always allow and retry",
                   "Allow but adapt for side-effects",
                   "Deny",
                 ]);
@@ -812,6 +814,357 @@ describe("sandbox", { concurrency: false }, () => {
       });
     }
   });
+
+  test("always allowing a parent rule retries once and survives a new project session", async () => {
+    const config = JSON.parse(configBytes);
+    config.filesystem.denyWrite = [cwd, "other-secret.txt"];
+    await writeFile(configPath, JSON.stringify(config));
+    boundary.attempts(dinnerCommand, permissionAttempts(target));
+    pi = await openSandbox(cwd, sandbox, failures, {
+      ui: {
+        async select(_title, choices) {
+          assert.ok(choices.includes("Always allow and retry"));
+          await pi!.command("network deny add keep-blocked.invalid");
+          return "Always allow and retry";
+        },
+      },
+    });
+    await pi.command("network allow add temporary.invalid");
+    assert.match(await pi.bash(dinnerCommand), /retried successfully/);
+    assert.equal(
+      await readFile(path.join(cwd, "effects.txt"), "utf8"),
+      "fed the kraken\n".repeat(2),
+    );
+    assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, ["keep-blocked.invalid"]);
+    assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), {
+      ...config,
+      filesystem: { ...config.filesystem, denyWrite: ["other-secret.txt"] },
+    });
+    await pi.dispose();
+    pi = undefined;
+    const nextCwd = path.join(directory, "another kitchen");
+    await mkdir(nextCwd);
+    pi = await openSandbox(nextCwd, sandbox, failures);
+    assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, ["other-secret.txt"]);
+    assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
+    assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, []);
+    assert.equal(pi.permissionCount(), 0);
+  });
+
+  test("failed permanent approval preserves disk bytes and policy without replaying the command", async () => {
+    boundary.attempts(dinnerCommand, permissionAttempts(target));
+    const malformed = "{the kraken ate this configuration";
+    pi = await openSandbox(cwd, sandbox, failures, {
+      ui: {
+        async select() {
+          await writeFile(configPath, malformed);
+          return "Always allow and retry";
+        },
+      },
+    });
+    const policy = structuredClone(SandboxManager.getConfig());
+    await assert.rejects(pi.bash(dinnerCommand), /Command exited with code 1/);
+    assert.equal(await readFile(configPath, "utf8"), malformed);
+    assert.deepEqual(SandboxManager.getConfig(), policy);
+    assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+    assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+  });
+
+  test("cancelling a command during permanent approval cancels publication and replay", async () => {
+    const opened = deferred<void>();
+    const release = deferred<void>();
+    const controller = new AbortController();
+    boundary.attempts(dinnerCommand, permissionAttempts(target));
+    pi = await openSandbox(cwd, sandbox, failures, {
+      ui: { select: async () => "Always allow and retry" },
+    });
+    const policy = structuredClone(SandboxManager.getConfig());
+    const open = fs.open;
+    mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      const file = await open(...args);
+      if (/sandbox\.json\.[^/]+\.tmp$/.test(String(args[0]))) {
+        opened.resolve();
+        await release.promise;
+      }
+      return file;
+    });
+    syncBuiltinESMExports();
+    const execution = assert.rejects(
+      pi.bash(dinnerCommand, { signal: controller.signal }),
+      /aborted|Command exited with code 1/i,
+    );
+    try {
+      await waitForStep(opened.promise, execution);
+      controller.abort();
+      release.resolve();
+      await execution;
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+      assert.deepEqual(SandboxManager.getConfig(), policy);
+      assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+      assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+    } finally {
+      controller.abort();
+      release.resolve();
+      await execution;
+    }
+  });
+
+  test("command cancellation stops an in-flight network save and leaves the next command usable", async () => {
+    const opened = deferred<void>();
+    const release = deferred<void>();
+    const controller = new AbortController();
+    const probe = "printf 'request kraken network\\n'";
+    const next = "printf 'fresh command\\n'";
+    boundary.attempts(next, [{ script: next }]);
+    pi = await openSandbox(cwd, sandbox, failures, {
+      ui: { select: async () => "Always allow and retry" },
+    });
+    const policy = structuredClone(SandboxManager.getConfig());
+    const open = fs.open;
+    mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      const file = await open(...args);
+      if (/sandbox\.json\.[^/]+\.tmp$/.test(String(args[0]))) {
+        opened.resolve();
+        await release.promise;
+      }
+      return file;
+    });
+    syncBuiltinESMExports();
+    const wrap = SandboxManager.wrapWithSandbox;
+    let connectionAllowed: boolean | undefined;
+    mock.method(
+      SandboxManager,
+      "wrapWithSandbox",
+      async (...args: Parameters<typeof SandboxManager.wrapWithSandbox>) => {
+        if (args[0] !== probe) return wrap(...args);
+        // Substitute the SRT network callback, without opening a real connection.
+        assert.ok(boundary.ask);
+        connectionAllowed = await boundary.ask({ host: "kraken.invalid", port: 443 });
+        throw new Error("fixture network blocked");
+      },
+    );
+    const execution = assert.rejects(
+      pi.bash(probe, { signal: controller.signal }),
+      /fixture network blocked/,
+    );
+    try {
+      await waitForStep(opened.promise, execution);
+      controller.abort();
+      release.resolve();
+      await execution;
+      assert.equal(connectionAllowed, false);
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+      assert.deepEqual(SandboxManager.getConfig(), policy);
+      assert.equal(await pi.bash(next), "fresh command\n");
+    } finally {
+      controller.abort();
+      release.resolve();
+      await execution;
+    }
+  });
+
+  test("a policy edit after publication keeps the saved grant but blocks the current connection", async () => {
+    const host = "kraken.invalid";
+    const published = deferred<void>();
+    const release = deferred<void>();
+    const notices: string[] = [];
+    pi = await openSandbox(cwd, sandbox, failures, {
+      ui: {
+        select: async () => "Always allow and retry",
+        notify: (message) => {
+          notices.push(message);
+        },
+      },
+    });
+    const rename = fs.rename;
+    mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+      await rename(...args);
+      if (/sandbox\.json\.[^/]+\.tmp$/.test(String(args[0]))) {
+        published.resolve();
+        await release.promise;
+      }
+    });
+    syncBuiltinESMExports();
+    assert.ok(boundary.ask);
+    const execution = boundary
+      .ask({ host, port: 443 })
+      .then((allowed) => assert.equal(allowed, false));
+    try {
+      await waitForStep(published.promise, execution);
+      await pi.command(`network deny add ${host}`);
+      release.resolve();
+      await execution;
+      assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")).network.allowedDomains, [
+        host,
+      ]);
+      assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
+      assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, [host]);
+      assert.ok(
+        notices.some((message) => /saved globally, but current policy still denies/.test(message)),
+      );
+    } finally {
+      release.resolve();
+      await execution;
+    }
+  });
+
+  for (const permanent of [false, true]) {
+    test(`network approval ${permanent ? "persists globally" : "stays session-only"} through the runtime callback`, async () => {
+      const host = "kraken.invalid";
+      const prompts: { title: string; choices: string[] }[] = [];
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          async select(title, choices) {
+            prompts.push({ title, choices });
+            return permanent ? "Always allow and retry" : "Yes";
+          },
+        },
+      });
+      assert.ok(boundary.ask);
+      assert.equal(await boundary.ask({ host: "Kraken.Invalid", port: 443 }), true);
+      assert.equal(prompts.length, 1);
+      assert.ok(prompts[0].title.includes(`${host}:443`));
+      assert.deepEqual(prompts[0].choices, ["Yes", "Always allow and retry", "No"]);
+      assert.equal(pi.permissionCount(), 1);
+      assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, [host]);
+      assert.equal(await boundary.ask({ host, port: 8443 }), true);
+      assert.equal(prompts.length, 1, "a granted host does not need a second prompt");
+      if (permanent) {
+        const config = JSON.parse(configBytes);
+        assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), {
+          ...config,
+          network: { ...config.network, allowedDomains: [host] },
+        });
+      } else {
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+      }
+
+      await pi.dispose();
+      pi = undefined;
+      const nextCwd = path.join(directory, "another reef");
+      await mkdir(nextCwd);
+      pi = await openSandbox(nextCwd, sandbox, failures, {
+        ui: { select: async () => "No" },
+      });
+      assert.equal(await boundary.ask({ host, port: 443 }), permanent);
+      assert.equal(pi.permissionCount(), permanent ? 0 : 1);
+      assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, permanent ? [host] : []);
+    });
+  }
+
+  for (const obstruction of ["new deny rule", "save error"] as const) {
+    test(`permanent network approval cannot grant access after a ${obstruction}`, async () => {
+      const host = "kraken.invalid";
+      const dialog = deferred<void>();
+      const decision = deferred<string | undefined>();
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          async select() {
+            dialog.resolve();
+            return decision.promise;
+          },
+        },
+      });
+      assert.ok(boundary.ask);
+      const execution = boundary.ask({ host, port: 443 }).then((allowed) => {
+        assert.equal(allowed, false, "failed approval must not resume the connection");
+      });
+      try {
+        await waitForStep(dialog.promise, execution);
+        const expectedBytes = obstruction === "save error" ? "{broken reef policy" : configBytes;
+        if (obstruction === "new deny rule") await pi.command(`network deny add ${host}`);
+        else await writeFile(configPath, expectedBytes);
+        const policy = structuredClone(SandboxManager.getConfig());
+        decision.resolve("Always allow and retry");
+        await execution;
+        assert.deepEqual(SandboxManager.getConfig(), policy);
+        assert.equal(await readFile(configPath, "utf8"), expectedBytes);
+        assert.equal(pi.permissionCount(), 1);
+        assert.match(await pi.command("doctor"), /\[network\] \[blocked\]/);
+      } finally {
+        decision.resolve(undefined);
+        await execution;
+      }
+    });
+  }
+
+  for (const approval of ["session", "permanent", "save error"] as const) {
+    test(
+      `Mach lookup ${approval} approval preserves current policy and controls replay`,
+      { skip: process.platform !== "darwin" && "Mach lookup commands require macOS" },
+      async () => {
+        const service = "com.kraken.recipe-vault";
+        const config = JSON.parse(configBytes);
+        config.network.allowMachLookup = [];
+        await writeFile(configPath, JSON.stringify(config));
+        const command =
+          "printf 'consulted the kraken\\n' >> consultations.txt; printf 'recipe found\\n'";
+        boundary.attempts(command, [
+          {
+            script: "printf 'consulted the kraken\\n' >> consultations.txt; exit 1",
+            violation: `bash(42) deny(1) mach-lookup ${service}`,
+          },
+          { script: command },
+        ]);
+        const prompts: { title: string; choices: string[] }[] = [];
+        const persistedConfig = structuredClone(config);
+        persistedConfig.network.allowedDomains = ["saved-reef.invalid"];
+        const persistedBytes = JSON.stringify(persistedConfig, null, 2) + "\n";
+        const expectedBytes = approval === "save error" ? "{broken reef policy" : persistedBytes;
+        pi = await openSandbox(cwd, sandbox, failures, {
+          ui: {
+            async select(title, choices) {
+              prompts.push({ title, choices });
+              await pi!.command("network deny add ink-thief.invalid");
+              await pi!.command("mach-lookup add com.kraken.unrelated");
+              await writeFile(configPath, expectedBytes);
+              return approval === "session" ? "Allow and retry now" : "Always allow and retry";
+            },
+          },
+        });
+        if (approval === "save error") {
+          await assert.rejects(pi.bash(command), /Command exited with code 1/);
+        } else {
+          assert.match(await pi.bash(command), /retried successfully/);
+        }
+        assert.equal(prompts.length, 1);
+        assert.ok(prompts[0].title.includes(service));
+        assert.deepEqual(prompts[0].choices, [
+          "Allow and retry now",
+          "Always allow and retry",
+          "Allow but adapt for side-effects",
+          "Deny",
+        ]);
+        assert.equal(pi.permissionCount(), 1);
+        assert.equal(
+          await readFile(path.join(cwd, "consultations.txt"), "utf8"),
+          "consulted the kraken\n".repeat(approval === "save error" ? 1 : 2),
+        );
+        assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, ["ink-thief.invalid"]);
+        assert.deepEqual(SandboxManager.getConfig()?.network.allowMachLookup, [
+          "com.kraken.unrelated",
+          ...(approval === "save error" ? [] : [service]),
+        ]);
+        if (approval === "permanent") {
+          assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), {
+            ...persistedConfig,
+            network: { ...persistedConfig.network, allowMachLookup: [service] },
+          });
+          await pi.dispose();
+          pi = undefined;
+          pi = await openSandbox(cwd, sandbox, failures);
+          assert.deepEqual(SandboxManager.getConfig()?.network.allowMachLookup, [service]);
+          assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, []);
+          assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, [
+            "saved-reef.invalid",
+          ]);
+          assert.equal(pi.permissionCount(), 0);
+        } else {
+          assert.equal(await readFile(configPath, "utf8"), expectedBytes);
+        }
+      },
+    );
+  }
 
   describe("attributing raw permission errors", () => {
     for (const { name, errorLine, initializationFailure, traversal = false } of [
@@ -1225,7 +1578,11 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
   const scripts = new Set<string>();
   const attempts = new Map<string, Attempt[]>();
   const violations = new Map<string, string>();
-  const state: { dependencyErrors: string[]; initializationError?: Error } = {
+  const state: {
+    dependencyErrors: string[];
+    initializationError?: Error;
+    ask?: Parameters<typeof SandboxManager.initialize>[1];
+  } = {
     dependencyErrors: [],
   };
   const reject = (...args: unknown[]): never => {
@@ -1241,8 +1598,9 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
   mock.method(
     SandboxManager,
     "initialize",
-    async (...[config]: Parameters<typeof SandboxManager.initialize>) => {
+    async (...[config, ask]: Parameters<typeof SandboxManager.initialize>) => {
       if (state.initializationError) throw state.initializationError;
+      state.ask = ask;
       SandboxManager.updateConfig(config);
     },
   );

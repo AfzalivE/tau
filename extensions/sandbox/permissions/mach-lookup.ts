@@ -8,7 +8,12 @@ import {
   type ListOp,
   type PromptMode,
 } from "../config.js";
-import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
+import type {
+  SandboxEvent,
+  SandboxEventOutcome,
+  SandboxEventReason,
+  SandboxRuntime,
+} from "../runtime.js";
 import {
   createPermissionResolution,
   showPermissionDialog,
@@ -97,6 +102,8 @@ export async function handleMachLookupViolation(options: {
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
   runtimeConfig: SandboxRuntimeConfig;
+  getRuntimeConfig: () => SandboxRuntimeConfig | null;
+  savePermission?: SandboxRuntime["savePermission"];
   violations: MachLookupViolation[];
   command: string;
   cwd?: string;
@@ -112,6 +119,8 @@ export async function handleMachLookupViolation(options: {
     ctx,
     promptMode,
     runtimeConfig,
+    getRuntimeConfig,
+    savePermission,
     violations,
     command,
     cwd,
@@ -133,7 +142,7 @@ export async function handleMachLookupViolation(options: {
     ? "already-approved-still-failed"
     : "missing-mach-lookup";
 
-  const recordMachLookupEvent = (outcome: SandboxEventOutcome): void => {
+  const recordMachLookupEvent = (outcome: SandboxEventOutcome, saved = false): void => {
     recordEvent?.({
       timestamp: Date.now(),
       kind: "mach-lookup",
@@ -142,7 +151,9 @@ export async function handleMachLookupViolation(options: {
       target: service,
       command,
       cwd,
-      summary: describeMachLookupEventSummary(eventReason, outcome),
+      summary: saved
+        ? "user allowed macOS service lookup globally"
+        : describeMachLookupEventSummary(eventReason, outcome),
       suggestedCommand: outcome === "blocked" && !alreadyApproved ? allowCommand : undefined,
     });
   };
@@ -173,19 +184,38 @@ export async function handleMachLookupViolation(options: {
     promptKey,
     pendingDialogs,
     autoRetryAvailable,
-    onDecision(decision) {
+    canSave: Boolean(savePermission),
+    async onDecision(decision) {
       if (decision === "deny") {
         recordMachLookupEvent("blocked");
         return createPermissionResolution(decision, blockedTarget);
       }
 
-      const nextConfig = cloneRuntimeConfig(runtimeConfig);
+      if (
+        decision === "allow-always" &&
+        !(await savePermission?.(ctx, {
+          section: "network",
+          list: "allowMachLookup",
+          op: "add",
+          value: service,
+          target: service,
+        }))
+      ) {
+        recordMachLookupEvent("blocked");
+        return createPermissionResolution("deny", blockedTarget);
+      }
+      const latestConfig = getRuntimeConfig();
+      if (!latestConfig) {
+        recordMachLookupEvent("blocked");
+        return createPermissionResolution("deny", blockedTarget);
+      }
+      const nextConfig = cloneRuntimeConfig(latestConfig);
       const changed = mutateMachLookupAllowList(nextConfig, "add", service);
       if (changed) {
         applyRuntimeConfigForSession?.(ctx, nextConfig);
       }
 
-      recordMachLookupEvent("allowed");
+      recordMachLookupEvent("allowed", decision === "allow-always");
       return createPermissionResolution(decision, blockedTarget, changed);
     },
   });
