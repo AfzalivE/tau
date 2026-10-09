@@ -69,8 +69,8 @@ describe("sandbox", { concurrency: false }, () => {
       filesystem: {
         denyRead: [],
         allowRead: [],
-        allowWrite: [cwd],
-        denyWrite: [target],
+        allowWrite: ["."],
+        denyWrite: ["secret recipe.txt"],
         allowTempDirs: false,
         allowGitCommonDir: false,
       },
@@ -893,7 +893,8 @@ describe("sandbox", { concurrency: false }, () => {
     });
   });
 
-  test("an untrusted checkout cannot disable the sandbox, but an explicit override replaces both config files", async () => {
+  test("ignores untrusted project config and binds override paths to the session", async () => {
+    assert.notEqual(cwd, process.cwd(), "the launcher must not supply the policy's base directory");
     const projectConfig = path.join(cwd, ".pi", "sandbox.json");
     await mkdir(path.dirname(projectConfig));
     const projectBytes = '{"enabled":false,"network":{"allowedDomains":["sneaky.invalid"]}}\n';
@@ -902,37 +903,109 @@ describe("sandbox", { concurrency: false }, () => {
     assert.equal(pi.session.extensionRunner.createContext().isProjectTrusted(), false);
     assert.match(pi.status(), /sandbox/);
     assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
+    assert.deepEqual(SandboxManager.getConfig()?.filesystem.allowWrite, [cwd]);
+    assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, [target]);
     const doctor = await pi.command("doctor");
     assert.ok(doctor.includes(projectConfig));
     assert.match(doctor, /skipped \(project not trusted\)/);
+    assert.equal(pi.permissionCount(), 0, "path binding must not add trust or approval prompts");
     await pi.dispose();
     pi = undefined;
 
-    const overridePath = path.join(cwd, "travel policy.json");
-    const overrideBytes = JSON.stringify({
-      network: { allowedDomains: ["octopus.invalid"], allowUnixSockets: [] },
-      filesystem: { denyWrite: ["do-not-touch.txt"], allowTempDirs: false },
-    });
-    await writeFile(overridePath, overrideBytes);
-    pi = await openSandbox(cwd, sandbox, failures, {
-      flags: { "sandbox-config": "travel policy.json" },
-    });
-    assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, ["octopus.invalid"]);
-    assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, ["do-not-touch.txt"]);
-    await pi.command('filesystem deny-write add "a folder/ink budget.txt"');
-    await pi.command("network allow add temporary.invalid");
-    assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, [
-      "octopus.invalid",
-      "temporary.invalid",
-    ]);
-    assert.ok(SandboxManager.getConfig()?.filesystem.denyWrite.includes("a folder/ink budget.txt"));
+    const previousPolicyDir = process.env.TAU_SANDBOX_POLICY_DIR;
+    // Expanded values can contain literal dollars. Exact runtime entries must stay removable.
+    process.env.TAU_SANDBOX_POLICY_DIR = "tidal $TAU_SANDBOX_POLICY_DIR";
+    try {
+      const overridePath = path.join(cwd, "travel policy.json");
+      const overrideBytes = JSON.stringify({
+        network: {
+          allowedDomains: ["octopus.invalid"],
+          allowUnixSockets: ["sockets/kraken.sock"],
+          mitmProxy: {
+            socketPath: "${TAU_SANDBOX_POLICY_DIR}/proxy.sock",
+            domains: ["*.octopus.invalid"],
+          },
+        },
+        filesystem: {
+          denyRead: ["~/vault"],
+          allowRead: ["~/vault/*/"],
+          allowWrite: [".", "./", cwd, "../shared"],
+          denyWrite: ["a folder/*.key"],
+          allowTempDirs: false,
+          allowGitCommonDir: false,
+        },
+      });
+      await writeFile(overridePath, overrideBytes);
+      pi = await openSandbox(cwd, sandbox, failures, {
+        flags: { "sandbox-config": "travel policy.json" },
+      });
+      const policy = structuredClone(SandboxManager.getConfig());
+      assert.ok(policy);
+      assert.deepEqual(policy.network.allowedDomains, ["octopus.invalid"]);
+      assert.deepEqual(policy.network.allowUnixSockets, [path.join(cwd, "sockets/kraken.sock")]);
+      assert.deepEqual(policy.network.mitmProxy, {
+        socketPath: path.join(cwd, "tidal $TAU_SANDBOX_POLICY_DIR/proxy.sock"),
+        domains: ["*.octopus.invalid"],
+      });
+      assert.deepEqual(policy.filesystem.denyRead, [path.join(os.homedir(), "vault")]);
+      assert.deepEqual(policy.filesystem.allowRead, [path.join(os.homedir(), "vault/*/")]);
+      assert.deepEqual(policy.filesystem.allowWrite, [cwd, path.join(directory, "shared")]);
+      assert.deepEqual(policy.filesystem.denyWrite, [path.join(cwd, "a folder/*.key")]);
 
-    await pi.session.reload();
-    assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, ["octopus.invalid"]);
-    assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, ["do-not-touch.txt"]);
-    assert.equal(await readFile(configPath, "utf8"), configBytes);
-    assert.equal(await readFile(projectConfig, "utf8"), projectBytes);
-    assert.equal(await readFile(overridePath, "utf8"), overrideBytes);
+      delete process.env.TAU_SANDBOX_POLICY_DIR;
+      const invalidPath = await pi.command(
+        'filesystem deny-write add "$TAU_SANDBOX_POLICY_DIR/forbidden.txt"',
+      );
+      process.env.TAU_SANDBOX_POLICY_DIR = "tidal $TAU_SANDBOX_POLICY_DIR";
+      assert.match(invalidPath, /Invalid filesystem path/);
+      assert.deepEqual(SandboxManager.getConfig(), policy);
+
+      await pi.command('filesystem deny-read add "$HOME/vault"');
+      assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyRead, policy.filesystem.denyRead);
+      await pi.command('filesystem deny-read remove "$HOME/vault"');
+      assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyRead, []);
+      await pi.command('filesystem deny-read add "~/vault"');
+      await pi.command('filesystem allow-write add "$TAU_SANDBOX_POLICY_DIR"');
+      assert.deepEqual(SandboxManager.getConfig()?.filesystem.allowWrite, [
+        ...policy.filesystem.allowWrite,
+        path.join(cwd, "tidal $TAU_SANDBOX_POLICY_DIR"),
+      ]);
+      await pi.command(
+        `filesystem allow-write remove ${JSON.stringify(path.join(cwd, "tidal $TAU_SANDBOX_POLICY_DIR"))}`,
+      );
+      assert.deepEqual(
+        SandboxManager.getConfig()?.filesystem.allowWrite,
+        policy.filesystem.allowWrite,
+      );
+      await pi.command('filesystem deny-write add "a folder/ink budget.txt"');
+      const addedPath = path.join(cwd, "a folder/ink budget.txt");
+      await pi.command(`filesystem deny-write add ${JSON.stringify(addedPath)}`);
+      assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, [
+        ...policy.filesystem.denyWrite,
+        addedPath,
+      ]);
+      await pi.command('filesystem deny-write remove "./a folder/ink budget.txt"');
+      assert.deepEqual(
+        SandboxManager.getConfig()?.filesystem.denyWrite,
+        policy.filesystem.denyWrite,
+      );
+      await pi.command('filesystem deny-write add "a folder/ink budget.txt"');
+      await pi.command("network allow add temporary.invalid");
+      const editedPolicy = structuredClone(policy);
+      editedPolicy.filesystem.denyWrite.push(addedPath);
+      editedPolicy.network.allowedDomains.push("temporary.invalid");
+      assert.deepEqual(SandboxManager.getConfig(), editedPolicy);
+
+      await pi.session.reload();
+      assert.deepEqual(SandboxManager.getConfig(), policy);
+      assert.equal(pi.permissionCount(), 0, "relative policies need no additional trust prompts");
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+      assert.equal(await readFile(projectConfig, "utf8"), projectBytes);
+      assert.equal(await readFile(overridePath, "utf8"), overrideBytes);
+    } finally {
+      if (previousPolicyDir === undefined) delete process.env.TAU_SANDBOX_POLICY_DIR;
+      else process.env.TAU_SANDBOX_POLICY_DIR = previousPolicyDir;
+    }
   });
 
   describe("deciding what to do after a partially completed command", () => {
@@ -1147,7 +1220,7 @@ exit 73`,
         assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, ["ink-thief.invalid"]);
         assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, [
           target,
-          "another secret.txt",
+          path.join(cwd, "another secret.txt"),
         ]);
         // The approval is for the original rule, not every rule now blocking this path.
         // A parent deny works on both supported platforms without relying on glob enforcement.
@@ -1159,10 +1232,10 @@ exit 73`,
         assert.ok(expectedPolicy);
         assert.deepEqual(expectedPolicy.filesystem.denyWrite, [
           ...(removeOriginalRule ? [] : [target]),
-          "another secret.txt",
+          path.join(cwd, "another secret.txt"),
           cwd,
         ]);
-        expectedPolicy.filesystem.denyWrite = ["another secret.txt", cwd];
+        expectedPolicy.filesystem.denyWrite = [path.join(cwd, "another secret.txt"), cwd];
 
         decision.resolve("Allow but adapt for side-effects");
         await execution;

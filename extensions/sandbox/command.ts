@@ -5,6 +5,7 @@ import {
   cloneRuntimeConfig,
   escapeSlashCommandArg,
   mutateStringList,
+  resolveSandboxPath,
   type ListOp,
   type PromptMode,
   type SandboxConfigPath,
@@ -585,7 +586,20 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
             : list === "allow-write"
               ? nextConfig.filesystem.allowWrite
               : nextConfig.filesystem.denyWrite;
-        const changed = mutateStringList(values, op, targetPath);
+        // Exact runtime entries are already expanded and may contain literal dollars.
+        const resolvedPath = values.includes(targetPath)
+          ? targetPath
+          : resolveSandboxPath(targetPath, `filesystem ${list}`, ctx.cwd);
+        if (resolvedPath === null) {
+          notify(
+            ctx,
+            "Invalid filesystem path: unset or empty environment variable, or control characters",
+            "warning",
+          );
+          return;
+        }
+
+        const changed = mutateStringList(values, op, resolvedPath);
         if (!changed) {
           notify(
             ctx,

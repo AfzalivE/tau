@@ -809,7 +809,7 @@ describe("subagent", { concurrency: false }, () => {
     const alpha = await generations.next();
     const inherited = await policies.next();
     assert.deepEqual(inherited.network.deniedDomains, ["syrup.invalid"]);
-    assert.ok(inherited.filesystem.denyWrite.includes("glaze-secret.txt"));
+    assert.ok(inherited.filesystem.denyWrite.includes(path.join(cwd, "glaze-secret.txt")));
     await app.run({ action: "start", goal: "Choose sprinkles", prompt: "Ask about sprinkles." });
     const beta = await generations.next();
     const unrelated = app.session.prompt("/recipe-notes");

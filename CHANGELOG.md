@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Resolve relative Sandbox filesystem rules and socket paths against the owning session's working directory, including session-only filesystem commands and inherited subagent policy. ([#12](https://github.com/goncalossilva/tau/issues/12))
 - Keep Usage, Answer, BTW, and Insights panels bottom-aligned, including short views and resize hints.
 
 ## [0.3.0] - 2026-10-09

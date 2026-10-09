@@ -291,7 +291,7 @@ export function normalizePromptMode(value: unknown): PromptMode {
 
 function expandPath(value: string, cwd?: string): string {
   const expanded =
-    value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+    value === "~" ? homedir() : value.startsWith("~/") ? homedir() + value.slice(1) : value;
   return cwd && !expanded.startsWith("/") ? resolve(cwd, expanded) : expanded;
 }
 
@@ -570,7 +570,7 @@ function containsControlCharacter(value: string): boolean {
   return false;
 }
 
-function expandPathConfigEntry(value: string, field: string): string | null {
+export function resolveSandboxPath(value: string, field: string, cwd: string): string | null {
   const source = value.trim();
   if (!source) return null;
 
@@ -605,24 +605,29 @@ function expandPathConfigEntry(value: string, field: string): string | null {
     return null;
   }
 
-  return expanded;
+  return expandPath(expanded, cwd);
 }
 
-function expandPathConfigList(values: string[] | undefined, field: string): string[] | undefined {
+function expandPathConfigList(
+  values: string[] | undefined,
+  field: string,
+  cwd: string,
+): string[] | undefined {
   if (!values) return undefined;
 
   return values
-    .map((value) => expandPathConfigEntry(value, field))
+    .map((value) => resolveSandboxPath(value, field, cwd))
     .filter((value): value is string => value !== null);
 }
 
 function expandMitmProxyPathConfig(
   mitmProxy: SandboxRuntimeConfig["network"]["mitmProxy"],
+  cwd: string,
 ): SandboxRuntimeConfig["network"]["mitmProxy"] {
   if (!mitmProxy) return undefined;
   if (!isPlainObject(mitmProxy) || typeof mitmProxy.socketPath !== "string") return mitmProxy;
 
-  const socketPath = expandPathConfigEntry(mitmProxy.socketPath, "network.mitmProxy.socketPath");
+  const socketPath = resolveSandboxPath(mitmProxy.socketPath, "network.mitmProxy.socketPath", cwd);
   if (!socketPath) {
     console.error("Warning: Disabling network.mitmProxy because its socketPath did not expand.");
     return undefined;
@@ -633,30 +638,36 @@ function expandMitmProxyPathConfig(
 
 function expandNetworkPathConfig(
   network: SandboxRuntimeConfig["network"],
+  cwd: string,
 ): SandboxRuntimeConfig["network"] {
   return {
     ...network,
-    allowUnixSockets: expandPathConfigList(network.allowUnixSockets, "network.allowUnixSockets"),
-    mitmProxy: expandMitmProxyPathConfig(network.mitmProxy),
+    allowUnixSockets: expandPathConfigList(
+      network.allowUnixSockets,
+      "network.allowUnixSockets",
+      cwd,
+    ),
+    mitmProxy: expandMitmProxyPathConfig(network.mitmProxy, cwd),
   };
 }
 
 function expandFilesystemPathConfig(
   filesystem: SandboxRuntimeConfig["filesystem"],
+  cwd: string,
 ): SandboxRuntimeConfig["filesystem"] {
   return {
     ...filesystem,
-    denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead") ?? [],
-    allowRead: expandPathConfigList(filesystem.allowRead, "filesystem.allowRead"),
-    allowWrite: expandPathConfigList(filesystem.allowWrite, "filesystem.allowWrite") ?? [],
-    denyWrite: expandPathConfigList(filesystem.denyWrite, "filesystem.denyWrite") ?? [],
+    denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead", cwd) ?? [],
+    allowRead: expandPathConfigList(filesystem.allowRead, "filesystem.allowRead", cwd),
+    allowWrite: expandPathConfigList(filesystem.allowWrite, "filesystem.allowWrite", cwd) ?? [],
+    denyWrite: expandPathConfigList(filesystem.denyWrite, "filesystem.denyWrite", cwd) ?? [],
   };
 }
 
-export function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
+export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxRuntimeConfig {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
-  const expandedNetwork = expandNetworkPathConfig(config.network);
-  const expandedFilesystem = expandFilesystemPathConfig(filesystem);
+  const expandedNetwork = expandNetworkPathConfig(config.network, cwd);
+  const expandedFilesystem = expandFilesystemPathConfig(filesystem, cwd);
   const allowWrite = allowTempDirs
     ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]
     : expandedFilesystem.allowWrite;

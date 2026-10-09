@@ -340,7 +340,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       return null;
     }
 
-    const runtimeConfig = toRuntimeConfig(config);
+    const runtimeConfig = toRuntimeConfig(config, ctx.cwd);
 
     try {
       await SandboxManager.initialize(runtimeConfig, askNetworkPermission, true);
