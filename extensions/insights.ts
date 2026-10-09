@@ -598,7 +598,10 @@ async function runInsightsCommand(
   await ctx.ui.custom<void>(
     (tui, theme, keybindings, done) =>
       new InsightsReportComponent(result, tui, theme, keybindings, done),
-    { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
+    {
+      overlay: true,
+      overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 1 },
+    },
   );
 
   if (reportPath) {

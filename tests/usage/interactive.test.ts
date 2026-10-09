@@ -119,6 +119,19 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
       const repaint = () => terminal.repaint(tui);
       try {
         await terminal.waitForText("Usage  [all]");
+        for (const rows of [50, 64]) {
+          terminal.resize(80, rows);
+          repaint();
+          const bounds = observer.getOverlayBounds();
+          assert.ok(bounds.height < rows - 2, "short dashboard leaves vertical room");
+          assert.equal(
+            bounds.row + bounds.height,
+            rows - 1,
+            "dashboard stays above its bottom margin",
+          );
+        }
+        terminal.resize(80, 24);
+        repaint();
         terminal.send("]");
         await terminal.waitForText("Usage loading");
         terminal.send("\x1b[1;5F");
@@ -202,6 +215,12 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
         assert.match(repaint(), lastRow);
         terminal.resize(26, 6); // Four chrome rows leave no document row.
         assert.match(repaint(), /q close · resize/);
+        const compactBounds = observer.getOverlayBounds();
+        assert.equal(
+          compactBounds.row + compactBounds.height,
+          5,
+          "resize hint stays bottom-anchored",
+        );
         terminal.send("\x1b[1;5H"); // Hidden Ctrl+Home and view controls cannot move the document.
         terminal.send("j");
         terminal.resize(25, 7); // One column below the supported document width.

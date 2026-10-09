@@ -122,6 +122,8 @@ describe("insights native reader", { concurrency: false }, () => {
         await terminal.waitForText("current scope");
         const repaint = () => terminal.repaint(tui);
         const initial = repaint();
+        const bounds = observer.getOverlayBounds();
+        assert.equal(bounds.row + bounds.height, 23, "full-height reader keeps its bottom margin");
         for (const corner of ["╭", "╮", "╰", "╯"]) assert.ok(initial.includes(corner));
         assert.match(initial, /Enter\/Esc close/);
         assert.match(
@@ -172,13 +174,24 @@ describe("insights native reader", { concurrency: false }, () => {
         assert.match(frame, /╰.*╯/);
         terminal.resize(120, 8);
         assert.match(repaint(), /Esc close.*Resize/);
+        const tinyBounds = observer.getOverlayBounds();
+        assert.ok(tinyBounds.height < 6, "resize notice leaves vertical space to position");
+        assert.equal(tinyBounds.row + tinyBounds.height, 7, "one-row bottom margin");
         terminal.send("\x1b[1;5H"); // Tiny mode ignores Ctrl+Home and keeps the reading position.
         terminal.resize(120, 30);
         assert.match(repaint(), /RESULT_40/);
         terminal.send("\x1b[1;5H");
         assert.match(repaint(), /current scope/);
-        terminal.resize(30, 8);
-        assert.match(repaint(), /Esc close.*Resize/);
+        // Width fallback stays near the editor, including after a height-only resize.
+        for (const rows of [24, 40, 8]) {
+          terminal.resize(30, rows);
+          assert.match(repaint(), /Esc close.*Resize/);
+          const compactBounds = observer.getOverlayBounds();
+          assert.ok(compactBounds.height < rows - 2);
+          assert.equal(compactBounds.row + compactBounds.height, rows - 1, "one-row bottom margin");
+          assert.equal(compactBounds.col, 1, "one-column left margin");
+          assert.equal(compactBounds.width, 28, "full available overlay width");
+        }
       } finally {
         terminal.writes.length = 0;
         terminal.send("q");

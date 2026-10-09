@@ -2189,7 +2189,10 @@ export default function usageBreakdownExtension(pi: ExtensionAPI) {
           new UsageBreakdownComponent(data, tui, theme, keybindings, done, (provider, signal) =>
             fetchLiveUsageForProvider(provider, liveUsageAvailability, ctx, signal),
           ),
-        { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
+        {
+          overlay: true,
+          overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 1 },
+        },
       );
     },
   });

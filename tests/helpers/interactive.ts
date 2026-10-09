@@ -11,14 +11,13 @@ import {
   type ExtensionContext,
   type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { deadline } from "./async.js";
 import { type createPiResources, fixtureModel } from "./pi.js";
 
 const requireFromPi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-const { ProcessTerminal }: typeof import("@earendil-works/pi-tui") = await import(
-  requireFromPi.resolve("@earendil-works/pi-tui")
-);
+const { ProcessTerminal, TuiMainScreen, TuiAltScreen }: typeof import("@earendil-works/pi-tui") =
+  await import(requireFromPi.resolve("@earendil-works/pi-tui"));
 
 /** Substitute physical I/O only. Native layout, overlays, focus and input priority stay real. */
 export function captureTerminal(columns: number, rows: number) {
@@ -91,10 +90,22 @@ export function captureTerminal(columns: number, rows: number) {
   };
 }
 
-/** Capture public session context and TUI through a zero-row widget, without inspecting host internals. */
+/** Capture public session context, TUI and real overlay handles without inspecting host internals. */
 export function observeInteractive() {
   let ctx: ExtensionContext | undefined;
   let tui: TUI | undefined;
+  let overlay: OverlayHandle | undefined;
+  for (const screen of [TuiMainScreen, TuiAltScreen]) {
+    const showOverlay = screen.prototype.showOverlay;
+    mock.method(
+      screen.prototype,
+      "showOverlay",
+      function (this: TUI, ...args: Parameters<TUI["showOverlay"]>) {
+        overlay = showOverlay.apply(this, args);
+        return overlay;
+      },
+    );
+  }
   const extension: ExtensionFactory = (pi) => {
     pi.on("session_start", (_event, context) => {
       ctx = context;
@@ -110,6 +121,11 @@ export function observeInteractive() {
     get() {
       assert.ok(ctx && tui, "interactive session must be initialized");
       return { ctx, tui };
+    },
+    getOverlayBounds() {
+      const bounds = overlay?.getBounds();
+      assert.ok(bounds, "overlay must be visible and rendered");
+      return bounds;
     },
   };
 }

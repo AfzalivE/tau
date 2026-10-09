@@ -135,6 +135,25 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
         assert.match(initial, /Esc cancel/);
         assertFrame(initial);
         assert.doesNotMatch(initial, /CONTEXT_26:/, "both modes use a bounded reading region");
+        // A tall terminal exposes placement that the ordinary full-height questionnaire hides.
+        for (const [columns, rows] of [
+          [120, 80],
+          [120, 100],
+          [80, 80],
+        ] as const) {
+          terminal.resize(columns, rows);
+          const compact = repaint();
+          assertFrame(compact);
+          assert.match(compact, /QUESTION_1:/);
+          assert.match(compact, /CONTEXT_26:/);
+          const bounds = observer.getOverlayBounds();
+          assert.ok(bounds.height < rows - 2, "questionnaire leaves vertical space to position");
+          assert.equal(bounds.row + bounds.height, rows - 1, "one-row bottom margin");
+          assert.equal(bounds.col, 1, "one-column left margin");
+          assert.equal(bounds.width, columns - 2, "full available overlay width");
+        }
+        terminal.resize(80, 24);
+        assert.match(repaint(), /QUESTION_1:/);
         const readingFrames = [initial];
         // Exhaust the known 37-row reading document by pages, not timing retries.
         for (let page = 0; page < 8; page++) readingFrames.push(press(keys.pageDown));

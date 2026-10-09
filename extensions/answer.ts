@@ -661,7 +661,10 @@ export default function (pi: ExtensionAPI) {
       // Show the Q&A component
       const answersResult = await ctx.ui.custom<string | null>(
         (tui, theme, kb, done) => new QnAComponent(questions, tui, theme, kb, done),
-        { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
+        {
+          overlay: true,
+          overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 1 },
+        },
       );
 
       if (answersResult === null) {

@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 - Adapt Usage charts, quota bars, and text to the active light or dark theme and terminal color capabilities.
 
+### Fixed
+
+- Keep Usage, Answer, BTW, and Insights panels bottom-aligned, including short views and resize hints.
+
 ## [0.3.0] - 2026-10-09
 
 ### Migration notes
