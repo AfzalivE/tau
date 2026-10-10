@@ -30,7 +30,7 @@
   },
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "^0.0.73",
+    "@anthropic-ai/sandbox-runtime": "file:../../../../Repos/sandbox-runtime",
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^29.0.2",
     "proper-lockfile": "4.1.2",

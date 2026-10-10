@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Avoided false macOS shell-not-found errors with a tracked local sandbox-runtime dependency. ([issue #548](https://github.com/anthropics/sandbox-runtime/issues/548), [PR #567](https://github.com/anthropics/sandbox-runtime/pull/567))
 - Restored `/raw` on Pi 0.87.1 through public renderer APIs, preserving scrollback in regular and fullscreen modes.
 - Allowed native file tools to create permitted files through macOS temporary-directory aliases.
 - Fixed the fork-specific package manifest's `review` extension entry so packaging resolves the extension directory.

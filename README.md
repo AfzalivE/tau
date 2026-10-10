@@ -241,6 +241,27 @@ pi -e ./packages/afzal-tau-non-coding-agent
 
 Configure a local provider such as Ollama, LM Studio, or vLLM in `~/.pi/agent/models.json`, select it with `/model`, and run `/insights scope=project` from the source root. The package does not bundle model configuration.
 
+### Local sandbox-runtime dependency
+
+The four sandbox-bearing package manifests link to `file:../../../../Repos/sandbox-runtime`. With Tau at `~/Dev/ToolProjects/tau`, this resolves to `~/Dev/Repos/sandbox-runtime`. Update and save `package-lock.json` with the first `npm install`; later `npm ci` runs use that local dependency.
+
+The local checkout includes direct validation of absolute executable paths. This avoids the one-second Node `which` lookup that can report `Shell '...' not found in PATH` for an existing executable. Upstream tracks the problem in [issue #548](https://github.com/anthropics/sandbox-runtime/issues/548), with a related fix in [PR #567](https://github.com/anthropics/sandbox-runtime/pull/567). Use a released dependency again after it includes this fix.
+
+Install and build the patched checkout before installing Tau:
+
+```bash
+cd ~/Dev/Repos/sandbox-runtime
+npm ci
+npm run build
+
+cd ~/Dev/ToolProjects/tau
+npm install
+```
+
+npm does not install the linked checkout's dependencies or build its `dist/index.js` entry point. Rebuild after source edits, then restart Pi to load the changed runtime. The local checkout controls the runtime source; the link does not pin a Git commit.
+
+CI and other installations also need the patched checkout, its dependencies, and build output at the same relative path. Generated npm packages retain this local dependency reference and require that layout; they are not portable registry-only installs while this link is in use.
+
 ### Agent configuration
 
 Tau does not include agent configuration; those files are highly personal.
