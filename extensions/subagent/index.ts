@@ -431,7 +431,6 @@ export default function subagentExtension(pi: ExtensionAPI): void {
             ...process.env,
             PI_CODING_AGENT_DIR: getAgentDir(),
             TAU_SUBAGENT_CHILD: "1",
-            TAU_SUBAGENT_UNSANDBOXED_APPROVAL: "1",
           },
           (event) => receive(child, event),
           (error) => {
@@ -608,25 +607,6 @@ export default function subagentExtension(pi: ExtensionAPI): void {
       if (ctx?.hasUI && request.method !== "editor") {
         response = await permissions.run(async (signal) => {
           const options = { signal, timeout: "timeout" in request ? request.timeout : undefined };
-          if (
-            request.method === "select" &&
-            request.options.length === 2 &&
-            request.options[0] === "Deny" &&
-            request.options[1] === "Run once outside sandbox"
-          ) {
-            const approval = {
-              ctx,
-              title: `${permissionIdentity(child)}\n${request.title}`,
-              choices: [...request.options],
-              signal,
-              result: undefined as Promise<string | undefined> | undefined,
-            };
-            pi.events.emit("subagent:unsandboxed-approval", approval);
-            const value = await approval.result;
-            return !signal.aborted && value !== undefined && request.options.includes(value)
-              ? { type: "extension_ui_response", id: request.id, value }
-              : response;
-          }
           const title = `${child.id} · ${child.goal}\n${"title" in request ? request.title : ""}`;
           if (request.method === "confirm") {
             return {
@@ -810,20 +790,6 @@ function renderProgress(
     );
   });
   return [header, ...rows];
-}
-
-/** Quote the complete child identity without allowing terminal controls or bidi spoofing. */
-function permissionIdentity(child: Child): string {
-  return [child.id, child.goal]
-    .map((value) =>
-      JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (character) =>
-        character
-          .split("")
-          .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`)
-          .join(""),
-      ),
-    )
-    .join(" · ");
 }
 
 function oneLine(text: string): string {

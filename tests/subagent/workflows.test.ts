@@ -82,7 +82,6 @@ describe("subagent", { concurrency: false }, () => {
   let foregroundShell: Awaited<ReturnType<typeof holdShellWork>> | undefined;
   let unavailable: boolean;
   let sandboxed: boolean;
-  let legacyApprovalBroker: boolean;
   let holdStartup: boolean;
   let starting: ReturnType<typeof mailbox<void>>;
   let policies: ReturnType<typeof mailbox<SandboxRuntimeConfig>>;
@@ -103,7 +102,6 @@ describe("subagent", { concurrency: false }, () => {
     generations = mailbox<Request>();
     unavailable = false;
     sandboxed = false;
-    legacyApprovalBroker = false;
     holdStartup = false;
     starting = mailbox<void>();
     policies = mailbox<SandboxRuntimeConfig>();
@@ -147,7 +145,6 @@ describe("subagent", { concurrency: false }, () => {
       assert.equal(options.detached, true);
       assert.equal(options.env?.PI_CODING_AGENT_DIR, getAgentDir());
       assert.equal(options.env?.TAU_SUBAGENT_CHILD, "1");
-      assert.equal(options.env?.TAU_SUBAGENT_UNSANDBOXED_APPROVAL, "1");
       assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
       assert.ok(Array.isArray(options.stdio));
       const sessionFile = args[args.indexOf("--session") + 1];
@@ -170,7 +167,6 @@ describe("subagent", { concurrency: false }, () => {
           ...options,
           env: {
             ...options.env,
-            ...(legacyApprovalBroker ? { TAU_SUBAGENT_UNSANDBOXED_APPROVAL: undefined } : {}),
             ...(shell ? { TAU_SUBAGENT_TEST_SHELL: shell.command } : {}),
             ...(sandboxed ? { TAU_SUBAGENT_TEST_SANDBOX: "1" } : {}),
             ...(holdStartup ? { TAU_SUBAGENT_TEST_STARTUP: "1" } : {}),
@@ -913,62 +909,26 @@ describe("subagent", { concurrency: false }, () => {
     });
   }
 
-  test("forwards one-shot Bash approval to the parent without granting later child commands a bypass", async () => {
+  test("child Bash uses the parent's active sandbox policy", async () => {
     sandboxed = true;
     app = await openParent(cwd, failures, true, true);
     await app.run({
       action: "start",
       goal: "Ice one biscuit",
-      prompt: "Ask before running outside the sandbox.",
+      prompt: "Run the icing command with the inherited sandbox state.",
     });
-    const request = { command: approvalCommand, requestUnsandboxed: true };
-    const childCwd = await fs.realpath(cwd);
-    (await generations.next()).reply(call("bash", request));
-    const approval = await reviewRequest();
-    approval.answer("Run once outside sandbox");
-    const approved = await generations.next();
-    assert.equal(contentText(approved.context.messages.at(-1)!.content), "iced biscuit\n");
+    (await generations.next()).reply(call("bash", { command: approvalCommand }));
+    const result = await generations.next();
+    assert.equal(contentText(result.context.messages.at(-1)!.content), "sandboxed biscuit\n");
     assert.deepEqual(await bashRuns.next(), {
       child: "alpha",
-      command: approvalCommand,
-      cwd: childCwd,
+      command: "printf 'sandboxed biscuit\\n'",
+      cwd: await fs.realpath(cwd),
     });
-
-    approved.reply(call("bash", request));
-    const fresh = await reviewRequest();
-    assert.equal(bashRuns.size, 0, "the earlier answer must not approve an identical request");
-    fresh.answer("Deny");
-    const denied = await generations.next();
-    const denial = denied.context.messages.at(-1)!;
-    assert.equal(denial.role, "toolResult");
-    assert.equal(denial.isError, true);
-    assert.match(contentText(denial.content), /denied/i);
-    assert.equal(bashRuns.size, 0, "denial must not execute the command");
-
-    denied.reply(call("bash", { command: approvalCommand }));
-    const ordinary = await generations.next();
-    assert.equal(contentText(ordinary.context.messages.at(-1)!.content), "sandboxed biscuit\n");
-    assert.equal((await bashRuns.next()).child, "alpha");
-    assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox without a bypass");
-    ordinary.reply(assistantMessage("One biscuit iced. The next stayed sandboxed."));
-    assert.match(await app.reports.next(), /One biscuit iced/);
+    assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox");
+    result.reply(assistantMessage("The biscuit stayed sandboxed."));
+    assert.match(await app.reports.next(), /The biscuit stayed sandboxed/);
     assert.equal(app.editor.getText(), "Unsent cookie recipe");
-
-    async function reviewRequest(): Promise<Dialog> {
-      const dialog = await app!.dialogs.next();
-      assert.match(dialog.title, /alpha.*Ice one biscuit/s);
-      assert.match(dialog.title, /Run once outside sandbox/);
-      assert.ok(
-        dialog.title.includes(`$ ${approvalCommand}`),
-        "show the full command to the parent",
-      );
-      assert.ok(!dialog.title.includes(childCwd), "the approval does not include a folder line");
-      assert.deepEqual(dialog.choices, ["Deny", "Run once outside sandbox"]);
-      assert.equal(dialog.signal?.aborted, false);
-      assert.equal(bashRuns.size, 0, "no execution before human approval");
-      assert.equal(generations.size, 0, "approval waits for the user, not another agent turn");
-      return dialog;
-    }
   });
 
   test("Escape and session changes join startup, Bash work, and result delivery", async () => {
@@ -1178,31 +1138,6 @@ describe("subagent", { concurrency: false }, () => {
       );
       assert.equal(await trust.next(), trusted);
       await generations.next();
-    });
-  }
-
-  for (const host of ["headless", "old approval broker"] as const) {
-    test(`denies unsandboxed child execution with ${host} parent`, async () => {
-      sandboxed = true;
-      legacyApprovalBroker = host === "old approval broker";
-      app = await openParent(cwd, failures, host !== "headless", true);
-      await app.run({
-        action: "start",
-        goal: "Keep the biscuit safe",
-        prompt: "Ask before running outside the sandbox.",
-      });
-      (await generations.next()).reply(
-        call("bash", { command: approvalCommand, requestUnsandboxed: true }),
-      );
-      const denied = await generations.next();
-      const result = denied.context.messages.at(-1)!;
-      assert.equal(result.role, "toolResult");
-      assert.equal(result.isError, true);
-      assert.match(contentText(result.content), /denied/i);
-      if (legacyApprovalBroker)
-        assert.match(contentText(result.content), /Reload the parent and start a new subagent/);
-      assert.equal(bashRuns.size, 0, "an unsupported parent cannot approve child execution");
-      assert.equal(app.dialogs.size, 0, "never fall back to an old parent's native selector");
     });
   }
 

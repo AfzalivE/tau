@@ -1,13 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import {
-  createLocalBashOperations,
-  type BashOperations,
-  type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
@@ -34,11 +29,7 @@ import {
   detectMachLookupViolations,
   handleMachLookupViolation,
 } from "./permissions/mach-lookup.js";
-import {
-  formatUnsandboxedApproval,
-  UNSANDBOXED_APPROVAL_CHOICES,
-} from "./permissions/unsandboxed.js";
-import { notify, type SandboxEvent, type SandboxRuntime } from "./runtime.js";
+import { notify, type SandboxEvent } from "./runtime.js";
 
 const IS_MACOS = process.platform === "darwin";
 const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", import.meta.url));
@@ -207,62 +198,6 @@ function maybeAllowGitMetadataWriteForSession(options: {
 
   if (!nextConfig) return;
   applyRuntimeConfigForSession(ctx, nextConfig);
-}
-
-/** Create a single-invocation native backend that requires fresh human approval. */
-export function createUnsandboxedBashOps(
-  runtime: SandboxRuntime,
-  sandboxedOps: SandboxedBashOperations,
-  ctx: ExtensionContext,
-  invocationSignal: AbortSignal,
-): BashOperations {
-  function assertAvailable(): void {
-    if (invocationSignal.aborted) throw new Error("aborted");
-    if (runtime.state.status !== "active") {
-      throw new Error("Unsandboxed request denied: the sandbox must be active.");
-    }
-    if (runtime.promptMode !== "interactive" || !ctx.hasUI || !["tui", "rpc"].includes(ctx.mode)) {
-      throw new Error("Unsandboxed request denied: interactive human approval is required.");
-    }
-    if (
-      ctx.mode === "rpc" &&
-      process.env.TAU_SUBAGENT_CHILD === "1" &&
-      process.env.TAU_SUBAGENT_UNSANDBOXED_APPROVAL !== "1"
-    ) {
-      throw new Error(
-        "Unsandboxed request denied: the parent does not advertise a safe approval broker. Reload the parent and start a new subagent before requesting approval.",
-      );
-    }
-  }
-
-  assertAvailable();
-  const local = createLocalBashOperations();
-  return {
-    exec(command, cwd, options) {
-      const absoluteCwd = resolve(cwd);
-      return sandboxedOps.runSerially(async () => {
-        assertAvailable();
-        if (options.signal?.aborted) throw new Error("aborted");
-        const title = formatUnsandboxedApproval(command);
-        let choice: string | undefined;
-        try {
-          choice = await ctx.ui.select(title, [...UNSANDBOXED_APPROVAL_CHOICES], {
-            signal: invocationSignal,
-          });
-        } catch (error) {
-          throw new Error("Unsandboxed request denied: human approval was unavailable.", {
-            cause: error,
-          });
-        }
-        assertAvailable();
-        if (options.signal?.aborted) throw new Error("aborted");
-        if (choice !== "Run once outside sandbox") {
-          throw new Error("Unsandboxed request denied: this invocation was not approved.");
-        }
-        return local.exec(command, absoluteCwd, options);
-      }, invocationSignal);
-    },
-  };
 }
 
 export function createSandboxedBashOps(options: SandboxedBashOpsOptions): SandboxedBashOperations {

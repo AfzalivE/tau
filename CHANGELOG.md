@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** Sandbox no longer accepts Bash's `requestUnsandboxed` option. Commands cannot request a one-off escape from the sandbox.
+
 ## [0.3.1] - 2026-10-11
 
 ### Changed

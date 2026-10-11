@@ -10,6 +10,7 @@ import { SandboxManager, type SandboxAskCallback } from "@anthropic-ai/sandbox-r
 import type { AgentToolCallOutcome, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
   createAgentSession,
+  createBashToolDefinition,
   getAgentDir,
   initTheme,
   ToolExecutionComponent,
@@ -482,6 +483,15 @@ describe("sandbox", { concurrency: false }, () => {
   test("refreshes agent context when a disabled sandbox becomes active on reload", async () => {
     await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), enabled: false }));
     pi = await openSandbox(cwd, sandbox, failures);
+    const nativeBash = createBashToolDefinition(cwd);
+    const assertNativeSchema = () => {
+      const definition = pi!.session.getToolDefinition("bash");
+      assert.ok(definition);
+      assert.deepEqual(definition.parameters, nativeBash.parameters);
+      assert.equal(definition.description, nativeBash.description);
+      assert.equal("requestUnsandboxed" in definition.parameters.properties, false);
+    };
+    assertNativeSchema();
     const states = () =>
       pi!.session.sessionManager
         .getEntries()
@@ -497,6 +507,7 @@ describe("sandbox", { concurrency: false }, () => {
 
     await writeFile(configPath, configBytes);
     await pi.session.reload();
+    assertNativeSchema();
     assert.deepEqual(states(), [
       { content: "Sandbox disabled", display: false },
       { content: "Sandbox enabled", display: false },
@@ -516,8 +527,7 @@ describe("sandbox", { concurrency: false }, () => {
         boundary.allowLocal(probe);
 
         await assert.rejects(pi.bash(probe), /Sandbox.*(?:dependencies|initialization)/i);
-        await assert.rejects(pi.bash(probe, { requestUnsandboxed: true }));
-        assert.equal(pi.permissionCount(), 0, "failed setup cannot offer an approval bypass");
+        assert.equal(pi.permissionCount(), 0, "failed setup cannot offer a permission bypass");
         await pi.command("disable");
         await assert.rejects(pi.bash(probe), /Sandbox.*(?:dependencies|initialization)/i);
         await assert.rejects(readFile(path.join(cwd, "probe.txt")), { code: "ENOENT" });
@@ -571,13 +581,12 @@ describe("sandbox", { concurrency: false }, () => {
   test("minimal Bash output preserves Sandbox approvals and execution", async () => {
     const displayConfig = path.join(getAgentDir(), "tool-display-mode.json");
     await writeFile(displayConfig, '{"mode":"minimal"}\n');
-    const command = "printf 'local\\n' >> order.txt; printf 'unconfined squid\\n'";
-    boundary.allowLocal(command);
-    boundary.attempts(command, [
-      { script: "printf 'confined squid\\n'" },
-      { script: "printf 'confined squid\\n'" },
+    const command = "printf 'confined squid\\n'";
+    boundary.attempts(command, [{ script: command }, { script: command }]);
+    boundary.attempts(dinnerCommand, [
+      ...permissionAttempts(target),
+      ...permissionAttempts(target),
     ]);
-    let approve = false;
     let approvals = 0;
     let customRendering = false;
     try {
@@ -602,8 +611,12 @@ describe("sandbox", { concurrency: false }, () => {
             setWidget() {},
             async select(_title, choices) {
               approvals++;
-              assert.deepEqual(choices, ["Deny", "Run once outside sandbox"]);
-              return approve ? "Run once outside sandbox" : "Deny";
+              assert.deepEqual(choices, [
+                "Allow and retry now",
+                "Allow but adapt for side-effects",
+                "Deny",
+              ]);
+              return "Allow and retry now";
             },
           },
         },
@@ -641,13 +654,9 @@ describe("sandbox", { concurrency: false }, () => {
         row.setExpanded(true);
         assert.match(text(), /^\s*confined squid\s*$/m);
 
-        approve = false;
-        await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
-        approve = true;
-        assert.equal(
-          bashOutput(await pi.bash(command, { requestUnsandboxed: true })),
-          "unconfined squid\n",
-        );
+        assert.match(bashOutput(await pi.bash(dinnerCommand)), /done/);
+        assert.ok(policy);
+        policy.filesystem.denyWrite = [];
         assert.deepEqual(SandboxManager.getConfig(), policy);
         assert.equal(await readFile(configPath, "utf8"), configBytes);
       }
@@ -670,227 +679,19 @@ describe("sandbox", { concurrency: false }, () => {
       row.setExpanded(true);
       assert.match(rendered(), /Chef's custom result\./);
       assert.doesNotMatch(rendered(), /↳/);
-      assert.equal(approvals, 4, "each unsandboxed invocation still needs a fresh decision");
-      assert.equal(pi.permissionCount(), 4);
-      assert.equal(await readFile(path.join(cwd, "order.txt"), "utf8"), "local\nlocal\n");
+      assert.equal(
+        approvals,
+        2,
+        "ordinary filesystem permissions survive minimal output and reload",
+      );
+      assert.equal(pi.permissionCount(), 2);
+      assert.equal(
+        await readFile(path.join(cwd, "effects.txt"), "utf8"),
+        "fed the kraken\n".repeat(4),
+      );
     } finally {
       await rm(displayConfig, { force: true });
     }
-  });
-
-  describe("requesting one command outside the sandbox", () => {
-    test("requires fresh approval each time without changing policy or later sandboxed commands", async () => {
-      const marker = "octopus\t\r\u001b[31m\u0007\u0085\u202e\u2066\u2028\u2029";
-      const command =
-        `printf '%s' '${marker}' > controls.txt;\n` +
-        "printf '%s\\n' \"$PI_SESSION_ID\" > 'local session.txt'; printf 'local\\n' >> order.txt; printf 'local\\n'";
-      boundary.allowLocal(command);
-      boundary.attempts(command, [
-        { script: "printf 'sandboxed\\n' >> order.txt; printf 'sandboxed\\n'" },
-      ]);
-      let approvals = 0;
-      pi = await openSandbox(cwd, sandbox, failures, {
-        ui: {
-          async select(title, choices, options) {
-            approvals++;
-            const displayed = command.replace(
-              marker,
-              String.raw`octopus\u0009\u000d\u001b[31m\u0007\u0085\u202e\u2066\u2028\u2029`,
-            );
-            assert.ok(title.includes(`\n$ ${displayed}\n`), JSON.stringify(title));
-            assert.ok(
-              !title.includes(marker),
-              "approval must not repeat unescaped command controls",
-            );
-            assert.match(title, /run once outside sandbox\?/i);
-            assert.ok(!title.includes(cwd), "the approval does not include a folder line");
-            assert.match(title, /descendants|child processes/i);
-            assert.match(title, /host filesystem and network access/);
-            assert.deepEqual(choices, ["Deny", "Run once outside sandbox"]);
-            assert.equal(options?.signal?.aborted, false);
-            return "Run once outside sandbox";
-          },
-        },
-      });
-      const policy = structuredClone(SandboxManager.getConfig());
-      const handoff = structuredClone(pi.handoff());
-      const status = pi.status();
-
-      assert.equal(bashOutput(await pi.bash(command, { requestUnsandboxed: true })), "local\n");
-      assert.equal(bashOutput(await pi.bash(command)), "sandboxed\n");
-      assert.equal(bashOutput(await pi.bash(command, { requestUnsandboxed: true })), "local\n");
-      assert.equal(approvals, 2);
-      assert.equal(pi.permissionCount(), 2, "both approvals use the shared permission bridge");
-      assert.equal(
-        await readFile(path.join(cwd, "order.txt"), "utf8"),
-        "local\nsandboxed\nlocal\n",
-      );
-      assert.equal(
-        await readFile(path.join(cwd, "local session.txt"), "utf8"),
-        `${pi.session.sessionId}\n`,
-      );
-      assert.deepEqual(await readFile(path.join(cwd, "controls.txt")), Buffer.from(marker));
-      assert.deepEqual(SandboxManager.getConfig(), policy);
-      assert.deepEqual(pi.handoff(), handoff);
-      assert.equal(pi.status(), status);
-      assert.equal(await readFile(configPath, "utf8"), configBytes);
-    });
-
-    for (const decision of ["deny", "dismiss", "UI failure"] as const) {
-      test(`${decision} does not execute the command or fall back to sandboxed execution`, async () => {
-        const command = "printf 'escaped\\n' > forbidden.txt";
-        // No local script or wrapped attempt is allowed. Any execution fails the boundary.
-        pi = await openSandbox(cwd, sandbox, failures, {
-          ui: {
-            async select() {
-              if (decision === "UI failure") throw new Error("The octopus closed the window");
-              return decision === "deny" ? "Deny" : undefined;
-            },
-          },
-        });
-        const policy = structuredClone(SandboxManager.getConfig());
-        await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
-        assert.equal(pi.permissionCount(), 1);
-        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
-        assert.deepEqual(SandboxManager.getConfig(), policy);
-        assert.equal(await readFile(configPath, "utf8"), configBytes);
-      });
-    }
-
-    for (const unavailable of ["non-interactive mode", "headless UI"] as const) {
-      test(`${unavailable} refuses an unsandboxed request without waiting for approval`, async () => {
-        pi = await openSandbox(cwd, sandbox, failures);
-        if (unavailable === "non-interactive mode") await pi.command("mode non-interactive");
-        else await pi.session.bindExtensions({ mode: "print" });
-        await assert.rejects(pi.bash("printf 'not approved\\n'", { requestUnsandboxed: true }));
-        assert.equal(pi.permissionCount(), 0);
-        assert.equal(await readFile(configPath, "utf8"), configBytes);
-      });
-    }
-
-    test("cancellation rejects a late approval and lets sandboxed execution continue", async () => {
-      const dialog = deferred<void>();
-      const decision = deferred<string | undefined>();
-      const controller = new AbortController();
-      const outside = "printf 'escaped\\n' > forbidden.txt";
-      const ordinary = "printf 'still sandboxed\\n'";
-      let dialogSignal: AbortSignal | undefined;
-      boundary.attempts(ordinary, [{ script: ordinary }]);
-      pi = await openSandbox(cwd, sandbox, failures, {
-        ui: {
-          // Deliberately non-cooperative UI: an approval reply can arrive after cancellation.
-          select: async (_title, _choices, options) => {
-            dialogSignal = options?.signal;
-            dialog.resolve();
-            return decision.promise;
-          },
-        },
-      });
-      const execution = pi.bash(outside, { requestUnsandboxed: true, signal: controller.signal });
-      const rejected = assert.rejects(execution);
-      let next: Promise<AgentToolResult<unknown>> | undefined;
-      try {
-        await waitForStep(dialog.promise, rejected);
-        next = pi.bash(ordinary);
-        assert.equal(dialogSignal?.aborted, false);
-        controller.abort();
-        assert.equal(dialogSignal?.aborted, true, "cancellation revokes the native selection");
-        decision.resolve("Run once outside sandbox");
-        await rejected;
-        assert.equal(bashOutput(await next), "still sandboxed\n");
-        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
-        assert.equal(await readFile(configPath, "utf8"), configBytes);
-      } finally {
-        controller.abort();
-        decision.resolve(undefined);
-        await Promise.allSettled([execution, next]);
-      }
-    });
-
-    test("cancels a queued request without waiting for an earlier filesystem dialog", async () => {
-      const dialog = deferred<void>();
-      const started = deferred<void>();
-      const decision = deferred<string | undefined>();
-      const controller = new AbortController();
-      boundary.attempts(dinnerCommand, permissionAttempts(target));
-      let prompts = 0;
-      pi = await openSandbox(cwd, sandbox, failures, {
-        ui: {
-          select: async () => {
-            prompts++;
-            dialog.resolve();
-            return decision.promise;
-          },
-        },
-      });
-      const ordinary = pi.bash(dinnerCommand);
-      const ordinaryCompleted = ordinary.then((result) => {
-        assert.match(bashOutput(result, 1), /Command exited with code 1/);
-      });
-      let outside: Promise<unknown> | undefined;
-      try {
-        await waitForStep(dialog.promise, ordinaryCompleted);
-        const tool = pi.session.agent.state.tools.find((candidate) => candidate.name === "bash");
-        assert.ok(tool);
-        outside = tool.execute(
-          "queued-outside",
-          { command: "printf 'escaped\\n' > forbidden.txt", requestUnsandboxed: true },
-          controller.signal,
-          () => started.resolve(),
-        );
-        const rejected = assert.rejects(outside);
-        await waitForStep(started.promise, rejected);
-        controller.abort();
-        await waitForStep(rejected, ordinaryCompleted);
-        assert.equal(prompts, 1, "the cancelled request must never open its own approval dialog");
-        decision.resolve("Deny");
-        await ordinaryCompleted;
-        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
-        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
-      } finally {
-        controller.abort();
-        decision.resolve("Deny");
-        await Promise.allSettled([ordinary, outside]);
-      }
-    });
-
-    test("reload revokes a pending approval rather than transferring it to the new extension", async () => {
-      const dialog = deferred<void>();
-      const revoked = deferred<void>();
-      const decision = deferred<string | undefined>();
-      let dialogSignal: AbortSignal | undefined;
-      pi = await openSandbox(cwd, sandbox, failures, {
-        ui: {
-          select: async (_title, _choices, options) => {
-            dialogSignal = options?.signal;
-            assert.equal(dialogSignal?.aborted, false);
-            dialogSignal.addEventListener("abort", () => revoked.resolve(), { once: true });
-            dialog.resolve();
-            // Simulate a stale frontend's late reply after its selection was revoked.
-            return decision.promise;
-          },
-        },
-      });
-      const execution = pi.bash("printf 'escaped\\n' > forbidden.txt", {
-        requestUnsandboxed: true,
-      });
-      const rejected = assert.rejects(execution);
-      let reload: Promise<void> | undefined;
-      try {
-        await waitForStep(dialog.promise, rejected);
-        reload = pi.session.reload();
-        await waitForStep(revoked.promise, reload);
-        assert.equal(dialogSignal?.aborted, true, "reload revokes the native selection");
-        decision.resolve("Run once outside sandbox");
-        await rejected;
-        await reload;
-        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
-        assert.equal(await readFile(configPath, "utf8"), configBytes);
-      } finally {
-        decision.resolve(undefined);
-        await Promise.allSettled([execution, reload]);
-      }
-    });
   });
 
   test("ignores untrusted project config and binds override paths to the session", async () => {
@@ -1414,23 +1215,10 @@ async function openSandbox(
         await session.prompt(`/sandbox ${args}`);
         return notifications.slice(before).join("\n");
       },
-      async bash(
-        command: string,
-        options: { requestUnsandboxed?: boolean; signal?: AbortSignal } = {},
-      ) {
+      async bash(command: string, options: { signal?: AbortSignal } = {}) {
         const tool = session.agent.state.tools.find((tool) => tool.name === "bash");
         assert.ok(tool);
-        return tool.execute(
-          "fixture-bash",
-          {
-            command,
-            timeout: 5,
-            ...(options.requestUnsandboxed === undefined
-              ? {}
-              : { requestUnsandboxed: options.requestUnsandboxed }),
-          },
-          options.signal,
-        );
+        return tool.execute("fixture-bash", { command, timeout: 5 }, options.signal);
       },
       dispose,
     };
