@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-11
+
 ### Changed
 
 - Adapt Usage charts, quota bars, and text to the active light or dark theme and terminal color capabilities.
