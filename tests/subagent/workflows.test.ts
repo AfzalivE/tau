@@ -474,6 +474,312 @@ describe("subagent", { concurrency: false }, () => {
     await assert.rejects(access(fullPath), { code: "ENOENT" });
   });
 
+  for (const [action, answer] of [
+    ["status", "There are twelve lime cookies."],
+    ["stop", "There are twelve lime cookies."],
+    ["status", ""],
+  ] as const) {
+    test(`consumes a completed ${answer ? "" : "no-text "}${action} result during a busy parent run without duplicate delivery`, async () => {
+      app = await openParent(cwd, failures);
+      app.press("\x0f");
+      await app.run({ action: "start", goal: "Count cookies", prompt: "Count the tray." });
+      const worker = await generations.next();
+      const parent = app.session.prompt("Wait for the timer.");
+      const waiting = await app.parentGenerations.next();
+      const expected = answer || "Subagent finished without a text answer.";
+      worker.reply(assistantMessage(answer));
+      await app.waitForView((view) => view.includes("✓ alpha"));
+      assert.equal(app.reportCount(), 0, "busy parents retain unread completions");
+
+      const id = randomUUID();
+      waiting(call("subagent", { action, id: "alpha" }, id));
+      const continued = await app.parentGenerations.next();
+      const result = app.result(id);
+      assert.equal(result.isError, false, contentText(result.content));
+      assert.equal(contentText(result.content).split("\n\n").at(-1), expected);
+      if (action === "stop") assert.equal(processes[0].hasClosed, true);
+      const calls = app.parentCalls();
+      continued(assistantMessage("The tray is counted."));
+      await parent;
+      await app.session.waitForIdle();
+      assert.equal(app.reportCount(), 0, "the tool result already delivered this completion");
+      assert.equal(app.reports.size, 0);
+      assert.equal(app.parentCalls(), calls, "consuming a report must suppress its wakeup");
+
+      if (action === "status") {
+        await app.run({ action: "steer", id: "alpha", message: "Count the next identical tray." });
+        const before = app.parentCalls();
+        (await generations.next()).reply(assistantMessage(answer));
+        assert.ok((await app.reports.next()).includes(expected));
+        await app.session.waitForIdle();
+        assert.equal(app.reportCount(), 1, "a later run is eligible even with identical text");
+        assert.equal(app.parentCalls(), before + 1);
+      }
+    });
+  }
+
+  test("reading a late process exit error leaves the completed answer unread for delivery", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Count cookies", prompt: "Count the tray." });
+    const worker = await generations.next();
+    const parent = app.session.prompt("Wait for the timer.");
+    const waiting = await app.parentGenerations.next();
+    worker.reply(assistantMessage("There are twelve lime cookies."));
+    await app.waitForView((view) => view.includes("✓ alpha"));
+    const child = processes[0];
+    assert.equal(child.process.kill("SIGKILL"), true);
+    await deadline(child.closed, "late child process exit");
+
+    const id = randomUUID();
+    waiting(call("subagent", { action: "status", id: "alpha" }, id));
+    const continued = await app.parentGenerations.next();
+    const result = app.result(id);
+    assert.equal(result.isError, false);
+    assert.equal(result.details.state, "error");
+    assert.match(contentText(result.content), /Subagent exited \(SIGKILL\)/);
+    assert.doesNotMatch(contentText(result.content), /There are twelve lime cookies/);
+    assert.equal(app.reportCount(), 0);
+    const calls = app.parentCalls();
+    continued(assistantMessage("The timer rang."));
+    await parent;
+    const report = await app.reports.next();
+    assert.match(report, /alpha · Count cookies · idle/);
+    assert.match(report, /There are twelve lime cookies\./);
+    assert.doesNotMatch(report, /Subagent exited|SIGKILL/);
+    await app.session.waitForIdle();
+    assert.equal(
+      app.reportCount(),
+      1,
+      "reading a different error must not consume the completed snapshot",
+    );
+    assert.equal(app.reports.size, 0);
+    assert.equal(app.parentCalls(), calls + 1);
+  });
+
+  test("listing completed children leaves their answers unread and batches them into one hidden wakeup", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Count cookies", prompt: "Count the tray." });
+    const alpha = await generations.next();
+    await app.run({ action: "start", goal: "Choose icing", prompt: "Choose an icing." });
+    const beta = await generations.next();
+    const parent = app.session.prompt("Wait for the timer.");
+    const waiting = await app.parentGenerations.next();
+    alpha.reply(assistantMessage("There are twelve cookies."));
+    beta.reply(assistantMessage("Use the lime icing."));
+    await app.waitForView((view) => view.includes("✓ alpha") && view.includes("✓ beta"));
+
+    const id = randomUUID();
+    waiting(call("subagent", { action: "status" }, id));
+    const continued = await app.parentGenerations.next();
+    const listed = app.result(id);
+    assert.equal(listed.isError, false);
+    assert.match(contentText(listed.content), /alpha.*idle/);
+    assert.match(contentText(listed.content), /beta.*idle/);
+    assert.doesNotMatch(contentText(listed.content), /twelve cookies|lime icing/);
+    assert.equal(app.reportCount(), 0);
+    const calls = app.parentCalls();
+    continued(assistantMessage("The timer rang."));
+    await parent;
+    const report = await app.reports.next();
+    assert.match(report, /alpha · Count cookies · idle/);
+    assert.match(report, /There are twelve cookies\./);
+    assert.match(report, /beta · Choose icing · idle/);
+    assert.match(report, /Use the lime icing\./);
+    await app.session.waitForIdle();
+    assert.equal(app.reportCount(), 1, "all unread completions share one custom message");
+    assert.equal(app.reports.size, 0);
+    assert.equal(app.parentCalls(), calls + 1, "the batch schedules only one model request");
+    const modelReport = app.parentContexts.at(-1)!.messages.at(-1)!;
+    assert.equal(modelReport.role, "user", "Pi converts hidden custom content for the model");
+    assert.equal(
+      contentText(modelReport.content),
+      report,
+      "the internal wrapper reaches the model",
+    );
+  });
+
+  test("reading a partial status does not consume its completion or an identical follow-up", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Inspect toppings", prompt: "Read toppings.txt." });
+    const worker = await generations.next();
+    const parent = app.session.prompt("Wait for the timer.");
+    const waiting = await app.parentGenerations.next();
+    worker.reply({
+      ...call("read", { path: "toppings.txt" }),
+      content: [
+        { type: "text", text: "The pistachios look promising." },
+        ...call("read", { path: "toppings.txt" }).content,
+      ],
+    });
+    let event;
+    do {
+      event = await childEvents.next();
+    } while (event.child !== worker.child || event.type !== "tool_execution_start");
+    const finishing = await generations.next();
+    const id = randomUUID();
+    waiting(call("subagent", { action: "status", id: "alpha" }, id));
+    const continued = await app.parentGenerations.next();
+    const partial = app.result(id);
+    assert.equal(partial.isError, false);
+    assert.equal(partial.details.state, "running");
+    assert.match(contentText(partial.content), /The pistachios look promising\./);
+    const answer = "Pistachios and lime are ready.";
+    finishing.reply(assistantMessage(answer));
+    await app.waitForView((view) => view.includes("✓ alpha"));
+    continued(assistantMessage("The toppings are inspected."));
+    await parent;
+    assert.match(await app.reports.next(), /Pistachios and lime are ready\./);
+    await app.session.waitForIdle();
+    assert.equal(app.reportCount(), 1);
+
+    await app.run({ action: "steer", id: "alpha", message: "Inspect the next identical batch." });
+    const calls = app.parentCalls();
+    (await generations.next()).reply(assistantMessage(answer));
+    assert.match(await app.reports.next(), /Pistachios and lime are ready\./);
+    await app.session.waitForIdle();
+    assert.equal(app.reportCount(), 2, "delivery does not deduplicate future runs by answer text");
+    assert.equal(app.parentCalls(), calls + 1);
+  });
+
+  for (const readsNewCompletion of [false, true]) {
+    test(`steering an unread child preserves its older completed snapshot ${readsNewCompletion ? "after a newer completion is consumed" : "while new work runs"}`, async () => {
+      app = await openParent(cwd, failures);
+      app.press("\x0f");
+      await app.run({ action: "start", goal: "Count toppings", prompt: "Count the pistachios." });
+      const worker = await generations.next();
+      const parent = app.session.prompt("Wait for the timer.");
+      const waiting = await app.parentGenerations.next();
+      worker.reply(assistantMessage("Six pistachios."));
+      await app.waitForView((view) => view.includes("✓ alpha"));
+      const steerId = randomUUID();
+      waiting(
+        call(
+          "subagent",
+          { action: "steer", id: "alpha", message: "Count the lime slices." },
+          steerId,
+        ),
+      );
+      const steered = await app.parentGenerations.next();
+      assert.equal(app.result(steerId).isError, false);
+      const followUp = await generations.next();
+      const statusId = randomUUID();
+      steered(call("subagent", { action: "status", id: "alpha" }, statusId));
+      let continued = await app.parentGenerations.next();
+      const running = app.result(statusId);
+      assert.equal(running.details.state, "running");
+      assert.doesNotMatch(contentText(running.content), /Six pistachios/);
+      assert.equal(app.reportCount(), 0);
+      if (readsNewCompletion) {
+        followUp.reply(assistantMessage("Eight lime slices."));
+        await app.waitForView((view) => view.includes("✓ alpha"));
+        const completedId = randomUUID();
+        continued(call("subagent", { action: "status", id: "alpha" }, completedId));
+        continued = await app.parentGenerations.next();
+        const completed = app.result(completedId);
+        assert.equal(completed.isError, false);
+        assert.match(contentText(completed.content), /Eight lime slices\./);
+        assert.doesNotMatch(contentText(completed.content), /Six pistachios/);
+      }
+      const calls = app.parentCalls();
+      continued(assistantMessage("The timer rang."));
+      await parent;
+      const report = await app.reports.next();
+      assert.match(report, /alpha · Count toppings · idle/);
+      assert.match(report, /Six pistachios\./);
+      assert.doesNotMatch(report, /Eight lime slices/);
+      await app.session.waitForIdle();
+      assert.equal(
+        app.reportCount(),
+        1,
+        "the unread older run survives steering and reads of newer runs",
+      );
+      assert.equal(app.reports.size, 0);
+      assert.equal(app.parentCalls(), calls + 1);
+      if (!readsNewCompletion) {
+        followUp.reply(assistantMessage("Eight lime slices."));
+        assert.match(await app.reports.next(), /Eight lime slices\./);
+        await app.session.waitForIdle();
+        assert.equal(
+          app.reportCount(),
+          2,
+          "finishing new work remains eligible after the old snapshot was delivered",
+        );
+      }
+    });
+  }
+
+  for (const action of ["status", "stop"] as const) {
+    test(`${action} joins delayed answer persistence before returning and consuming a completed report`, async () => {
+      app = await openParent(cwd, failures);
+      await app.run({
+        action: "start",
+        goal: "Seal the recipe",
+        prompt: "Report the full recipe.",
+      });
+      const worker = await generations.next();
+      const parent = app.session.prompt("Wait for the timer.");
+      const waiting = await app.parentGenerations.next();
+      const saving = mailbox<void>();
+      const release = mailbox<void>();
+      const executing = mailbox<void>();
+      const id = randomUUID();
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "tool_execution_start" && event.toolCallId === id) executing.push();
+      });
+      const originalWrite = fs.writeFile;
+      const writer = mock.method(
+        fs,
+        "writeFile",
+        async (...args: Parameters<typeof fs.writeFile>) => {
+          if (/\/answer-[^/]+\.md$/.test(String(args[0]))) {
+            saving.push();
+            await release.next();
+          }
+          return originalWrite(...args);
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const answer = "Lime zest and pistachios.\n".repeat(1000);
+        worker.reply(assistantMessage(answer));
+        await saving.next();
+        waiting(call("subagent", { action, id: "alpha" }, id));
+        await executing.next();
+        assert.equal(app.reportCount(), 0, "persistence cannot deliver early");
+        release.push();
+        const continued = await app.parentGenerations.next();
+        const result = app.result(id);
+        assert.equal(result.isError, false, contentText(result.content));
+        const fullPath = contentText(result.content).match(/Full answer: (.+)/)?.[1];
+        assert.ok(
+          fullPath,
+          "the tool must wait for the persisted completed snapshot, not return a partial answer",
+        );
+        assert.equal(await readFile(fullPath, "utf8"), answer);
+        if (action === "stop") assert.equal(processes[0].hasClosed, true);
+        const calls = app.parentCalls();
+        continued(assistantMessage("The recipe is sealed."));
+        await parent;
+        await app.session.waitForIdle();
+        assert.equal(
+          app.reportCount(),
+          0,
+          "a completion queued during persistence is consumed by the read",
+        );
+        assert.equal(app.reports.size, 0);
+        assert.equal(app.parentCalls(), calls);
+      } finally {
+        release.push();
+        unsubscribe();
+        writer.mock.restore();
+        syncBuiltinESMExports();
+      }
+    });
+  }
+
   test("delivers completed answers after a busy parent settles, without waking an aborted parent", async () => {
     app = await openParent(cwd, failures);
     app.press("\x0f");
@@ -1105,7 +1411,10 @@ describe("subagent", { concurrency: false }, () => {
     const worker = await generations.next();
     assert.equal(worker.child, "alpha-2");
     worker.reply(assistantMessage("The spare oven is ready."));
-    assert.match(await app.reports.next(), /^alpha-2 · Try the spare oven/);
+    assert.match(
+      await app.reports.next(),
+      /^Internal subagent reports\b[\s\S]*\nalpha-2 · Try the spare oven/,
+    );
     await app.session.waitForIdle();
 
     const target = app.session.sessionManager
@@ -1291,6 +1600,7 @@ async function openParent(
   const parentQueued = mailbox<void>();
   const parentGenerations = mailbox<(message: AssistantMessage) => void>();
   let parentCalls = 0;
+  let waitingParent = false;
   const parentContexts: Generation["context"][] = [];
   const resources = await createPiResources(cwd, getAgentDir(), [
     ghostty,
@@ -1307,10 +1617,13 @@ async function openParent(
       parentCalls++;
       parentContexts.push(context);
       const last = context.messages.at(-1)!;
-      if (last.role === "user" && contentText(last.content) === "Wait for the timer.") {
+      if (last.role === "user") waitingParent = contentText(last.content) === "Wait for the timer.";
+      // Keep this scripted run controllable across real tool batches until its final answer.
+      if (waitingParent) {
         return new Promise<AssistantMessage>((resolve) => {
           const finish = (message: AssistantMessage) => {
             signal?.removeEventListener("abort", cancel);
+            waitingParent = message.stopReason === "toolUse";
             resolve(message);
           };
           const cancel = () => finish({ ...assistantMessage(""), stopReason: "aborted" });
@@ -1450,6 +1763,13 @@ async function openParent(
   };
   const lines = (width = 160) => [...widgets.values()].flatMap((widget) => widget.render(width));
   const view = (width = 160) => lines(width).map(stripVTControlCharacters).join("\n");
+  const result = (id: string) => {
+    const message = session.messages.find(
+      (message) => message.role === "toolResult" && message.toolCallId === id,
+    );
+    assert.ok(message?.role === "toolResult", `missing result for ${id}`);
+    return message as typeof message & { details: Record<string, unknown> };
+  };
   const redraw = tui.requestRender.bind(tui);
   tui.requestRender = () => {
     renders++;
@@ -1532,7 +1852,12 @@ async function openParent(
       event.message.customType === "subagent"
     ) {
       assert.equal(event.message.display, false, "internal reports must not appear in chat");
-      reports.push(String(event.message.content));
+      const content = contentText(event.message.content);
+      assert.match(content, /^Internal subagent reports\b/);
+      assert.match(content, /internal evidence/i);
+      assert.match(content, /not (?:a )?user requests?/i);
+      assert.match(content, /Never acknowledge a report as a standalone reply/);
+      reports.push(content);
     }
   });
   const dispose = async () => {
@@ -1581,6 +1906,7 @@ async function openParent(
       parentQueued,
       parentGenerations,
       parentCalls: () => parentCalls,
+      result,
       view,
       lines,
       theme,
@@ -1626,11 +1952,7 @@ async function openParent(
         planned.set(id, args);
         await session.prompt(id, { source: "extension" });
         await session.waitForIdle();
-        const message = session.messages.find(
-          (message) => message.role === "toolResult" && message.toolCallId === id,
-        );
-        assert.ok(message?.role === "toolResult", `missing result for ${id}`);
-        return message as typeof message & { details: Record<string, unknown> };
+        return result(id);
       },
     };
   } catch (error) {

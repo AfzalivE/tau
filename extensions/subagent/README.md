@@ -11,7 +11,9 @@ The main agent gets one `subagent` tool with four actions:
 | `steer`  | `id`, `message`                                | Redirects a running child or continues its conversation after it finishes. |
 | `stop`   | `id`                                           | Cancels the child and closes its process.                                  |
 
-Completed answers arrive automatically when the parent's current run settles. If that run is interrupted, completed answers are still added to its history without restarting the cancelled parent. The main agent can keep working instead of checking repeatedly.
+Unread completed answers arrive automatically when the parent's current run settles. All pending reports are delivered together in one hidden message and trigger one parent continuation, rather than a separate turn per child. If that run is interrupted, unread completed answers are still added to its history without restarting the cancelled parent. The main agent can keep working instead of checking repeatedly.
+
+Reading a completed answer with `status` and an `id` consumes its pending report, so it will not also arrive automatically. Listing children or reading a running child's partial response does not consume its eventual answer. `stop` also consumes a completed report when returning it. Reading a completed answer waits for its full-answer file to finish saving. Later completions remain eligible for delivery, even if their text is unchanged. Reading one completion does not discard unread earlier answers from the same child.
 
 ## Tasks, models, and thinking
 
@@ -93,7 +95,7 @@ A compact running count appears only while children are active. With Tool Displa
 
 Completed rows remain while you read the current response and disappear on your next request. Active children and pending approvals stay visible. Steering a hidden child shows it again; hiding rows does not stop processes or remove conversations from `status` and `steer`. Automatic completion reports and extension-injected prompts do not clear recent rows.
 
-Completed answers reach the main agent and remain in session history, but their internal report messages are hidden from the chat. The main agent's response is the user-facing result.
+Completed answers reach the main agent and remain in session history, but their internal report messages are hidden from the chat. Reports are explicitly labelled as internal evidence, not user requests. The main agent is instructed to incorporate relevant findings into its work or consolidated result, not acknowledge reports individually. A separate update is reserved for a new blocker, required decision, or material correction.
 
 Ghostty's title spinner stays active while children are working, even when the parent is idle. Subagent emits session-scoped `subagent:start` and `subagent:end` events with `{ sessionKey }` when the first child starts work and the last finishes. These aggregate events include startup, follow-ups, answer finalization, and cancellation cleanup, in all modes. Retained idle conversations do not count as active work. Approval dialogs keep the title's waiting-for-input marker.
 

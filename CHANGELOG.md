@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
+
 ### Removed
 
 - **Breaking:** Sandbox no longer accepts Bash's `requestUnsandboxed` option. Commands cannot request a one-off escape from the sandbox.
