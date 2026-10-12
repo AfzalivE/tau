@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
-- Review model and focus defaults in agent-global `review.json`, including per-model thinking levels. `models=...` and `focuses=...` override independently, with singular aliases accepted in commands and config. Fresh `/fix` reviews use the same defaults.
-- Sandbox can review blocked filesystem operations, network connections, and macOS service lookups with an opt-in classifier before requesting manual approval. Filesystem and service approvals cover a single sandboxed retry without changing session policy. `/sandbox classifier` selects a Pi classifier or the experimental Codex Guardian adapter.
+- Configurable Review models, thinking levels, and focuses via `review.json`.
+- Opt-in Sandbox permission review with Pi classifiers or experimental Codex Guardian.
 - Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
 
 ### Fixed
