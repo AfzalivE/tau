@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
   cloneRuntimeConfig,
   escapeSlashCommandArg,
+  getFilesystemListValues,
   mutateStringList,
   resolveSandboxPath,
   type ListOp,
@@ -19,7 +20,6 @@ import {
   type SandboxRuntime,
   type SandboxState,
 } from "./runtime.js";
-import type { FilesystemList } from "./permissions/filesystem.js";
 import { isValidMachLookupRule, mutateMachLookupAllowList } from "./permissions/mach-lookup.js";
 
 const IS_MACOS = process.platform === "darwin";
@@ -34,6 +34,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox show",
     "  /sandbox doctor",
     "  /sandbox mode <interactive|non-interactive>",
+    "  /sandbox classifier",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
     ...(IS_MACOS
       ? [
@@ -95,6 +96,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "show", label: "show" },
   { value: "doctor", label: "doctor" },
   { value: "mode ", label: "mode" },
+  { value: "classifier", label: "classifier" },
   { value: "network ", label: "network" },
   ...(IS_MACOS ? [{ value: "mach-lookup ", label: "mach-lookup" }] : []),
   { value: "filesystem ", label: "filesystem" },
@@ -272,7 +274,7 @@ function getSandboxArgumentCompletions(
       );
     }
 
-    const list = tokens[1]?.toLowerCase() as FilesystemList | undefined;
+    const list = tokens[1]?.toLowerCase();
     if (list !== "deny-read" && list !== "allow-write" && list !== "deny-write") {
       return null;
     }
@@ -287,12 +289,7 @@ function getSandboxArgumentCompletions(
 
     if (tokens[2]?.toLowerCase() !== "remove") return null;
 
-    const values =
-      list === "deny-read"
-        ? (runtimeConfig?.filesystem.denyRead ?? [])
-        : list === "allow-write"
-          ? (runtimeConfig?.filesystem.allowWrite ?? [])
-          : (runtimeConfig?.filesystem.denyWrite ?? []);
+    const values = runtimeConfig ? getFilesystemListValues(runtimeConfig, list) : [];
     const valueBase = `${listBase}remove `;
     if (tokens.length === 3 && endsWithSpace) {
       return getStringValueCompletions(valueBase, "", values);
@@ -379,6 +376,15 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         return;
       }
 
+      if (subcommand === "classifier") {
+        if (tokens.length > 1) {
+          notify(ctx, "Usage: /sandbox classifier", "warning");
+          return;
+        }
+        await runtime.configureClassifier(ctx);
+        return;
+      }
+
       if (subcommand === "doctor") {
         if (tokens.length > 1) {
           notify(ctx, "Usage: /sandbox doctor", "warning");
@@ -434,6 +440,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           "Sandbox Configuration (session):",
           `  State: enabled`,
           `  Mode: ${runtime.promptMode}`,
+          `  Classifier: ${runtime.classifierSelection(ctx) === false ? "manual approvals" : (runtime.classifierSelection(ctx) ?? "offer setup when available")}`,
           `  Runtime state: ${getSandboxRunMode(runtime.state)}`,
           "",
           "  Network:",
@@ -562,7 +569,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         const runtimeConfig = requireRuntimeConfig(ctx, runtime);
         if (!runtimeConfig) return;
 
-        const list = tokens[1]?.toLowerCase() as FilesystemList | undefined;
+        const list = tokens[1]?.toLowerCase();
         const op = tokens[2]?.toLowerCase() as ListOp | undefined;
         const targetPath = tokens.slice(3).join(" ").trim();
 
@@ -580,12 +587,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         }
 
         const nextConfig = cloneRuntimeConfig(runtimeConfig);
-        const values =
-          list === "deny-read"
-            ? nextConfig.filesystem.denyRead
-            : list === "allow-write"
-              ? nextConfig.filesystem.allowWrite
-              : nextConfig.filesystem.denyWrite;
+        const values = getFilesystemListValues(nextConfig, list);
         // Exact runtime entries are already expanded and may contain literal dollars.
         const resolvedPath = values.includes(targetPath)
           ? targetPath

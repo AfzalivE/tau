@@ -66,6 +66,22 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
     });
   });
 
+  test("classifier configuration is validated but never passed into OS policy", async () => {
+    for (const [value, expected] of [
+      ["openai-codex/guardian", "openai-codex/guardian"],
+      ["openrouter/vendor/model", "openrouter/vendor/model"],
+      [false, false],
+      [true, false],
+      ["missing-provider", false],
+      ["provider/unsafe\u001bmodel", false],
+    ] as const) {
+      await writeFile(configPath, JSON.stringify({ classifier: value }));
+      const loaded = config.loadConfig(cwd).config;
+      assert.equal(loaded.classifier, expected);
+      assert.equal("classifier" in config.toRuntimeConfig(loaded, cwd), false);
+    }
+  });
+
   test("native per-execution filesystem exceptions do not change the next launch's policy", async () => {
     const secret = path.join(cwd, "sealed recipe.txt");
     const output = path.join(cwd, "approved recipe.txt");

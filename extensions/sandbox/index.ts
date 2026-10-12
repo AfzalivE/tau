@@ -54,11 +54,12 @@
  */
 
 import { fileURLToPath } from "node:url";
+import type { Usage } from "@earendil-works/pi-ai";
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createSandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
-import { createSandboxRuntime, getSandboxRunMode } from "./runtime.js";
+import { createSandboxRuntime, getSandboxRunMode, type SandboxInvocation } from "./runtime.js";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
   pi.registerFlag("no-sandbox", {
@@ -74,6 +75,15 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   });
 
   const runtime = createSandboxRuntime(pi);
+  const failedUsage = new Map<string, Usage>();
+  // Pi converts thrown tool errors to results. Restore already-incurred review usage at
+  // that public boundary without changing native Bash's cancellation/error behavior.
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "bash") return;
+    const usage = failedUsage.get(event.toolCallId);
+    failedUsage.delete(event.toolCallId);
+    if (usage) return { usage: event.usage ? sumUsage([event.usage, usage]) : usage };
+  });
   pi.events.on("subagent:sandbox", (data) => {
     const handoff = data as { config?: unknown; extension?: string; error?: string };
     const policy = runtime.getRuntimeConfig();
@@ -96,15 +106,6 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     }
     handoff.extension = fileURLToPath(import.meta.url);
   });
-  const sandboxedOps = createSandboxedBashOps({
-    getContext: () => runtime.context,
-    getSandboxConfig: () => runtime.config,
-    getRuntimeConfig: () => runtime.getRuntimeConfig(),
-    getPromptMode: () => runtime.promptMode,
-    applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
-    recordEvent: runtime.recordEvent,
-  });
-
   const localBashTool = createBashToolDefinition(process.cwd());
   pi.registerTool({
     ...localBashTool,
@@ -137,34 +138,71 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         return localBashTool.execute(id, params, signal, onUpdate, ctx);
       }
 
-      return runtime.withPermissionContext(ctx, signal, (invocationContext, invocationSignal) => {
+      return runtime.withPermissionLifetime(ctx, signal, async (toolSignal) => {
+        let invocation: SandboxInvocation | undefined;
         const tool = createBashToolDefinition(ctx.cwd, {
           operations: {
             exec(command, cwd, options) {
-              return sandboxedOps.runSerially(
-                () =>
-                  runtime.withBashContext(ctx, invocationSignal, async () => {
-                    const result = await sandboxedOps.exec(command, cwd, options);
-                    if (invocationSignal.aborted) throw new Error("aborted");
-                    return result;
-                  }),
-                invocationSignal,
-              );
+              // Keep queue rejection and cancellation inside native Bash's output/error handling.
+              return runtime.runBash(ctx, toolSignal, (owner) => {
+                invocation = owner;
+                return createSandboxedBashOps({
+                  ctx: owner.ctx,
+                  getSandboxConfig: () => runtime.config,
+                  getRuntimeConfig: () => runtime.getRuntimeConfig(),
+                  applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
+                  recordEvent: runtime.recordEvent,
+                  resolvePermission: (proposal) => runtime.resolvePermission(proposal, owner),
+                }).exec(command, cwd, { ...options, signal: owner.signal });
+              });
             },
           },
         });
-        return tool.execute(id, params, invocationSignal, onUpdate, invocationContext);
+        try {
+          const result = await tool.execute(id, params, toolSignal, onUpdate, ctx);
+          return invocation?.usages.length
+            ? { ...result, usage: sumUsage(invocation.usages) }
+            : result;
+        } catch (error) {
+          if (invocation?.usages.length) failedUsage.set(id, sumUsage(invocation.usages));
+          throw error;
+        }
       });
     },
   });
 
   pi.on("session_start", async (_event, ctx) => {
     await runtime.start(ctx);
+    failedUsage.clear();
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     await runtime.shutdown(ctx);
+    failedUsage.clear();
   });
 
   registerSandboxCommand(pi, runtime);
+}
+
+function sumUsage(usages: Usage[]): Usage {
+  const total: Usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  for (const usage of usages) {
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+      total[key] += usage[key];
+    }
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
+      total.cost[key] += usage.cost[key];
+    }
+    for (const key of ["cacheWrite1h", "reasoning"] as const) {
+      if (usage[key] !== undefined) total[key] = (total[key] ?? 0) + usage[key];
+    }
+  }
+  return total;
 }

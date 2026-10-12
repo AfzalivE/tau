@@ -1,26 +1,89 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-
 import {
   cloneRuntimeConfig,
-  escapeSlashCommandArg,
   mutateStringList,
   type ListOp,
-  type PromptMode,
   type SandboxPolicy,
 } from "../config.js";
-import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
-import {
-  createPermissionResolution,
-  showPermissionDialog,
-  type PermissionResolution,
-} from "./dialog.js";
+import type { SandboxEventReason } from "../runtime.js";
+import type { PermissionProposal } from "./proposal.js";
 
-interface MachLookupViolation {
+export interface MachLookupViolation {
   service: string;
 }
 
+export function proposeMachLookupPermission(options: {
+  runtimeConfig: SandboxPolicy;
+  violations: MachLookupViolation[];
+  command: string;
+  cwd: string;
+  rawOutput: string;
+  autoRetryAvailable: boolean;
+  automaticReviewAvailable: boolean;
+}): PermissionProposal | null {
+  const {
+    runtimeConfig,
+    violations,
+    command,
+    cwd,
+    rawOutput,
+    autoRetryAvailable,
+    automaticReviewAvailable,
+  } = options;
+  if (violations.length === 0) return null;
+
+  const violation =
+    violations.find((candidate) => !isMachLookupAlreadyAllowed(runtimeConfig, candidate.service)) ??
+    violations[0];
+  const { service } = violation;
+  const alreadyApplied = isMachLookupAlreadyAllowed(runtimeConfig, service);
+  const reason: SandboxEventReason = alreadyApplied
+    ? "already-approved-still-failed"
+    : "missing-mach-lookup";
+  const proposal: PermissionProposal = {
+    kind: "mach-lookup",
+    policy: runtimeConfig,
+    target: service,
+    command,
+    cwd,
+    operation: "lookup",
+    reason,
+    alreadyApplied,
+    action: { list: "mach-lookup", op: "add", value: service },
+    autoRetryAvailable,
+  };
+
+  if (
+    process.platform === "darwin" &&
+    autoRetryAvailable &&
+    automaticReviewAvailable &&
+    !alreadyApplied &&
+    isLiteralMachLookupService(service)
+  ) {
+    const config = cloneRuntimeConfig(runtimeConfig);
+    mutateMachLookupAllowList(config, "add", service);
+    proposal.automatic = {
+      config,
+      permission: {
+        scope: "one sandboxed retry and its descendants; not session policy",
+        target: service,
+        operation: "lookup",
+        addAllowMachLookup: [service],
+        diagnosticSource: "seatbelt-denial",
+        diagnosticAuthority:
+          "none; neither necessity nor authorization follows from this diagnostic",
+        scopeWarning:
+          "Service access can invoke operations beyond the process sandbox. The service name alone does not establish the request payload.",
+      },
+      evidence: rawOutput,
+    };
+  }
+  return proposal;
+}
+
 function detectMachLookupViolationFromLine(line: string): MachLookupViolation | null {
-  const match = line.match(/\bdeny\(\d+\)\s+mach-lookup\s+([^\s()"'*]+)/i);
+  // Parse Seatbelt's operation field, never a denial-like suffix in a filesystem path.
+  // Preserve the complete reported name. Ambiguous names stay manual.
+  const match = line.match(/^[^\r\n(]+\(\d+\)\s+deny\(\d+\)\s+mach-lookup\s+([^\r\n]+)$/i);
   const service = match?.[1];
   return service ? { service } : null;
 }
@@ -67,114 +130,6 @@ function isMachLookupAlreadyAllowed(runtimeConfig: SandboxPolicy | null, service
   );
 }
 
-function buildMachLookupAllowCommand(service: string): string {
-  return `/sandbox mach-lookup add ${escapeSlashCommandArg(service)}`;
-}
-
-function formatMachLookupViolationSummary(service: string): string {
-  return `[sandbox] Blocked macOS service lookup: ${service}`;
-}
-
-function describeMachLookupEventSummary(
-  reason: SandboxEventReason,
-  outcome: SandboxEventOutcome,
-): string {
-  if (outcome === "allowed") return "user allowed macOS service lookup for this session";
-  if (reason === "already-approved-still-failed") {
-    return "macOS service lookup was previously allowed for this session but is still failing";
-  }
-  return "macOS service lookup is not in the allowed service list";
-}
-
-function formatMachLookupBlockedTarget(service: string): string {
-  return `Sandbox blocked access to macOS service ${service}.`;
-}
-
-export async function handleMachLookupViolation(options: {
-  ctx: ExtensionContext | null;
-  promptMode: PromptMode;
-  runtimeConfig: SandboxPolicy;
-  violations: MachLookupViolation[];
-  command: string;
-  cwd?: string;
-  pendingDialogs?: Map<string, Promise<PermissionResolution | null>>;
-  applyRuntimeConfigForSession?: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
-  recordEvent?: (event: SandboxEvent) => void;
-  autoRetryAvailable?: boolean;
-}): Promise<PermissionResolution | null> {
-  const {
-    ctx,
-    promptMode,
-    runtimeConfig,
-    violations,
-    command,
-    cwd,
-    pendingDialogs,
-    applyRuntimeConfigForSession,
-    recordEvent,
-    autoRetryAvailable = true,
-  } = options;
-  if (violations.length === 0) return null;
-
-  const violation =
-    violations.find((candidate) => !isMachLookupAlreadyAllowed(runtimeConfig, candidate.service)) ??
-    violations[0];
-  const { service } = violation;
-  const blockedTarget = formatMachLookupBlockedTarget(service);
-  const allowCommand = buildMachLookupAllowCommand(service);
-  const alreadyApproved = isMachLookupAlreadyAllowed(runtimeConfig, service);
-  const eventReason: SandboxEventReason = alreadyApproved
-    ? "already-approved-still-failed"
-    : "missing-mach-lookup";
-
-  const recordMachLookupEvent = (outcome: SandboxEventOutcome): void => {
-    recordEvent?.({
-      timestamp: Date.now(),
-      kind: "mach-lookup",
-      outcome,
-      reason: eventReason,
-      target: service,
-      command,
-      cwd,
-      summary: describeMachLookupEventSummary(eventReason, outcome),
-      suggestedCommand: outcome === "blocked" && !alreadyApproved ? allowCommand : undefined,
-    });
-  };
-
-  if (promptMode === "non-interactive" || !ctx?.hasUI) {
-    recordMachLookupEvent("blocked");
-    return {
-      kind: "deny",
-      message: `${formatMachLookupViolationSummary(service)}\n[sandbox] To temporarily allow for this session, run: ${allowCommand}`,
-    };
-  }
-
-  if (alreadyApproved) {
-    recordMachLookupEvent("blocked");
-    return createPermissionResolution("allow-adapt", blockedTarget, false);
-  }
-
-  const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
-  return showPermissionDialog({
-    ctx,
-    title: `Sandbox blocked access to macOS service ${service}`,
-    promptKey,
-    pendingDialogs,
-    autoRetryAvailable,
-    onDecision(decision) {
-      if (decision === "deny") {
-        recordMachLookupEvent("blocked");
-        return createPermissionResolution(decision, blockedTarget);
-      }
-
-      const nextConfig = cloneRuntimeConfig(runtimeConfig);
-      const changed = mutateMachLookupAllowList(nextConfig, "add", service);
-      if (changed) {
-        applyRuntimeConfigForSession?.(ctx, nextConfig);
-      }
-
-      recordMachLookupEvent("allowed");
-      return createPermissionResolution(decision, blockedTarget, changed);
-    },
-  });
+function isLiteralMachLookupService(service: string): boolean {
+  return service.length > 0 && !/[\s\\*?[\]{}()"'\p{C}]/u.test(service);
 }

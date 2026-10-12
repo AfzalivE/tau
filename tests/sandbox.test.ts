@@ -6,8 +6,19 @@ import os from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import { SandboxManager, type SandboxAskCallback } from "@anthropic-ai/sandbox-runtime";
+import {
+  getDefaultWritePaths,
+  SandboxManager,
+  type SandboxAskCallback,
+} from "@anthropic-ai/sandbox-runtime";
 import type { AgentToolCallOutcome, AgentToolResult } from "@earendil-works/pi-agent-core";
+import {
+  createProvider,
+  type ClassifierContext,
+  type ClassifierModel,
+  type ClassifierResult,
+  type ProviderClassifier,
+} from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createBashToolDefinition,
@@ -34,10 +45,32 @@ import { scriptedProvider } from "./helpers/provider.js";
 const dinnerCommand =
   "printf 'fed the kraken\\n' >> effects.txt; printf 'Dinner served.\\n' > 'secret recipe.txt'; printf 'done\\n'";
 
+const permissionClassifier: ClassifierModel<"tau-permission-fixture"> = {
+  type: "classifier",
+  provider: "tau-permission-fixture",
+  api: "tau-permission-fixture",
+  id: "kraken-review",
+  name: "Kraken permission review",
+  baseUrl: "https://classifier.invalid",
+  input: ["text"],
+  contextWindow: 64000,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
+const permissionUsage = {
+  input: 12,
+  output: 3,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 15,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.004 },
+};
+const permissionIntent = "Serve dinner to the kraken using the workshop recipe.";
+
 describe("sandbox", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>> | undefined;
   let sandbox: ExtensionFactory;
   let createRuntime: typeof import("../extensions/sandbox/runtime.js").createSandboxRuntime;
+  let filesystemPermissions: typeof import("../extensions/sandbox/permissions/filesystem.js");
   let directory: string;
   let cwd: string;
   let target: string;
@@ -52,6 +85,7 @@ describe("sandbox", { concurrency: false }, () => {
     // Defaults include getAgentDir() at import time.
     ({ default: sandbox } = await import("../extensions/sandbox/index.js"));
     ({ createSandboxRuntime: createRuntime } = await import("../extensions/sandbox/runtime.js"));
+    filesystemPermissions = await import("../extensions/sandbox/permissions/filesystem.js");
   });
 
   after(async () => home?.dispose());
@@ -96,16 +130,26 @@ describe("sandbox", { concurrency: false }, () => {
     }
   });
 
-  test("permission contexts keep native getters and reject access after reload", async () => {
+  test("permission lifetimes retain the real Pi context and its native getters across UI binding and reload", async () => {
     let capturedContext: ExtensionContext | undefined;
+    let capturedSignal: AbortSignal | undefined;
+    let capturedPrompts:
+      | import("../extensions/sandbox/runtime.js").SandboxInvocation["prompts"]
+      | undefined;
     const resources = await createPiResources(cwd, getAgentDir(), [
       (api) => {
         const runtime = createRuntime(api);
         api.on("session_start", (_event, ctx) =>
-          runtime.withPermissionContext(ctx, undefined, async (wrapped) => {
-            capturedContext = wrapped;
+          runtime.withPermissionLifetime(ctx, undefined, async (signal) => {
+            capturedSignal = signal;
+            await runtime.runBash(ctx, signal, async (owner) => {
+              assert.equal(owner.ctx, ctx, "runBash must retain the exact native Pi context");
+              capturedContext = owner.ctx;
+              capturedPrompts = owner.prompts;
+            });
           }),
         );
+        api.on("session_shutdown", (_event, ctx) => runtime.shutdown(ctx));
       },
     ]);
     const { session } = await createAgentSession({
@@ -115,20 +159,31 @@ describe("sandbox", { concurrency: false }, () => {
     try {
       await session.bindExtensions({ mode: "print" });
       const captured = capturedContext;
+      const lifetime = capturedSignal;
+      const prompts = capturedPrompts;
       assert.ok(captured);
+      assert.ok(lifetime);
+      assert.ok(prompts);
+      assert.equal(lifetime.aborted, false);
       assert.equal(captured.hasUI, false);
       session.setThinkingLevel("high");
       assert.equal(captured.thinkingLevel, "high", "thinking must not be frozen at capture time");
       await session.bindExtensions({
         mode: "tui",
-        uiContext: uiBoundary({ notify() {} }, failures),
+        uiContext: uiBoundary({ notify() {}, setStatus() {} }, failures),
       });
       assert.equal(captured.hasUI, true);
-      const oldUI = captured.ui;
+      assert.equal(
+        await prompts.confirm("Late approval", "The operation already completed."),
+        false,
+      );
+      assert.equal(await prompts.select("Late approval", ["Allow", "Deny"]), undefined);
       await session.reload();
+      assert.equal(lifetime.aborted, true, "reload must revoke the old runtime lifetime");
       assert.throws(() => captured.model, /stale/);
       assert.throws(() => captured.ui, /stale/);
-      assert.throws(() => oldUI.confirm, /stale/);
+      assert.equal(await prompts.confirm("Late approval", "The runtime was reloaded."), false);
+      assert.equal(await prompts.select("Late approval", ["Allow", "Deny"]), undefined);
     } finally {
       session.dispose();
     }
@@ -330,7 +385,10 @@ describe("sandbox", { concurrency: false }, () => {
           }
           return script;
         });
-        boundary.onCommandClose(firstCommand, () => firstClosed.resolve());
+        boundary.onCommandClose(firstCommand, () => {
+          events.push("first child closed");
+          firstClosed.resolve();
+        });
 
         pi = await openSandbox(
           cwd,
@@ -421,7 +479,15 @@ describe("sandbox", { concurrency: false }, () => {
             true,
             "the actual dialog must lose its invocation lifetime",
           );
-          await waitForStep(firstClosed.promise, execution);
+          if (ending === "ordinary completion") {
+            await waitForStep(firstClosed.promise, execution);
+          } else {
+            assert.ok(
+              !boundary.spawnedScripts.includes(firstCommand),
+              "cancellation before spawn must not launch a child",
+            );
+            assert.ok(!events.includes("first child closed"));
+          }
           assert.equal(await readFile(configPath, "utf8"), configBytes);
           assert.ok(
             !events.includes("first tool settled"),
@@ -448,6 +514,12 @@ describe("sandbox", { concurrency: false }, () => {
           assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
           siblingDecision.resolve(true);
           await execution;
+          assert.equal(
+            boundary.spawnedScripts.includes(firstCommand),
+            ending === "ordinary completion",
+            "the cancelled command must remain unlaunched after all permission cleanup",
+          );
+          assert.equal(events.includes("first child closed"), ending === "ordinary completion");
           assert.equal(await siblingApproval, true);
           assert.ok(firstOutcome);
           assert.equal(firstOutcome.isError, ending === "cancellation");
@@ -925,6 +997,1112 @@ describe("sandbox", { concurrency: false }, () => {
     }
   });
 
+  describe("literal permission diagnostics", () => {
+    for (const { name, format, basename, automatic } of [
+      { name: "Node path ending in a colon", format: "node", basename: "recipe:", automatic: true },
+      {
+        name: "Linux path with an operation-like suffix",
+        format: "linux",
+        basename: "",
+        automatic: true,
+      },
+      {
+        name: "literal question mark",
+        format: "seatbelt",
+        basename: "report?.txt",
+        automatic: false,
+      },
+      { name: "literal brackets", format: "seatbelt", basename: "report[8].txt", automatic: false },
+      {
+        name: "literal directory anchoring a read glob",
+        format: "read",
+        basename: "[WIP]/recipe8.txt",
+        automatic: false,
+      },
+    ]) {
+      test(`${name} preserves its exact target and cannot acquire wildcard authority`, async () => {
+        const reportedPath =
+          format === "linux" ? `${cwd}/recipe file-write ${target}` : path.join(cwd, basename);
+        await mkdir(path.dirname(reportedPath), { recursive: true });
+        await writeFile(reportedPath, "Eight pinches of paprika.\n");
+        const line =
+          format === "linux"
+            ? `deny openat ${reportedPath}`
+            : `bash(42) deny(1) file-${format === "read" ? "read" : "write"}-data ${reportedPath}`;
+        const evidence =
+          format === "node"
+            ? `Error: EPERM: operation not permitted, open '${reportedPath}'`
+            : `<sandbox_violations>\n${line}\n</sandbox_violations>\nError: EPERM: operation not permitted, open '${target}'`;
+        const violations = filesystemPermissions.detectFilesystemViolations(evidence);
+        assert.equal(violations.length, 1);
+        assert.equal(violations[0]!.path, reportedPath);
+        assert.equal(
+          violations[0]!.kind,
+          format === "node" ? "unknown" : format === "read" ? "read" : "write",
+        );
+        const explicitDeny = basename === "report[8].txt" || format === "read";
+        const denyRule = format === "read" ? path.join(cwd, "[WIP]", "recipe?.txt") : reportedPath;
+        const policy = {
+          network: { allowedDomains: [], deniedDomains: [], allowUnixSockets: [] },
+          filesystem: {
+            allowWrite: explicitDeny ? [cwd] : [],
+            denyWrite: explicitDeny && format !== "read" ? [denyRule] : [],
+            denyRead: format === "read" ? [denyRule] : [],
+            allowRead: [],
+          },
+        };
+        const protectedViolations = filesystemPermissions.getRuntimeProtectedWriteViolations(
+          policy,
+          violations,
+          cwd,
+        );
+        assert.deepEqual(protectedViolations, [], "literal-name denies remain configurable");
+        const original = structuredClone(policy);
+        const proposal = filesystemPermissions.proposeFilesystemPermission({
+          runtimeConfig: policy,
+          violations,
+          diagnosticSource: "process-output",
+          command: dinnerCommand,
+          cwd,
+          rawOutput: evidence,
+          autoRetryAvailable: true,
+          automaticReviewAvailable: true,
+          runtimeProtectedWriteViolations: protectedViolations,
+        });
+        assert.ok(proposal);
+        assert.ok(proposal.kind === "filesystem");
+        assert.equal(proposal.policy, policy);
+        assert.equal(proposal.target, reportedPath);
+        assert.equal(proposal.operation, violations[0]!.kind);
+        assert.deepEqual(proposal.action, {
+          list: format === "read" ? "deny-read" : explicitDeny ? "deny-write" : "allow-write",
+          op: explicitDeny ? "remove" : "add",
+          value: denyRule,
+        });
+        assert.equal(
+          proposal.reason,
+          format === "read"
+            ? "explicit-deny-read"
+            : explicitDeny
+              ? "explicit-deny-write"
+              : "missing-allow-write",
+        );
+        assert.deepEqual(policy, original, "a proposal cannot mutate session policy");
+        if (automatic) {
+          assert.ok(proposal.automatic);
+          const permission = proposal.automatic.permission;
+          assert.equal(permission.target, reportedPath);
+          assert.equal(permission.operation, "write");
+          assert.equal(permission.reportedOperation, violations[0]!.kind);
+          assert.equal(permission.diagnosticSource, "process-output");
+          assert.match(String(permission.diagnosticAuthority), /none/);
+          assert.deepEqual(permission.addAllowWrite, [reportedPath]);
+          assert.deepEqual(permission.removeDenyWrite, []);
+          assert.deepEqual(proposal.automatic.config, {
+            ...original,
+            filesystem: { ...original.filesystem, allowWrite: [reportedPath] },
+          });
+          assert.equal(proposal.automatic.evidence, evidence);
+        } else
+          assert.equal(proposal.automatic, undefined, "a literal filename is not a pattern grant");
+        assert.equal(await readFile(reportedPath, "utf8"), "Eight pinches of paprika.\n");
+      });
+    }
+  });
+
+  describe("classifier permissions", () => {
+    let classifier: ReturnType<typeof nativePermissionClassifier>;
+
+    beforeEach(async () => {
+      classifier = nativePermissionClassifier(async (_model, context) =>
+        permissionClassification(context, "approve"),
+      );
+      configBytes = JSON.stringify({
+        ...JSON.parse(configBytes),
+        classifier: `${permissionClassifier.provider}/${permissionClassifier.id}`,
+      });
+      await writeFile(configPath, configBytes);
+    });
+
+    for (const { scenario, mode } of [
+      { scenario: "file deny", mode: "tui" },
+      { scenario: "file deny", mode: "rpc" },
+      { scenario: "directory deny with failed retry", mode: "tui" },
+      { scenario: "new write root", mode: "tui" },
+      { scenario: "read-like filename", mode: "tui" },
+      { scenario: "read restoring default writes", mode: "tui" },
+      { scenario: "glob deny with literal-name reading", mode: "tui" },
+      { scenario: "Linux-shaped output", mode: "tui" },
+    ] as const) {
+      test(
+        `${mode}: ${scenario}: approves only one temporary sandboxed retry`,
+        {
+          skip: scenario === "glob deny with literal-name reading" && process.platform !== "darwin",
+        },
+        async (t) => {
+          const retryFails = scenario === "directory deny with failed retry";
+          const restoresDefaults = scenario === "read restoring default writes";
+          const globDeny = scenario === "glob deny with literal-name reading";
+          const read = scenario === "read-like filename" || restoresDefaults;
+          const reportedPath = restoresDefaults
+            ? path.join(os.homedir(), ".npm", "_logs")
+            : read
+              ? path.join(cwd, "recipe file-write ", "chosen", "target")
+              : target;
+          const readTarget = restoresDefaults
+            ? path.join(reportedPath, "kraken-recipe.txt")
+            : reportedPath;
+          const command = read
+            ? `printf 'fed the kraken\\n' >> effects.txt; cat ${JSON.stringify(readTarget)}`
+            : dinnerCommand;
+          const configuration = JSON.parse(configBytes);
+          if (read) {
+            const created = await mkdir(path.dirname(readTarget), { recursive: true });
+            if (restoresDefaults && created)
+              t.after(() => rm(created, { recursive: true, force: true }));
+            await writeFile(readTarget, "Eight pinches of paprika.\n");
+            configuration.filesystem.denyRead = [
+              restoresDefaults ? path.dirname(reportedPath) : path.relative(cwd, reportedPath),
+            ];
+          }
+          if (globDeny) {
+            configuration.filesystem.denyWrite = ["secret recip[e].txt"];
+            await writeFile(path.join(cwd, "secret recip[e].txt"), "A recipe wearing brackets.\n");
+          }
+          if (retryFails) configuration.filesystem.denyWrite = ["."];
+          if (scenario === "new write root") {
+            configuration.filesystem.allowWrite = [];
+            configuration.filesystem.denyWrite = [];
+            await rm(target);
+          }
+          configBytes = JSON.stringify(configuration);
+          await writeFile(configPath, configBytes);
+          let blocked = permissionAttempts(reportedPath)[0]!;
+          let evidence = "write refused\n";
+          let diagnosticSource =
+            process.platform === "linux" ? "linux-write-attempt" : "seatbelt-denial";
+          if (read || scenario === "Linux-shaped output") {
+            const record = read
+              ? `bash(42) deny(1) file-read-data ${reportedPath}`
+              : `deny openat ${reportedPath}`;
+            const native = read ? process.platform === "darwin" : process.platform === "linux";
+            if (read && native) blocked = { ...blocked, violation: record };
+            else {
+              evidence = `<sandbox_violations>\n${record}\n</sandbox_violations>\n`;
+              blocked = {
+                script: `printf 'fed the kraken\\n' >> effects.txt\ncat <<'TAU_ERROR' >&2\n${evidence}TAU_ERROR\nexit 1`,
+                ...(native ? { violation: record } : {}),
+              };
+            }
+            if (!native) diagnosticSource = "process-output";
+          }
+          boundary.attempts(command, [
+            blocked,
+            retryFails ? { script: blocked.script } : { script: command },
+          ]);
+          pi = await openClassified({ mode });
+          const snapshot = permissionSnapshot();
+          const { policy, invocationPolicy } = snapshot;
+
+          const result = await pi.bash(command);
+          const output = bashOutput(result, retryFails ? 1 : 0);
+          assert.equal(classifier.calls.length, 1);
+          assert.equal(pi.permissionCount(), 0);
+          assert.deepEqual(result.usage, permissionUsage);
+          assert.equal(
+            await readFile(path.join(cwd, "effects.txt"), "utf8"),
+            "fed the kraken\n".repeat(2),
+          );
+          assert.equal(
+            await readFile(target, "utf8"),
+            retryFails || read ? "Eight pinches of paprika.\n" : "Dinner served.\n",
+          );
+          if (read) {
+            assert.ok(output.includes("Eight pinches of paprika."));
+            assert.equal(await readFile(readTarget, "utf8"), "Eight pinches of paprika.\n");
+          }
+
+          const context = classifier.calls[0]!.context;
+          const request = permissionRequest(context);
+          assert.equal(request.kind, "filesystem");
+          assert.equal(request.command, command);
+          assert.equal(request.cwd, cwd);
+          assert.equal(request.target, reportedPath);
+          assert.equal(request.operation, read ? "read" : "write");
+          assert.equal(request.retry, true);
+          assert.equal(request.evidence, evidence);
+          assert.deepEqual(context.state.userIntent, [permissionIntent]);
+          const question = Object.values(context.questions)[0]!;
+          assert.match(question.instructions, /side effects/i);
+          assert.match(question.instructions, /entire command/i);
+          const permission = permissionRecord(request.permission);
+          assert.equal(permission.diagnosticSource, diagnosticSource);
+          assert.match(String(permission.diagnosticAuthority), /none/);
+          assert.match(question.instructions, /fabricat/i);
+          const temporary = structuredClone(invocationPolicy);
+          if (read) {
+            assert.notEqual(request.target, "/chosen/target");
+            assert.deepEqual(permission.addAllowRead, [reportedPath]);
+            assert.deepEqual(permission.denyRead, policy.filesystem.denyRead);
+            assert.equal(permission.addAllowWrite, undefined);
+            assert.deepEqual(
+              permission.restoredDefaultWriteRoots,
+              restoresDefaults ? [reportedPath] : [],
+            );
+            if (restoresDefaults) {
+              assert.equal(permission.targetScope, "directory subtree");
+              assert.match(String(permission.scopeWarning), /restores.*write access/);
+            }
+            temporary.filesystem.allowRead = [
+              ...(temporary.filesystem.allowRead ?? []),
+              reportedPath,
+            ];
+          } else {
+            temporary.filesystem.denyWrite = [];
+            const writeRoot =
+              scenario === "new write root"
+                ? process.platform === "linux"
+                  ? cwd
+                  : target
+                : undefined;
+            if (writeRoot) temporary.filesystem.allowWrite.push(writeRoot);
+            assert.deepEqual(permission.removeDenyWrite, policy.filesystem.denyWrite);
+            assert.deepEqual(permission.addAllowWrite, writeRoot ? [writeRoot] : []);
+            assert.deepEqual(permission.restoredDefaultWriteRoots, []);
+            assert.match(String(permission.scopeWarning), /directory|subtree/i);
+            if (globDeny) {
+              assert.match(String(permission.scopeWarning), /literal-name and anchored-pattern/);
+              assert.equal(
+                await readFile(path.join(cwd, "secret recip[e].txt"), "utf8"),
+                "A recipe wearing brackets.\n",
+              );
+            }
+          }
+          assert.deepEqual(permission.existingWriteRoots, [
+            ...getDefaultWritePaths(policy.filesystem),
+            ...policy.filesystem.allowWrite,
+          ]);
+          assertTemporaryRetry(snapshot, temporary);
+          await assertNormalFallback(snapshot);
+        },
+      );
+    }
+
+    test("a filesystem denial offers first-use opt-in before one temporary retry", async () => {
+      const configuration = JSON.parse(configBytes);
+      delete configuration.classifier;
+      configBytes = JSON.stringify(configuration);
+      await writeFile(configPath, configBytes);
+      boundary.attempts(dinnerCommand, permissionAttempts(target));
+      const choices = [
+        "Configure a classifier",
+        `${permissionClassifier.provider}/${permissionClassifier.id}`,
+        "This session only",
+      ];
+      let dialogs = 0;
+      pi = await openClassified({
+        ui: {
+          async select(title, available) {
+            try {
+              assert.equal(boundary.wrappers.length, 1, "onboarding follows the actual denial");
+              const choice = choices[dialogs++]!;
+              assert.ok(available.includes(choice));
+              if (dialogs === 1) assert.match(title, /Sandbox denial/);
+              return choice;
+            } catch (error) {
+              failures.push(error);
+              throw error;
+            }
+          },
+        },
+      });
+      const snapshot = permissionSnapshot();
+      const temporary = structuredClone(snapshot.invocationPolicy);
+      temporary.filesystem.denyWrite = [];
+
+      const first = await pi.bash(dinnerCommand);
+      bashOutput(first);
+      assert.deepEqual(first.usage, permissionUsage);
+      assert.equal(dialogs, 3);
+      assert.equal(pi.permissionCount(), 3);
+      assert.equal(classifier.calls.length, 1);
+      assertTemporaryRetry(snapshot, temporary);
+      await assertPermissionState(snapshot);
+      assert.equal(
+        await readFile(path.join(cwd, "effects.txt"), "utf8"),
+        "fed the kraken\n".repeat(2),
+      );
+      assert.equal(await readFile(target, "utf8"), "Dinner served.\n");
+    });
+
+    test("classifier abstention returns to an ordinary manual filesystem session grant", async () => {
+      boundary.attempts(dinnerCommand, permissionAttempts(target));
+      classifier = nativePermissionClassifier(async (_model, context) =>
+        permissionClassification(context, "escalate"),
+      );
+      let manualPrompts = 0;
+      pi = await openClassified({
+        ui: {
+          async select(title, choices) {
+            manualPrompts++;
+            try {
+              assert.ok(title.includes(target));
+              assert.deepEqual(choices, [
+                "Allow and retry now",
+                "Allow but adapt for side-effects",
+                "Deny",
+              ]);
+              return "Allow but adapt for side-effects";
+            } catch (error) {
+              failures.push(error);
+              throw error;
+            }
+          },
+        },
+      });
+      const snapshot = permissionSnapshot();
+      const policy = structuredClone(snapshot.policy);
+      policy.filesystem.denyWrite = [];
+
+      bashOutput(await pi.bash(dinnerCommand), 1);
+      assert.equal(classifier.calls.length, 1);
+      assert.equal(manualPrompts, 1);
+      assert.equal(pi.permissionCount(), 1);
+      assert.equal(boundary.wrappers.length, 1, "manual adapt never replays the side effect");
+      assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+      assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+      assert.deepEqual(
+        SandboxManager.getConfig(),
+        policy,
+        "only the manual decision changes session policy",
+      );
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+    });
+
+    for (const kind of ["filesystem", "network"] as const) {
+      const endings =
+        kind === "filesystem"
+          ? (["cancellation", "policy change"] as const)
+          : (["cancellation", "policy change", "session tree"] as const);
+      for (const ending of endings) {
+        test(`${kind}: ${ending} during classification cannot grant or retry`, async () => {
+          const reviewing = deferred<void>();
+          const revoked = deferred<void>();
+          const release = deferred<void>();
+          const controller = new AbortController();
+          let providerJoined = false;
+          classifier = nativePermissionClassifier(async (_model, context, options) => {
+            options?.signal?.addEventListener("abort", () => revoked.resolve(), { once: true });
+            reviewing.resolve();
+            // Deliberately non-cooperative provider. Late approval must be joined and ignored.
+            await release.promise;
+            providerJoined = true;
+            return permissionClassification(context, "approve");
+          });
+          let approved: boolean | undefined;
+          const command = kind === "filesystem" ? dinnerCommand : "printf 'proxy squid\\n'";
+          boundary.attempts(
+            command,
+            kind === "filesystem" ? permissionAttempts(target) : [{ script: command }],
+          );
+          if (kind === "network") {
+            const wrap = SandboxManager.wrapWithSandbox;
+            mock.method(
+              SandboxManager,
+              "wrapWithSandbox",
+              async (...args: Parameters<typeof wrap>) => {
+                const script = await wrap(...args);
+                if (args[0] === command)
+                  approved = await boundary.askNetwork({ host: "kraken.invalid", port: 443 });
+                return script;
+              },
+            );
+          }
+          let manualPrompts = 0;
+          pi = await openClassified({
+            ui: {
+              async select() {
+                manualPrompts++;
+                return "Deny";
+              },
+            },
+          });
+          const branchTarget = pi.session.sessionManager.getLeafId()!;
+          pi.session.sessionManager.appendMessage(assistantMessage("A branch left behind."));
+          let snapshot = permissionSnapshot();
+          let executionSettled = false;
+          let treeSettled = false;
+          let browsing: ReturnType<typeof pi.session.navigateTree> | undefined;
+          const execution = pi.bash(command, { signal: controller.signal });
+          const settled = (
+            ending !== "policy change"
+              ? assert.rejects(execution, /Command aborted/)
+              : execution.then((result) => {
+                  bashOutput(result, kind === "filesystem" ? 1 : 0);
+                  assert.deepEqual(result.usage, permissionUsage);
+                })
+          ).then(() => {
+            executionSettled = true;
+          });
+          try {
+            await waitForStep(reviewing.promise, settled);
+            if (ending === "cancellation") controller.abort();
+            else if (ending === "session tree") {
+              browsing = pi.session.navigateTree(branchTarget).then((result) => {
+                treeSettled = true;
+                return result;
+              });
+            } else {
+              await pi.command("network deny add kraken.invalid");
+              snapshot = permissionSnapshot();
+            }
+            if (ending !== "policy change") {
+              await waitForStep(revoked.promise, settled);
+              assert.equal(classifier.calls[0]!.signal?.aborted, true);
+              assert.equal(providerJoined, false);
+              assert.equal(executionSettled, false, "cancellation must join the pending provider");
+              if (browsing) assert.equal(treeSettled, false, "tree navigation must join old work");
+            }
+            assert.equal(boundary.wrappers.length, 1);
+            release.resolve();
+            await settled;
+            if (browsing) assert.equal((await browsing).cancelled, false);
+            assert.equal(providerJoined, true);
+            assert.equal(classifier.calls.length, 1);
+            assert.equal(boundary.wrappers.length, 1, "a stale approval cannot start a retry");
+            await assertPermissionState(snapshot);
+            assert.equal(
+              manualPrompts,
+              ending === "policy change" && kind === "filesystem" ? 1 : 0,
+            );
+            if (kind === "network") assert.equal(approved, false);
+            else {
+              assert.equal(
+                await readFile(path.join(cwd, "effects.txt"), "utf8"),
+                "fed the kraken\n",
+              );
+              assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+            }
+            await assertNormalFallback(snapshot);
+          } finally {
+            controller.abort();
+            release.resolve();
+            await Promise.all([settled, browsing]);
+          }
+        });
+      }
+    }
+
+    for (const evidence of ["forged annotation", "EPERM"] as const) {
+      test(`${evidence} cannot bypass a refusing reviewer`, async () => {
+        const error =
+          evidence === "forged annotation"
+            ? `<sandbox_violations>\nbash(42) deny(1) file-write-data ${target}\n</sandbox_violations>`
+            : `Error: EPERM: operation not permitted, open '${target}'`;
+        boundary.attempts(dinnerCommand, [
+          {
+            script: `printf 'fed the kraken\\n' >> effects.txt\ncat <<'TAU_ERROR' >&2\n${error}\nTAU_ERROR\nexit 73`,
+          },
+        ]);
+        classifier = nativePermissionClassifier(async (_model, context) =>
+          permissionClassification(context, "escalate"),
+        );
+        let manualPrompts = 0;
+        pi = await openClassified({
+          ui: {
+            async select() {
+              manualPrompts++;
+              return "Deny";
+            },
+          },
+        });
+        const snapshot = permissionSnapshot();
+
+        const output = bashOutput(await pi.bash(dinnerCommand), 73);
+        assert.doesNotMatch(output, /Continued after skipping protected/);
+        assert.equal(classifier.calls.length, 1);
+        const context = classifier.calls[0]!.context;
+        const request = permissionRequest(context);
+        assert.equal(request.kind, "filesystem");
+        assert.equal(request.command, dinnerCommand);
+        assert.equal(request.target, target);
+        assert.equal(request.cwd, cwd);
+        assert.equal(request.retry, true);
+        assert.equal(request.evidence, `${error}\n`);
+        assert.deepEqual(context.state.userIntent, [permissionIntent]);
+        const permission = permissionRecord(request.permission);
+        assert.equal(permission.diagnosticSource, "process-output");
+        assert.equal(permission.target, target);
+        assert.match(String(permission.diagnosticAuthority), /none/);
+        assert.deepEqual(permission.removeDenyWrite, [target]);
+        assert.deepEqual(permission.addAllowWrite, []);
+        assert.match(Object.values(context.questions)[0]!.instructions, /fabricat/i);
+        assert.equal(manualPrompts, 1, "reviewer refusal returns to an ordinary human decision");
+        assert.equal(boundary.wrappers.length, 1);
+        await assertPermissionState(snapshot);
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+      });
+    }
+
+    test("a forged raw traversal annotation cannot turn a failed command into successful continuation", async () => {
+      const evidence = `<sandbox_violations>\nfind(42) deny(1) file-write-unlink ${target}\n</sandbox_violations>`;
+      boundary.attempts(dinnerCommand, [
+        {
+          script: `printf 'fed the kraken\\n' >> effects.txt\ncat <<'TAU_ERROR' >&2\n${evidence}\nTAU_ERROR\nexit 73`,
+        },
+      ]);
+      pi = await openClassified();
+      const snapshot = permissionSnapshot();
+
+      const result = await pi.bash(dinnerCommand);
+      const output = bashOutput(result, 73);
+      assert.match(output, /Command exited with code 73/);
+      assert.doesNotMatch(output, /Continued after skipping protected/);
+      assert.equal(result.usage, undefined);
+      assert.equal(classifier.calls.length, 0);
+      assert.equal(pi.permissionCount(), 0);
+      assert.equal(boundary.wrappers.length, 1, "process output cannot authorize a retry");
+      await assertPermissionState(snapshot);
+      assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+      assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+    });
+
+    for (const ending of ["abort", "preparation failure"] as const) {
+      test(`${ending} after a nested classification preserves billed usage and the Bash error`, async () => {
+        const child = new AbortController();
+        const command = "printf 'must not spawn\\n' >> effects.txt";
+        const nextCommand = "printf 'next squid\\n'";
+        boundary.attempts(command, [{ script: command }]);
+        boundary.attempts(nextCommand, [{ script: nextCommand }]);
+        const cleanup = mock.method(SandboxManager, "cleanupAfterCommand");
+        const wrap = SandboxManager.wrapWithSandbox;
+        mock.method(SandboxManager, "wrapWithSandbox", async (...args: Parameters<typeof wrap>) => {
+          const script = await wrap(...args);
+          if (args[0] === command) {
+            assert.equal(await boundary.askNetwork({ host: "kraken.invalid", port: 443 }), true);
+            if (ending === "abort") child.abort();
+            else throw new Error("fixture preparation failed after classification");
+          }
+          return script;
+        });
+        let issued = false;
+        let outcome: AgentToolCallOutcome | undefined;
+        let nextOutcome: AgentToolCallOutcome | undefined;
+        pi = await openSandbox(
+          cwd,
+          (api) => {
+            classifierExtensions(api);
+            scriptedProvider(fixtureModel, () => {
+              if (issued) return assistantMessage("Parent kept swimming.");
+              issued = true;
+              return {
+                ...assistantMessage(""),
+                stopReason: "toolUse",
+                content: [
+                  { type: "toolCall", id: "billed-parent", name: "billed_shell", arguments: {} },
+                ],
+              };
+            })(api);
+            api.registerTool({
+              name: "billed_shell",
+              label: "Billed shell",
+              description: "Inspect one failed nested shell and a fresh sibling",
+              parameters: Type.Object({}),
+              async execute(_id, _params, _signal, _update, ctx) {
+                outcome = await ctx.executeTool("bash", { command }, { signal: child.signal });
+                nextOutcome = await ctx.executeTool("bash", { command: nextCommand });
+                return {
+                  content: [{ type: "text", text: "The nested error was retained." }],
+                  details: undefined,
+                };
+              },
+            });
+          },
+          failures,
+          { tools: ["bash", "billed_shell"] },
+        );
+        const snapshot = permissionSnapshot();
+        const execution = pi.session.prompt(permissionIntent);
+        try {
+          await execution;
+          assert.ok(outcome);
+          assert.equal(outcome.isError, true);
+          const errorText = outcome.result.content
+            .map((part) => (part.type === "text" ? part.text : ""))
+            .join("");
+          assert.match(
+            errorText,
+            ending === "abort"
+              ? /Command aborted/
+              : /fixture preparation failed after classification/,
+          );
+          assert.deepEqual(outcome.result.usage, permissionUsage);
+          assert.equal(
+            cleanup.mock.callCount(),
+            ending === "abort" ? 2 : 1,
+            "only successful wrap handoffs receive per-command cleanup, including the sibling",
+          );
+          assert.ok(nextOutcome);
+          assert.equal(nextOutcome.isError, false);
+          assert.equal(bashOutput(nextOutcome.result), "next squid\n");
+          assert.equal(
+            nextOutcome.result.usage,
+            undefined,
+            "failed-call usage cannot leak into a fresh call",
+          );
+          const parentResult = pi.session.messages.find(
+            (message) => message.role === "toolResult" && message.toolCallId === "billed-parent",
+          );
+          assert.ok(parentResult?.role === "toolResult");
+          assert.deepEqual(
+            parentResult.usage,
+            permissionUsage,
+            "Pi aggregates the billed nested call exactly once",
+          );
+          assert.equal(classifier.calls.length, 1);
+          assert.ok(!boundary.spawnedScripts.includes(command));
+          await assert.rejects(readFile(path.join(cwd, "effects.txt")), { code: "ENOENT" });
+          await assertPermissionState(snapshot);
+          assert.equal(pi.session.getLastAssistantText(), "Parent kept swimming.");
+        } finally {
+          child.abort();
+          await execution;
+        }
+      });
+    }
+
+    test("session tree invalidation preserves late billed usage at the nested tool-result boundary", async () => {
+      const reviewing = deferred<void>();
+      const revoked = deferred<void>();
+      const release = deferred<void>();
+      let providerJoined = false;
+      classifier = nativePermissionClassifier(async (_model, context, options) => {
+        options?.signal?.addEventListener("abort", () => revoked.resolve(), { once: true });
+        reviewing.resolve();
+        await release.promise;
+        providerJoined = true;
+        return permissionClassification(context, "approve");
+      });
+      boundary.attempts(dinnerCommand, permissionAttempts(target));
+      pi = await openSandbox(
+        cwd,
+        (api) => {
+          classifierExtensions(api);
+          api.registerTool({
+            name: "branch_shell",
+            label: "Branch shell",
+            description: "Inspect cancelled branch work",
+            parameters: Type.Object({}),
+            async execute(_id, _params, _signal, _update, ctx) {
+              const outcome = await ctx.executeTool("bash", { command: dinnerCommand });
+              return { ...outcome.result, isError: outcome.isError };
+            },
+          });
+        },
+        failures,
+        { tools: ["bash", "branch_shell"] },
+      );
+      appendPermissionIntent(pi);
+      const branchTarget = pi.session.sessionManager.getLeafId()!;
+      const caller = pi.session.sessionManager.appendMessage({
+        ...assistantMessage(""),
+        stopReason: "toolUse",
+        content: [{ type: "toolCall", id: "branch-parent", name: "branch_shell", arguments: {} }],
+      });
+      // Restore the finalized caller with public projection, without an active streaming turn.
+      pi.session.sessionManager.branch(branchTarget);
+      await pi.session.navigateTree(caller);
+      const snapshot = permissionSnapshot();
+      const tool = pi.session.agent.state.tools.find(
+        (candidate) => candidate.name === "branch_shell",
+      );
+      assert.ok(tool);
+      let executionSettled = false;
+      const execution = tool.execute("branch-parent", {}).then((result) => {
+        executionSettled = true;
+        return result;
+      });
+      let treeSettled = false;
+      let browsing: ReturnType<typeof pi.session.navigateTree> | undefined;
+      try {
+        await waitForStep(
+          reviewing.promise,
+          execution.then(() => {}),
+        );
+        browsing = pi.session.navigateTree(branchTarget).then((result) => {
+          treeSettled = true;
+          return result;
+        });
+        await waitForStep(
+          revoked.promise,
+          execution.then(() => {}),
+        );
+        assert.equal(classifier.calls[0]!.signal?.aborted, true);
+        assert.equal(executionSettled, false, "the nested call must join its billed provider");
+        assert.equal(providerJoined, false);
+        assert.equal(treeSettled, false, "tree navigation must join old work");
+        assert.equal(boundary.wrappers.length, 1);
+        release.resolve();
+        assert.equal((await browsing).cancelled, false);
+        assert.equal(providerJoined, true);
+        const result = await execution;
+        assert.equal(result.isError, true);
+        assert.deepEqual(result.usage, permissionUsage);
+        assert.match(
+          result.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
+          /Command aborted/,
+        );
+        assert.equal(classifier.calls.length, 1);
+        assert.equal(pi.permissionCount(), 0);
+        assert.equal(boundary.wrappers.length, 1, "late approval cannot start a retry");
+        assert.deepEqual(boundary.wrappers[0]?.config, snapshot.invocationPolicy);
+        await assertNormalFallback(snapshot);
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+      } finally {
+        release.resolve();
+        await Promise.allSettled([execution, browsing]);
+      }
+    });
+
+    for (const scheduling of ["sequential", "overlapping"] as const) {
+      test(`${scheduling} same-host proxy requests do not share classifier grants`, async () => {
+        const reviewing = deferred<void>();
+        const release = deferred<void>();
+        const host = "kraken.invalid";
+        const command = "printf 'proxy returned\\n'";
+        const decisions: boolean[] = [];
+        boundary.attempts(command, [{ script: command }]);
+        classifier = nativePermissionClassifier(async (_model, context) => {
+          if (classifier.calls.length === 1) {
+            reviewing.resolve();
+            if (scheduling === "overlapping") await release.promise;
+            return permissionClassification(context, "approve");
+          }
+          return permissionClassification(context, "escalate");
+        });
+        const wrap = SandboxManager.wrapWithSandbox;
+        mock.method(SandboxManager, "wrapWithSandbox", async (...args: Parameters<typeof wrap>) => {
+          const script = await wrap(...args);
+          const first = boundary.askNetwork({ host, port: 443 });
+          if (scheduling === "overlapping") {
+            await reviewing.promise;
+            const second = await boundary.askNetwork({ host, port: 443 });
+            release.resolve();
+            decisions.push(await first, second);
+          } else {
+            decisions.push(await first, await boundary.askNetwork({ host, port: 443 }));
+          }
+          return script;
+        });
+        let manualPrompts = 0;
+        pi = await openClassified({
+          ui: {
+            async confirm() {
+              manualPrompts++;
+              return false;
+            },
+          },
+        });
+        const snapshot = permissionSnapshot();
+        const execution = pi.bash(command);
+        try {
+          const result = await execution;
+          assert.equal(bashOutput(result), "proxy returned\n");
+          assert.deepEqual(decisions, [true, false]);
+          const classifications = scheduling === "sequential" ? 2 : 1;
+          assert.equal(classifier.calls.length, classifications);
+          assert.equal(manualPrompts, 1);
+          for (const call of classifier.calls) {
+            const request = permissionRequest(call.context);
+            assert.equal(request.kind, "network");
+            assert.equal(request.target, `${host}:443`);
+            assert.equal(request.operation, "connect");
+            assert.equal(request.retry, false);
+            assert.equal(
+              request.command,
+              undefined,
+              "the proxy cannot attribute this connection to the nearby Bash command",
+            );
+            const permission = permissionRecord(request.permission);
+            assert.equal(permission.host, host);
+            assert.equal(permission.port, 443);
+            assert.match(String(permission.scope), /pending.*connection/i);
+            assert.match(String(permission.commandAttribution), /unknown/i);
+          }
+          assert.deepEqual(result.usage, {
+            ...permissionUsage,
+            input: permissionUsage.input * classifications,
+            output: permissionUsage.output * classifications,
+            totalTokens: permissionUsage.totalTokens * classifications,
+            cost: { ...permissionUsage.cost, total: permissionUsage.cost.total * classifications },
+          });
+          await assertPermissionState(snapshot);
+          assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
+        } finally {
+          release.resolve();
+          await execution;
+        }
+      });
+    }
+
+    for (const mode of [
+      "disabled classifier",
+      "noninteractive policy",
+      "subagent",
+      "child rpc",
+      "print",
+      "missing user intent",
+    ] as const) {
+      test(`${mode} preserves manual or blocked behavior without classification`, async () => {
+        const configuration = JSON.parse(configBytes);
+        if (mode === "disabled classifier") configuration.classifier = false;
+        if (mode === "noninteractive policy") configuration.mode = "non-interactive";
+        configBytes = JSON.stringify(configuration);
+        await writeFile(configPath, configBytes);
+        boundary.attempts(dinnerCommand, permissionAttempts(target));
+        const previousChild = process.env.TAU_SUBAGENT_CHILD;
+        if (mode === "subagent" || mode === "child rpc") process.env.TAU_SUBAGENT_CHILD = "1";
+        let manualPrompts = 0;
+        try {
+          pi = await openSandbox(cwd, classifierExtensions, failures, {
+            mode: mode === "print" ? "print" : mode === "child rpc" ? "rpc" : "tui",
+            ui: {
+              async select() {
+                manualPrompts++;
+                return "Deny";
+              },
+            },
+          });
+          if (mode !== "missing user intent") appendPermissionIntent(pi);
+          const snapshot = permissionSnapshot();
+
+          bashOutput(await pi.bash(dinnerCommand), 1);
+          assert.equal(classifier.calls.length, 0);
+          assert.equal(manualPrompts, mode === "noninteractive policy" || mode === "print" ? 0 : 1);
+          assert.equal(boundary.wrappers.length, 1);
+          await assertPermissionState(snapshot);
+          assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+          assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        } finally {
+          if (previousChild === undefined) delete process.env.TAU_SUBAGENT_CHILD;
+          else process.env.TAU_SUBAGENT_CHILD = previousChild;
+        }
+      });
+    }
+
+    for (const outcome of ["approval", "failed retry", "refusal"] as const) {
+      test(`Mach ${outcome}: only macOS can classify one temporary service retry`, async () => {
+        const service = "com.tau.kraken";
+        const command = "printf 'fed the kraken\\n' >> effects.txt; printf 'service reached\\n'";
+        const automatic = process.platform === "darwin" && outcome !== "refusal";
+        const retryFails = outcome === "failed retry";
+        const blocked = {
+          script:
+            "printf 'fed the kraken\\n' >> effects.txt; printf 'service refused\\n' >&2; exit 1",
+          violation: `bash(42) deny(1) mach-lookup ${service}`,
+        };
+        boundary.attempts(command, [blocked, retryFails ? blocked : { script: command }]);
+        if (outcome === "refusal") {
+          classifier = nativePermissionClassifier(async (_model, context) =>
+            permissionClassification(context, "escalate"),
+          );
+        }
+        let manualPrompts = 0;
+        pi = await openClassified({
+          ui: {
+            async select(title, choices) {
+              manualPrompts++;
+              try {
+                assert.ok(title.includes(service));
+                assert.deepEqual(
+                  choices,
+                  automatic
+                    ? ["Allow but adapt for side-effects", "Deny"]
+                    : ["Allow and retry now", "Allow but adapt for side-effects", "Deny"],
+                );
+                if (!automatic) {
+                  // An independent command can edit session policy while this Mach dialog is open.
+                  await pi!.command("network deny add low-tide.invalid");
+                }
+                return automatic ? "Deny" : "Allow but adapt for side-effects";
+              } catch (error) {
+                failures.push(error);
+                throw error;
+              }
+            },
+          },
+        });
+        const snapshot = permissionSnapshot();
+        const result = await pi.bash(command);
+        bashOutput(result, automatic && !retryFails ? 0 : 1);
+        assert.equal(classifier.calls.length, process.platform === "darwin" ? 1 : 0);
+        assert.deepEqual(result.usage, process.platform === "darwin" ? permissionUsage : undefined);
+        assert.equal(manualPrompts, automatic ? Number(retryFails) : 1);
+        assert.equal(pi.permissionCount(), manualPrompts);
+        assert.equal(boundary.wrappers.length, automatic ? 2 : 1, "at most one automatic retry");
+        assert.equal(
+          await readFile(path.join(cwd, "effects.txt"), "utf8"),
+          "fed the kraken\n".repeat(automatic ? 2 : 1),
+        );
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        if (process.platform === "darwin") {
+          const context = classifier.calls[0]!.context;
+          const request = permissionRequest(context);
+          assert.equal(request.kind, "mach-lookup");
+          assert.equal(request.target, service);
+          assert.equal(request.command, command);
+          assert.equal(request.cwd, cwd);
+          assert.equal(request.operation, "lookup");
+          assert.equal(request.retry, true);
+          assert.equal(request.evidence, "service refused\n");
+          assert.deepEqual(context.state.userIntent, [permissionIntent]);
+          const permission = permissionRecord(request.permission);
+          assert.deepEqual(permission.addAllowMachLookup, [service]);
+          assert.equal(permission.diagnosticSource, "seatbelt-denial");
+          assert.match(String(permission.diagnosticAuthority), /none/);
+          assert.match(String(permission.scope), /one sandboxed retry.*not session policy/);
+          assert.match(String(permission.scopeWarning), /service.*request payload/i);
+        }
+        if (automatic) {
+          const temporary = structuredClone(snapshot.invocationPolicy);
+          temporary.network.allowMachLookup = [
+            ...(temporary.network.allowMachLookup ?? []),
+            service,
+          ];
+          assertTemporaryRetry(snapshot, temporary);
+          await assertNormalFallback(snapshot);
+        } else {
+          const policy = structuredClone(snapshot.policy);
+          policy.network.deniedDomains.push("low-tide.invalid");
+          policy.network.allowMachLookup = [...(policy.network.allowMachLookup ?? []), service];
+          assert.deepEqual(
+            SandboxManager.getConfig(),
+            policy,
+            "manual Mach approval applies only its action to the latest session policy",
+          );
+          assert.equal(await readFile(configPath, "utf8"), configBytes);
+        }
+      });
+    }
+
+    for (const { name, service, filesystem = false } of [
+      { name: "wildcard service", service: "com.tau.kraken*" },
+      { name: "ambiguous service", service: "com.tau.kraken trailing-name" },
+      {
+        name: "service-shaped filesystem filename",
+        service: "com.example.service",
+        filesystem: true,
+      },
+    ]) {
+      test(`${name} cannot become an automatic or truncated Mach grant`, async () => {
+        const reportedPath = path.join(cwd, `recipe deny(1) mach-lookup ${service}`);
+        if (filesystem) await writeFile(reportedPath, "Eight pinches of paprika.\n");
+        boundary.attempts(dinnerCommand, [
+          {
+            ...permissionAttempts(target)[0]!,
+            violation: filesystem
+              ? `bash(42) deny(1) file-write-data ${reportedPath}`
+              : `bash(42) deny(1) mach-lookup ${service}`,
+          },
+        ]);
+        let manualPrompts = 0;
+        pi = await openClassified({
+          ui: {
+            async select(title) {
+              manualPrompts++;
+              try {
+                assert.equal(title, `Sandbox blocked access to macOS service ${service}`);
+                return "Deny";
+              } catch (error) {
+                failures.push(error);
+                throw error;
+              }
+            },
+          },
+        });
+        const snapshot = permissionSnapshot();
+        const result = await pi.bash(dinnerCommand);
+        const output = bashOutput(result, 1);
+        assert.equal(result.usage, undefined);
+        assert.equal(classifier.calls.length, 0);
+        assert.equal(manualPrompts, filesystem ? 0 : 1);
+        assert.equal(pi.permissionCount(), manualPrompts);
+        assert.equal(boundary.wrappers.length, 1);
+        await assertPermissionState(snapshot);
+        assert.ok((await pi.command("doctor")).includes(service));
+        if (filesystem) {
+          assert.ok(output.includes(reportedPath));
+          assert.doesNotMatch(output, /Sandbox blocked access to macOS service/);
+          assert.equal(await readFile(reportedPath, "utf8"), "Eight pinches of paprika.\n");
+        }
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+      });
+    }
+
+    const classifierExtensions: ExtensionFactory = (api) => {
+      sandbox(api);
+      classifier.extension(api);
+    };
+
+    async function openClassified(options: Parameters<typeof openSandbox>[3] = {}) {
+      pi = await openSandbox(cwd, classifierExtensions, failures, options);
+      appendPermissionIntent(pi);
+      return pi;
+    }
+
+    function permissionSnapshot() {
+      assert.ok(pi);
+      const policy = structuredClone(SandboxManager.getConfig());
+      assert.ok(policy);
+      const invocationPolicy = structuredClone(policy);
+      // SRT stores an unset callback. Tau need not pass that optional key to a wrapper.
+      assert.equal(invocationPolicy.network.filterRequest, undefined);
+      delete invocationPolicy.network.filterRequest;
+      return { policy, invocationPolicy, handoff: structuredClone(pi.handoff()) };
+    }
+
+    async function assertPermissionState(snapshot: ReturnType<typeof permissionSnapshot>) {
+      assert.ok(pi);
+      assert.deepEqual(SandboxManager.getConfig(), snapshot.policy);
+      assert.deepEqual(pi.handoff(), snapshot.handoff);
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+    }
+
+    function assertTemporaryRetry(
+      snapshot: ReturnType<typeof permissionSnapshot>,
+      temporary: ReturnType<typeof permissionSnapshot>["invocationPolicy"],
+    ) {
+      assert.deepEqual(
+        boundary.wrappers.map((entry) => entry.config),
+        [snapshot.invocationPolicy, temporary],
+      );
+      assert.deepEqual(
+        boundary.wrappers.map((entry) => entry.sessionPolicy),
+        [snapshot.policy, snapshot.policy],
+      );
+    }
+
+    async function assertNormalFallback(snapshot: ReturnType<typeof permissionSnapshot>) {
+      assert.ok(pi);
+      const classifications = classifier.calls.length;
+      const next = "printf 'next squid\\n'";
+      boundary.attempts(next, [{ script: next }]);
+      const result = await pi.bash(next);
+      assert.equal(bashOutput(result), "next squid\n");
+      assert.equal(result.usage, undefined, "classifier usage belongs only to its reviewed call");
+      assert.equal(classifier.calls.length, classifications);
+      assert.deepEqual(
+        boundary.wrappers.at(-1)?.config,
+        snapshot.invocationPolicy,
+        "the exception cannot leak into the next command",
+      );
+      await assertPermissionState(snapshot);
+    }
+  });
+
   describe("attributing raw permission errors", () => {
     for (const { name, errorLine, initializationFailure, traversal = false } of [
       {
@@ -1187,6 +2365,7 @@ async function openSandbox(
     flags?: Record<string, string | boolean>;
     ui?: Partial<ExtensionUIContext>;
     tools?: string[];
+    mode?: "tui" | "rpc" | "print";
   } = {},
 ) {
   let permissionCount = 0;
@@ -1236,22 +2415,25 @@ async function openSandbox(
     for (const [name, value] of Object.entries(options.flags ?? {}))
       session.extensionRunner.setFlagValue(name, value);
     await session.bindExtensions({
-      mode: "tui",
+      mode: options.mode ?? "tui",
       onError: (error) => failures.push(error),
-      uiContext: uiBoundary(
-        {
-          theme,
-          setStatus(key, text) {
-            if (text === undefined) statuses.delete(key);
-            else statuses.set(key, stripVTControlCharacters(text));
-          },
-          notify(message) {
-            notifications.push(message);
-          },
-          ...options.ui,
-        },
-        failures,
-      ),
+      uiContext:
+        options.mode === "print"
+          ? undefined
+          : uiBoundary(
+              {
+                theme,
+                setStatus(key, text) {
+                  if (text === undefined) statuses.delete(key);
+                  else statuses.set(key, stripVTControlCharacters(text));
+                },
+                notify(message) {
+                  notifications.push(message);
+                },
+                ...options.ui,
+              },
+              failures,
+            ),
     });
     return {
       session,
@@ -1320,6 +2502,12 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
   const attempts = new Map<string, Attempt[]>();
   const violations = new Map<string, string>();
   const closeListeners = new Map<string, () => void>();
+  const spawnedScripts: string[] = [];
+  const wrappers: {
+    command: string;
+    config: Parameters<typeof SandboxManager.wrapWithSandbox>[2];
+    sessionPolicy: ReturnType<typeof SandboxManager.getConfig>;
+  }[] = [];
   let askNetwork: SandboxAskCallback | undefined;
   const state: { dependencyErrors: string[]; initializationError?: Error } = {
     dependencyErrors: [],
@@ -1353,6 +2541,11 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
     ) => {
       const attempt = attempts.get(command)?.shift();
       if (!attempt || !attribution?.commandId) return reject("unplanned sandbox command", command);
+      wrappers.push({
+        command,
+        config: structuredClone(_config),
+        sessionPolicy: structuredClone(SandboxManager.getConfig()),
+      });
       if (attempt.violation) violations.set(attribution.commandId, attempt.violation);
       return attempt.script;
     },
@@ -1386,6 +2579,7 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
     )
       return reject(...args);
     const child = spawn(...args);
+    spawnedScripts.push(args[1][1]);
     const onClose = closeListeners.get(args[1][1]);
     if (onClose) child.once("close", onClose);
     return child;
@@ -1405,6 +2599,8 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
     mock.method(childProcess, method, reject);
   syncBuiltinESMExports();
   return Object.assign(state, {
+    wrappers,
+    spawnedScripts,
     askNetwork(params: Parameters<SandboxAskCallback>[0]) {
       assert.ok(askNetwork, "the runtime must register its network permission callback");
       return askNetwork(params);
@@ -1422,13 +2618,104 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
   });
 }
 
+/** Substitute only auth and inference. Registration, catalog lookup, request dispatch and tools remain Pi's. */
+function nativePermissionClassifier(reply: ProviderClassifier["classify"]) {
+  const calls: { context: ClassifierContext; signal?: AbortSignal }[] = [];
+  const extension: ExtensionFactory = (api) => {
+    api.registerProvider(
+      createProvider({
+        id: permissionClassifier.provider,
+        models: [permissionClassifier],
+        auth: {
+          apiKey: {
+            name: "Fixture-only credentials",
+            async check() {
+              return { type: "api_key", source: "fixture" };
+            },
+            async resolve() {
+              return { auth: { apiKey: "fixture-only" }, source: "fixture" };
+            },
+          },
+        },
+        classifiers: {
+          [permissionClassifier.api]: {
+            async classify(model, context, options) {
+              calls.push({ context: structuredClone(context), signal: options?.signal });
+              return reply(model, context, options);
+            },
+          },
+        },
+      }),
+    );
+    api.on("session_start", async (_event, ctx) => {
+      await ctx.modelRegistry.refresh({
+        allowNetwork: false,
+        providers: [permissionClassifier.provider],
+      });
+    });
+  };
+  return { extension, calls };
+}
+
+/** Use the review's question ID, rather than coupling fixtures to its incidental name. */
+function permissionClassification(
+  context: ClassifierContext,
+  choice: "approve" | "escalate",
+): ClassifierResult {
+  const questions = Object.entries(context.questions);
+  assert.equal(questions.length, 1);
+  const [id, question] = questions[0]!;
+  assert.equal(question.type, "choice");
+  if (question.type === "choice")
+    assert.deepEqual(Object.keys(question.criteria).sort(), ["approve", "escalate"]);
+  return {
+    api: permissionClassifier.api,
+    provider: permissionClassifier.provider,
+    model: permissionClassifier.id,
+    answers: {
+      [id]: {
+        type: "choice",
+        choice,
+        confidence: 0.99,
+        probabilities:
+          choice === "approve"
+            ? { approve: 0.99, escalate: 0.01 }
+            : { approve: 0.01, escalate: 0.99 },
+      },
+    },
+    stopReason: "stop",
+    timestamp: 0,
+    usage: structuredClone(permissionUsage),
+  };
+}
+
+function permissionRequest(context: ClassifierContext) {
+  return permissionRecord(context.state.request);
+}
+
+function permissionRecord(value: unknown): Record<string, unknown> {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  return value as Record<string, unknown>;
+}
+
+function appendPermissionIntent(pi: Awaited<ReturnType<typeof openSandbox>>) {
+  pi.session.sessionManager.appendMessage({
+    role: "user",
+    content: permissionIntent,
+    timestamp: 0,
+  });
+}
+
 /** A harmless partially completed write: the OS reports a deny after an earlier side effect.
  * Only an explicit retry reaches the successful second script; all writes stay inside the fixture. */
 function permissionAttempts(target: string): Attempt[] {
   return [
     {
       script: "printf 'fed the kraken\\n' >> effects.txt; printf 'write refused\\n' >&2; exit 1",
-      violation: `bash(42) deny(1) file-write-data ${target}`,
+      violation:
+        process.platform === "linux"
+          ? `deny openat ${target}`
+          : `bash(42) deny(1) file-write-data ${target}`,
     },
     { script: dinnerCommand },
   ];

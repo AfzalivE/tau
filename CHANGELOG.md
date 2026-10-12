@@ -9,11 +9,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Added
 
 - Review model and focus defaults in agent-global `review.json`, including per-model thinking levels. `models=...` and `focuses=...` override independently, with singular aliases accepted in commands and config. Fresh `/fix` reviews use the same defaults.
+- Sandbox can review blocked filesystem operations, network connections, and macOS service lookups with an opt-in classifier before requesting manual approval. Filesystem and service approvals cover a single sandboxed retry without changing session policy. `/sandbox classifier` selects a Pi classifier or the experimental Codex Guardian adapter.
 - Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
 
 ### Fixed
 
 - Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
+- Preserve newer Sandbox policy changes when manually approving macOS service access.
+- Prevent fabricated traversal diagnostics in command output from masking a command failure.
 - Reject invalid Sandbox runtime policies before activation or session updates, including ineffective slash-ended deny globs.
 
 ### Removed

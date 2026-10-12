@@ -20,6 +20,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type PromptMode = "interactive" | "non-interactive";
 export type ListOp = "add" | "remove";
+export type FilesystemList = "deny-read" | "allow-write" | "deny-write";
 type FilesystemRuleList = "denyRead" | "allowRead" | "allowWrite" | "denyWrite";
 
 type DefaultConfigExtension = {
@@ -44,6 +45,8 @@ export type SandboxPolicy = Omit<SandboxRuntimeConfig, "filesystem"> & {
 export type SandboxConfig = SandboxPolicy & {
   enabled?: boolean;
   mode?: PromptMode;
+  /** Omit to offer setup. False keeps manual approvals; a provider/model selects a reviewer. */
+  classifier?: string | false;
   filesystem: SandboxPolicy["filesystem"] & {
     allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
@@ -372,11 +375,29 @@ function coerceOptionalStringArray(
   return cleanStringArray(value, field);
 }
 
+export function isClassifierId(value: unknown): value is string {
+  return (
+    typeof value === "string" && !containsControlCharacter(value) && /^[^\s/]+\/[^\s]+$/.test(value)
+  );
+}
+
+function normalizeClassifier(value: unknown): string | false | undefined {
+  if (value === undefined || value === false) return value;
+  if (isClassifierId(value)) return value;
+  console.error(
+    "Warning: Expected classifier to be false or provider/model; using manual approvals.",
+  );
+  return false;
+}
+
 function finalizeConfig(config: SandboxConfig): SandboxConfig {
   return {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
+    ...(config.classifier !== undefined
+      ? { classifier: normalizeClassifier(config.classifier) }
+      : {}),
     network: {
       ...config.network,
       allowedDomains: coerceStringArray(
@@ -529,6 +550,8 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   const result: SandboxConfig = { ...base };
 
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
+  if (overrides.classifier !== undefined)
+    result.classifier = normalizeClassifier(overrides.classifier);
   if (overrides.mode !== undefined) {
     result.mode = normalizePromptMode(overrides.mode);
   }
@@ -718,6 +741,12 @@ export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxPoli
 
 export function cloneRuntimeConfig(config: SandboxPolicy): SandboxPolicy {
   return structuredClone(config);
+}
+
+export function getFilesystemListValues(config: SandboxPolicy, list: FilesystemList): string[] {
+  if (list === "deny-read") return config.filesystem.denyRead;
+  if (list === "allow-write") return config.filesystem.allowWrite;
+  return config.filesystem.denyWrite;
 }
 
 export function inferSandboxRuleMatch(

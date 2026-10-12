@@ -9,28 +9,29 @@ import {
   inferSandboxRuleMatch,
   isSandboxWritablePath,
   mutateStringList,
-  type PromptMode,
   type SandboxConfig,
   type SandboxPolicy,
 } from "./config.js";
 import type { PermissionResolution } from "./permissions/dialog.js";
 import {
   detectFilesystemViolationFromLine,
+  detectFilesystemViolations,
   extractAppendedSandboxAnnotation,
   formatRuntimeProtectedWriteNotice,
   formatTraversalNotice,
   getRuntimeProtectedWriteViolations,
   getTraversalPaths,
-  handleFilesystemViolation,
+  proposeFilesystemPermission,
   isRuntimeProtectedWriteViolation,
   isTraversalViolation,
   type FilesystemViolation,
 } from "./permissions/filesystem.js";
 import {
   detectMachLookupViolations,
-  handleMachLookupViolation,
+  proposeMachLookupPermission,
 } from "./permissions/mach-lookup.js";
 import { notify, type SandboxEvent } from "./runtime.js";
+import type { PermissionProposal, TemporaryPermissionGrant } from "./permissions/proposal.js";
 
 const IS_MACOS = process.platform === "darwin";
 const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", import.meta.url));
@@ -107,16 +108,12 @@ function ensureTrailingNewline(text: string): string {
 }
 
 interface SandboxedBashOpsOptions {
-  getContext: () => ExtensionContext | null;
+  ctx: ExtensionContext;
   getSandboxConfig: () => SandboxConfig | null;
   getRuntimeConfig: () => SandboxPolicy | null;
-  getPromptMode: () => PromptMode;
   applyRuntimeConfigForSession: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
   recordEvent?: (event: SandboxEvent) => void;
-}
-
-interface SandboxedBashOperations extends BashOperations {
-  runSerially<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T>;
+  resolvePermission: (proposal: PermissionProposal) => Promise<PermissionResolution>;
 }
 
 interface BashAttemptResult {
@@ -137,6 +134,7 @@ interface PreparedSandboxAttempt {
   attempt: BashAttemptResult;
   commandId: string;
   runtimeConfig: SandboxPolicy | null;
+  policy: SandboxPolicy | null;
 }
 
 function killProcessGroup(
@@ -172,14 +170,14 @@ function safeCleanupAfterCommand(): void {
 }
 
 function maybeAllowGitMetadataWriteForSession(options: {
-  ctx: ExtensionContext | null;
+  ctx: ExtensionContext;
   cwd: string;
   runtimeConfig: SandboxPolicy | null;
   allowGitCommonDir: boolean;
   applyRuntimeConfigForSession: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
 }): void {
   const { ctx, cwd, runtimeConfig, allowGitCommonDir, applyRuntimeConfigForSession } = options;
-  if (!ctx || !runtimeConfig) return;
+  if (!runtimeConfig) return;
   if (!isSandboxWritablePath(runtimeConfig, cwd, cwd)) return;
 
   const gitPaths = resolveGitFilesystemPaths(cwd);
@@ -196,48 +194,15 @@ function maybeAllowGitMetadataWriteForSession(options: {
   applyRuntimeConfigForSession(ctx, nextConfig);
 }
 
-export function createSandboxedBashOps(options: SandboxedBashOpsOptions): SandboxedBashOperations {
+export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperations {
   const {
-    getContext,
+    ctx,
     getSandboxConfig,
     getRuntimeConfig,
-    getPromptMode,
     applyRuntimeConfigForSession,
     recordEvent,
+    resolvePermission,
   } = options;
-  const pendingFilesystemDialogs = new Map<string, Promise<PermissionResolution | null>>();
-  const pendingMachLookupDialogs = new Map<string, Promise<PermissionResolution | null>>();
-
-  let executionQueue: Promise<void> = Promise.resolve();
-
-  function runSerially<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let pending = true;
-      const cancel = () => {
-        if (!pending) return;
-        pending = false;
-        signal?.removeEventListener("abort", cancel);
-        reject(new Error("aborted"));
-      };
-      if (signal?.aborted) {
-        cancel();
-        return;
-      }
-      signal?.addEventListener("abort", cancel, { once: true });
-      const start = async () => {
-        if (!pending) return;
-        pending = false;
-        signal?.removeEventListener("abort", cancel);
-        try {
-          resolve(await task());
-        } catch (error) {
-          reject(error);
-        }
-      };
-      executionQueue = executionQueue.then(start, start);
-    });
-  }
-
   function withSandboxDefaultEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     const baseEnv = env ?? process.env;
     if (baseEnv.GIT_OPTIONAL_LOCKS !== undefined) return baseEnv;
@@ -397,9 +362,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
 
   function reportPostProcessingError(error: unknown): void {
     const message = `[sandbox] Post-processing error: ${error instanceof Error ? error.message : error}`;
-    const ctx = getContext();
-    if (ctx) notify(ctx, message, "warning");
-    else console.warn(message);
+    notify(ctx, message, "warning");
   }
 
   async function prepareAndRunSandboxAttempt(options: {
@@ -409,18 +372,26 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     signal?: AbortSignal;
     timeout?: number;
     env?: NodeJS.ProcessEnv;
+    grant?: TemporaryPermissionGrant;
   }): Promise<PreparedSandboxAttempt> {
-    const { command, cwd, onData, signal, timeout, env } = options;
+    const { command, cwd, onData, signal, timeout, env, grant } = options;
 
-    maybeAllowGitMetadataWriteForSession({
-      ctx: getContext(),
-      cwd,
-      runtimeConfig: getRuntimeConfig(),
-      allowGitCommonDir: getSandboxConfig()?.filesystem.allowGitCommonDir === true,
-      applyRuntimeConfigForSession,
-    });
-
-    const runtimeConfig = getRuntimeConfig();
+    if (!grant) {
+      maybeAllowGitMetadataWriteForSession({
+        ctx,
+        cwd,
+        runtimeConfig: getRuntimeConfig(),
+        allowGitCommonDir: getSandboxConfig()?.filesystem.allowGitCommonDir === true,
+        applyRuntimeConfigForSession,
+      });
+    }
+    const policy = getRuntimeConfig();
+    if (grant && policy !== grant.policy) {
+      throw new Error(
+        "Sandbox policy changed after classification; the temporary retry was cancelled.",
+      );
+    }
+    const runtimeConfig = grant?.config ?? policy;
     const attemptRuntimeConfig = runtimeConfig ? cloneRuntimeConfig(runtimeConfig) : null;
     const commandId = createSandboxCommandId();
 
@@ -431,7 +402,12 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
       signal,
       { commandId, commandText: command },
     );
+
     try {
+      if (signal?.aborted) throw new Error("aborted");
+      if (grant && getRuntimeConfig() !== grant.policy) {
+        throw new Error("Sandbox policy changed while preparing the classifier-approved retry.");
+      }
       const attempt = await runSandboxAttempt(
         commandId,
         wrappedCommand,
@@ -442,7 +418,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
         timeout,
         env,
       );
-      return { attempt, commandId, runtimeConfig: attemptRuntimeConfig };
+      return { attempt, commandId, runtimeConfig: attemptRuntimeConfig, policy };
     } catch (err) {
       safeCleanupAfterCommand();
       throw err;
@@ -455,9 +431,10 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     commandId: string;
     cwd: string;
     runtimeConfig: SandboxPolicy | null;
+    policy: SandboxPolicy | null;
     autoRetryAvailable: boolean;
   }): Promise<ProcessedSandboxAttempt> {
-    const { attempt, command, commandId, cwd, runtimeConfig, autoRetryAvailable } = options;
+    const { attempt, command, commandId, cwd, runtimeConfig, policy, autoRetryAvailable } = options;
     const annotatedOutput = SandboxManager.annotateStderrWithSandboxFailures(
       commandId,
       attempt.combinedOutput,
@@ -467,7 +444,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
       .getViolationsForCommand(commandId)
       .map((violation) => violation.line);
     const storedFilesystemViolations = storedViolationLines
-      .map((line) => detectFilesystemViolationFromLine(line))
+      .map(detectFilesystemViolationFromLine)
       .filter((violation): violation is FilesystemViolation => violation !== null);
     const runtimeProtectedWriteViolations = getRuntimeProtectedWriteViolations(
       runtimeConfig,
@@ -475,14 +452,23 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
       cwd,
     );
     const machLookupViolations = detectMachLookupViolations(storedViolationLines);
-    let postamble = extractAppendedSandboxAnnotation(attempt.combinedOutput, annotatedOutput);
+    const processed: ProcessedSandboxAttempt = {
+      exitCode: attempt.exitCode,
+      postamble: extractAppendedSandboxAnnotation(attempt.combinedOutput, annotatedOutput),
+      resolution: null,
+      runtimeProtectedWriteViolations,
+    };
 
     if (runtimeProtectedWriteViolations.length > 0) {
       const notice = formatRuntimeProtectedWriteNotice(
         runtimeProtectedWriteViolations,
         !attempt.interruptedByFilesystemViolation,
       );
-      postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
+      processed.postamble = appendOutputPostamble(
+        processed.postamble,
+        notice,
+        attempt.combinedOutput,
+      );
 
       for (const violation of runtimeProtectedWriteViolations) {
         recordEvent?.({
@@ -499,14 +485,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     }
 
     const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedByFilesystemViolation;
-    if (commandSucceeded) {
-      return {
-        exitCode: attempt.exitCode,
-        postamble,
-        resolution: null,
-        runtimeProtectedWriteViolations,
-      };
-    }
+    if (commandSucceeded) return processed;
 
     if (
       /\bsandbox-exec:\s+sandbox_apply:\s+Operation not permitted\b/i.test(attempt.combinedOutput)
@@ -522,84 +501,65 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
         cwd,
         summary: "command reported a sandbox initialization failure",
       });
-      return {
-        exitCode: attempt.exitCode,
-        postamble: appendOutputPostamble(postamble, notice, attempt.combinedOutput),
-        resolution: null,
-        runtimeProtectedWriteViolations,
-      };
+      processed.postamble = appendOutputPostamble(
+        processed.postamble,
+        notice,
+        attempt.combinedOutput,
+      );
+      return processed;
     }
 
-    const traversalPaths = getTraversalPaths({
-      runtimeConfig,
-      output: annotatedOutput,
-      cwd,
-    });
+    const traversalPaths =
+      storedViolationLines.length === storedFilesystemViolations.length
+        ? getTraversalPaths({ runtimeConfig, violations: storedFilesystemViolations, cwd })
+        : null;
     const continuedTraversal = machLookupViolations.length === 0 ? traversalPaths : null;
-    const effectiveExitCode = continuedTraversal ? 0 : attempt.exitCode;
-    let resolution: PermissionResolution | null = null;
-
     if (continuedTraversal) {
-      const notice = formatTraversalNotice(continuedTraversal);
-      postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
-    } else {
-      const currentRuntimeConfig = getRuntimeConfig();
-      if (!currentRuntimeConfig) {
-        return {
-          exitCode: effectiveExitCode,
-          postamble,
-          resolution,
-          runtimeProtectedWriteViolations,
-        };
-      }
-
-      resolution = await handleFilesystemViolation({
-        ctx: getContext(),
-        promptMode: getPromptMode(),
-        runtimeConfig: currentRuntimeConfig,
-        getRuntimeConfig,
-        output: annotatedOutput,
-        rawOutput: attempt.combinedOutput,
-        command,
-        cwd,
-        pendingDialogs: pendingFilesystemDialogs,
-        applyRuntimeConfigForSession,
-        recordEvent,
-        autoRetryAvailable,
-        runtimeProtectedWriteViolations,
-        allowOutputFallback: machLookupViolations.length === 0,
-      });
-
-      if (!resolution) {
-        resolution = await handleMachLookupViolation({
-          ctx: getContext(),
-          promptMode: getPromptMode(),
-          runtimeConfig: currentRuntimeConfig,
-          violations: machLookupViolations,
-          command,
-          cwd,
-          pendingDialogs: pendingMachLookupDialogs,
-          applyRuntimeConfigForSession,
-          recordEvent,
-          autoRetryAvailable,
-        });
-      }
-
-      if (resolution) {
-        postamble = appendOutputPostamble(postamble, resolution.message, attempt.combinedOutput);
-      }
+      processed.exitCode = 0;
+      processed.postamble = appendOutputPostamble(
+        processed.postamble,
+        formatTraversalNotice(continuedTraversal),
+        attempt.combinedOutput,
+      );
+      return processed;
     }
 
-    return {
-      exitCode: effectiveExitCode,
-      postamble,
-      resolution,
-      runtimeProtectedWriteViolations,
+    const currentRuntimeConfig = getRuntimeConfig();
+    if (!currentRuntimeConfig) return processed;
+
+    const proposalOptions = {
+      runtimeConfig: currentRuntimeConfig,
+      command,
+      cwd,
+      rawOutput: attempt.combinedOutput,
+      autoRetryAvailable,
+      automaticReviewAvailable: policy === currentRuntimeConfig,
     };
+    const proposal =
+      proposeFilesystemPermission({
+        ...proposalOptions,
+        violations: storedFilesystemViolations.length
+          ? storedFilesystemViolations
+          : detectFilesystemViolations(attempt.combinedOutput, machLookupViolations.length === 0),
+        diagnosticSource: storedFilesystemViolations.length
+          ? IS_MACOS
+            ? "seatbelt-denial"
+            : "linux-write-attempt"
+          : "process-output",
+        runtimeProtectedWriteViolations,
+      }) ?? proposeMachLookupPermission({ ...proposalOptions, violations: machLookupViolations });
+    if (proposal) processed.resolution = await resolvePermission(proposal);
+    if (processed.resolution?.message) {
+      processed.postamble = appendOutputPostamble(
+        processed.postamble,
+        processed.resolution.message,
+        attempt.combinedOutput,
+      );
+    }
+    return processed;
   }
 
   return {
-    runSerially,
     async exec(command, cwd, { onData, signal, timeout, env }) {
       validateTimeout(timeout);
       if (!existsSync(cwd)) {
@@ -607,97 +567,77 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
       }
 
       const attemptStartedAt = Date.now();
-      const initialRun = await prepareAndRunSandboxAttempt({
-        command,
-        cwd,
-        onData,
-        signal,
-        timeout,
-        env,
-      });
-      const retryTimeout = getRemainingTimeout(timeout, attemptStartedAt);
-
-      let processedAttempt: ProcessedSandboxAttempt;
-      try {
-        processedAttempt = await processSandboxAttempt({
-          attempt: initialRun.attempt,
+      let attemptTimeout = timeout;
+      let retry: Extract<PermissionResolution, { kind: "allow-retry" }> | undefined;
+      for (;;) {
+        const run = await prepareAndRunSandboxAttempt({
           command,
-          commandId: initialRun.commandId,
           cwd,
-          runtimeConfig: initialRun.runtimeConfig,
-          autoRetryAvailable: true,
+          onData,
+          signal,
+          timeout: attemptTimeout,
+          env,
+          grant: retry?.grant,
         });
-      } catch (postProcessError) {
-        reportPostProcessingError(postProcessError);
+        let processed: ProcessedSandboxAttempt;
+        try {
+          processed = await processSandboxAttempt({
+            ...run,
+            command,
+            cwd,
+            autoRetryAvailable: !retry,
+          });
+        } catch (postProcessError) {
+          reportPostProcessingError(postProcessError);
+          safeCleanupAfterCommand();
+          return { exitCode: run.attempt.exitCode };
+        }
+
+        if (retry) {
+          let message = "";
+          if (processed.exitCode === 0) {
+            message = retry.grant
+              ? "\n[sandbox] Classifier-approved retry completed. The temporary exception was not saved.\n"
+              : `\n${retry.blockedTarget}\n\nAccess granted for this session and the command was retried successfully.`;
+          } else if (
+            !processed.resolution &&
+            processed.runtimeProtectedWriteViolations.length === 0
+          ) {
+            message = retry.grant
+              ? "\n[sandbox] Classifier-approved retry failed. No further automatic retry is allowed.\n"
+              : `\n${retry.blockedTarget}\n\nAccess granted for this session and the command was retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.`;
+          }
+          processed.postamble = appendOutputPostamble(
+            processed.postamble,
+            message,
+            run.attempt.combinedOutput,
+          );
+        }
+
+        // A resolution from the retry can never schedule a third launch.
+        const nextRetry =
+          !retry && processed.resolution?.kind === "allow-retry" ? processed.resolution : undefined;
+        if (processed.postamble) {
+          onData(
+            Buffer.from(
+              nextRetry ? ensureTrailingNewline(processed.postamble) : processed.postamble,
+            ),
+          );
+        }
+        if (nextRetry) run.attempt.combinedOutput = "";
         safeCleanupAfterCommand();
-        return { exitCode: initialRun.attempt.exitCode };
+        if (!nextRetry) return { exitCode: processed.exitCode };
+
+        attemptTimeout = getRemainingTimeout(timeout, attemptStartedAt);
+        if (attemptTimeout !== undefined && attemptTimeout <= 0) {
+          const message = nextRetry.grant
+            ? "\n[sandbox] Classifier-approved retry skipped because the timeout was exhausted.\n"
+            : `\n${nextRetry.blockedTarget}\n\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
+          onData(Buffer.from(message));
+          return { exitCode: processed.exitCode };
+        }
+        retry = nextRetry;
       }
-
-      const retryResolution = processedAttempt.resolution;
-      if (retryResolution?.kind !== "allow-retry") {
-        if (processedAttempt.postamble) onData(Buffer.from(processedAttempt.postamble));
-        safeCleanupAfterCommand();
-        return { exitCode: processedAttempt.exitCode };
-      }
-
-      if (processedAttempt.postamble) {
-        onData(Buffer.from(ensureTrailingNewline(processedAttempt.postamble)));
-      }
-
-      initialRun.attempt.combinedOutput = "";
-      safeCleanupAfterCommand();
-
-      if (retryTimeout !== undefined && retryTimeout <= 0) {
-        onData(Buffer.from(retryResolution.retrySkippedMessage));
-        return { exitCode: processedAttempt.exitCode };
-      }
-
-      const retryRun = await prepareAndRunSandboxAttempt({
-        command,
-        cwd,
-        onData,
-        signal,
-        timeout: retryTimeout,
-        env,
-      });
-
-      let processedRetry: ProcessedSandboxAttempt;
-      try {
-        processedRetry = await processSandboxAttempt({
-          attempt: retryRun.attempt,
-          command,
-          commandId: retryRun.commandId,
-          cwd,
-          runtimeConfig: retryRun.runtimeConfig,
-          autoRetryAvailable: false,
-        });
-      } catch (postProcessError) {
-        reportPostProcessingError(postProcessError);
-        safeCleanupAfterCommand();
-        return { exitCode: retryRun.attempt.exitCode };
-      }
-
-      let retryPostamble = processedRetry.postamble;
-      if (processedRetry.exitCode === 0) {
-        retryPostamble = appendOutputPostamble(
-          retryPostamble,
-          retryResolution.retrySuccessMessage,
-          retryRun.attempt.combinedOutput,
-        );
-      } else if (
-        !processedRetry.resolution &&
-        processedRetry.runtimeProtectedWriteViolations.length === 0
-      ) {
-        retryPostamble = appendOutputPostamble(
-          retryPostamble,
-          retryResolution.retryFailureMessage,
-          retryRun.attempt.combinedOutput,
-        );
-      }
-
-      if (retryPostamble) onData(Buffer.from(retryPostamble));
-      safeCleanupAfterCommand();
-      return { exitCode: processedRetry.exitCode };
     },
   };
 }

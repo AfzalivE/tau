@@ -20,7 +20,7 @@ Overrides use field-level `custom ?? session` precedence. Omission falls back, `
 | `enableWeakerNetworkIsolation`, `allowAppleEvents`                 | macOS        |
 | `enableWeakerNestedSandbox`, `mandatoryDenySearchDepth`            | Linux        |
 
-Existing `allowPty`, filesystem lists/disabled, credential handling, and additive `git.safeDirectories` semantics remain intact. Mandatory protections, including Git hooks, remain enforced. Linux search depth defaults to 3 (valid range 1–10). Lower depth reduces protection. Apple Events can launch unsandboxed applications.
+Existing `allowPty`, filesystem lists/disabled, credential handling, and additive `git.safeDirectories` semantics remain intact. Mandatory protections, including Git hooks, remain enforced. Linux search depth defaults to 3 (valid range 1–10). Lower depth reduces protection. Apple Events can launch unsandboxed applications. Supporting a runtime override does not create a Tau classifier permission.
 
 This is not a general configuration merge. Custom `network.allowedDomains` affects isolation/proxy routing and credential injection defaults, but custom allow/deny lists do not replace the live proxy's session policy. An empty custom allowlist does not revoke a session allowance. `ignoreViolations`, proxy/filter/TLS settings, `ripgrep`, `seccomp`, and executable selection remain session/infrastructure scoped. Linux monitors retain session policy. This patch does not change Windows behavior.
 
