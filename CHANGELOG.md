@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Added
+
+- Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
+
 ### Fixed
 
 - Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
+- Reject invalid Sandbox runtime policies before activation or session updates, including ineffective slash-ended deny globs.
 
 ### Removed
 

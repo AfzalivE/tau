@@ -1,4 +1,3 @@
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -10,6 +9,7 @@ import {
   mutateStringList,
   type ListOp,
   type PromptMode,
+  type SandboxPolicy,
 } from "../config.js";
 import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
 import {
@@ -35,7 +35,7 @@ export interface FilesystemViolation {
 export type FilesystemList = "deny-read" | "allow-write" | "deny-write";
 
 export function isRuntimeProtectedWriteViolation(
-  runtimeConfig: SandboxRuntimeConfig | null,
+  runtimeConfig: SandboxPolicy | null,
   violation: FilesystemViolation,
   cwd?: string,
 ): boolean {
@@ -52,7 +52,7 @@ export function isRuntimeProtectedWriteViolation(
 }
 
 export function getRuntimeProtectedWriteViolations(
-  runtimeConfig: SandboxRuntimeConfig | null,
+  runtimeConfig: SandboxPolicy | null,
   violations: FilesystemViolation[],
   cwd?: string,
 ): FilesystemViolation[] {
@@ -185,7 +185,7 @@ function detectFilesystemViolations(
 }
 
 export function isTraversalViolation(
-  runtimeConfig: SandboxRuntimeConfig | null,
+  runtimeConfig: SandboxPolicy | null,
   violation: FilesystemViolation,
   cwd?: string,
 ): boolean {
@@ -193,7 +193,10 @@ export function isTraversalViolation(
   if (!READ_TRAVERSAL_PROCESSES.has(violation.processName ?? "")) return false;
 
   if (violation.kind === "read") {
-    return inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd) !== null;
+    return (
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, "denyRead", cwd) !==
+      null
+    );
   }
 
   if (violation.kind !== "write" || violation.writeAccess !== "unlink") return false;
@@ -208,7 +211,7 @@ export function isTraversalViolation(
 }
 
 export function getTraversalPaths(options: {
-  runtimeConfig: SandboxRuntimeConfig | null;
+  runtimeConfig: SandboxPolicy | null;
   output: string;
   cwd?: string;
 }): string[] | null {
@@ -264,7 +267,7 @@ interface FilesystemAllowAction {
 }
 
 function buildFilesystemAllowAction(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   violation: FilesystemViolation,
   cwd?: string,
 ): FilesystemAllowAction | null {
@@ -274,6 +277,7 @@ function buildFilesystemAllowAction(
     const matchedRule = inferSandboxRuleMatch(
       violation.path,
       runtimeConfig.filesystem.denyRead,
+      "denyRead",
       cwd,
     );
     return { list: "deny-read", op: "remove", value: matchedRule ?? violation.path };
@@ -283,6 +287,7 @@ function buildFilesystemAllowAction(
     const matchedDeny = inferSandboxRuleMatch(
       violation.path,
       runtimeConfig.filesystem.denyWrite,
+      "denyWrite",
       cwd,
     );
     if (matchedDeny) {
@@ -295,6 +300,7 @@ function buildFilesystemAllowAction(
   const matchedDenyWrite = inferSandboxRuleMatch(
     violation.path,
     runtimeConfig.filesystem.denyWrite,
+    "denyWrite",
     cwd,
   );
   if (matchedDenyWrite) {
@@ -304,6 +310,7 @@ function buildFilesystemAllowAction(
   const matchedDenyRead = inferSandboxRuleMatch(
     violation.path,
     runtimeConfig.filesystem.denyRead,
+    "denyRead",
     cwd,
   );
   if (matchedDenyRead) {
@@ -317,17 +324,14 @@ function buildFilesystemAllowCommand(action: FilesystemAllowAction): string {
   return `/sandbox filesystem ${action.list} ${action.op} ${escapeSlashCommandArg(action.value)}`;
 }
 
-function getFilesystemListValues(
-  runtimeConfig: SandboxRuntimeConfig,
-  list: FilesystemList,
-): string[] {
+function getFilesystemListValues(runtimeConfig: SandboxPolicy, list: FilesystemList): string[] {
   if (list === "deny-read") return runtimeConfig.filesystem.denyRead;
   if (list === "allow-write") return runtimeConfig.filesystem.allowWrite;
   return runtimeConfig.filesystem.denyWrite;
 }
 
 function applyFilesystemAllowAction(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   action: FilesystemAllowAction,
 ): boolean {
   const values = getFilesystemListValues(runtimeConfig, action.list);
@@ -335,7 +339,7 @@ function applyFilesystemAllowAction(
 }
 
 function isFilesystemAllowActionAlreadyApplied(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   action: FilesystemAllowAction,
 ): boolean {
   const values = getFilesystemListValues(runtimeConfig, action.list);
@@ -373,7 +377,7 @@ function formatFilesystemViolationSummary(violation: FilesystemViolation): strin
 }
 
 function classifyFilesystemEventReason(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   violation: FilesystemViolation,
   cwd?: string,
   alreadyApproved = false,
@@ -381,10 +385,12 @@ function classifyFilesystemEventReason(
   if (alreadyApproved) return "already-approved-still-failed";
 
   if (violation.path) {
-    if (inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, cwd)) {
+    if (
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, "denyWrite", cwd)
+    ) {
       return "explicit-deny-write";
     }
-    if (inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, cwd)) {
+    if (inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, "denyRead", cwd)) {
       return "explicit-deny-read";
     }
   }
@@ -432,17 +438,14 @@ function formatFilesystemBlockedTarget(target: string): string {
 export async function handleFilesystemViolation(options: {
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
-  runtimeConfig: SandboxRuntimeConfig;
-  getRuntimeConfig: () => SandboxRuntimeConfig | null;
+  runtimeConfig: SandboxPolicy;
+  getRuntimeConfig: () => SandboxPolicy | null;
   output: string;
   rawOutput: string;
   command: string;
   cwd?: string;
   pendingDialogs?: Map<string, Promise<PermissionResolution | null>>;
-  applyRuntimeConfigForSession?: (
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ) => void;
+  applyRuntimeConfigForSession?: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
   recordEvent?: (event: SandboxEvent) => void;
   autoRetryAvailable?: boolean;
   runtimeProtectedWriteViolations?: FilesystemViolation[];

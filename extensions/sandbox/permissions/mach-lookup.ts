@@ -1,4 +1,3 @@
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -7,6 +6,7 @@ import {
   mutateStringList,
   type ListOp,
   type PromptMode,
+  type SandboxPolicy,
 } from "../config.js";
 import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
 import {
@@ -53,7 +53,7 @@ function matchesMachLookupRule(service: string, rule: string): boolean {
 }
 
 export function mutateMachLookupAllowList(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   op: ListOp,
   service: string,
 ): boolean {
@@ -61,10 +61,7 @@ export function mutateMachLookupAllowList(
   return mutateStringList(runtimeConfig.network.allowMachLookup, op, service);
 }
 
-function isMachLookupAlreadyAllowed(
-  runtimeConfig: SandboxRuntimeConfig | null,
-  service: string,
-): boolean {
+function isMachLookupAlreadyAllowed(runtimeConfig: SandboxPolicy | null, service: string): boolean {
   return (runtimeConfig?.network.allowMachLookup ?? []).some((rule) =>
     matchesMachLookupRule(service, rule),
   );
@@ -96,15 +93,12 @@ function formatMachLookupBlockedTarget(service: string): string {
 export async function handleMachLookupViolation(options: {
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
-  runtimeConfig: SandboxRuntimeConfig;
+  runtimeConfig: SandboxPolicy;
   violations: MachLookupViolation[];
   command: string;
   cwd?: string;
   pendingDialogs?: Map<string, Promise<PermissionResolution | null>>;
-  applyRuntimeConfigForSession?: (
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ) => void;
+  applyRuntimeConfigForSession?: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
   recordEvent?: (event: SandboxEvent) => void;
   autoRetryAvailable?: boolean;
 }): Promise<PermissionResolution | null> {

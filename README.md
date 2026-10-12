@@ -95,7 +95,7 @@ pi -e ./packages/tau-coding-agent
 pi -e ./packages/tau-all-agent
 ```
 
-The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`.
+The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. Installation applies [version-pinned sandbox runtime patches](patches/README.md), using Git. `npm run package` stages self-contained publishable packages under `dist/`, including private copies of the patched runtime.
 
 Run `npm test` for all extension tests or `npm test -- <extension>` for one extension. Node test options can follow the extension name, for example `npm test -- <extension> --test-name-pattern=reload`. Tests compile into disposable build output and run with isolated home/config directories and no inherited credentials. See [AGENTS.md](AGENTS.md) for extension development and testing guidelines.
 
@@ -110,7 +110,7 @@ The GitHub Actions publish workflow stages packages under `dist/` and publishes 
 1. `tau-coding-agent`
 2. `tau-all-agent`
 
-Published packages are self-contained copies of their selected Tau resources.
+Published packages contain their selected Tau resources and the patched sandbox runtime. Consumers do not need to run patch scripts.
 
 ## Acknowledgements
 

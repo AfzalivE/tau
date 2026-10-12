@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -11,6 +11,7 @@ import {
   mutateStringList,
   type PromptMode,
   type SandboxConfig,
+  type SandboxPolicy,
 } from "./config.js";
 import type { PermissionResolution } from "./permissions/dialog.js";
 import {
@@ -78,12 +79,13 @@ function resolveGitFilesystemPaths(cwd: string): GitFilesystemPaths | null {
 }
 
 function maybeAddGitMetadataWritePath(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   path: string,
   cwd?: string,
-): SandboxRuntimeConfig | null {
+): SandboxPolicy | null {
   if (isSandboxWritablePath(runtimeConfig, path, cwd)) return null;
-  if (inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, cwd)) return null;
+  if (inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, "denyWrite", cwd))
+    return null;
 
   const nextConfig = cloneRuntimeConfig(runtimeConfig);
   if (!mutateStringList(nextConfig.filesystem.allowWrite, "add", path)) return null;
@@ -107,12 +109,9 @@ function ensureTrailingNewline(text: string): string {
 interface SandboxedBashOpsOptions {
   getContext: () => ExtensionContext | null;
   getSandboxConfig: () => SandboxConfig | null;
-  getRuntimeConfig: () => SandboxRuntimeConfig | null;
+  getRuntimeConfig: () => SandboxPolicy | null;
   getPromptMode: () => PromptMode;
-  applyRuntimeConfigForSession: (
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ) => void;
+  applyRuntimeConfigForSession: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
   recordEvent?: (event: SandboxEvent) => void;
 }
 
@@ -137,7 +136,7 @@ interface ProcessedSandboxAttempt {
 interface PreparedSandboxAttempt {
   attempt: BashAttemptResult;
   commandId: string;
-  runtimeConfig: SandboxRuntimeConfig | null;
+  runtimeConfig: SandboxPolicy | null;
 }
 
 function killProcessGroup(
@@ -175,12 +174,9 @@ function safeCleanupAfterCommand(): void {
 function maybeAllowGitMetadataWriteForSession(options: {
   ctx: ExtensionContext | null;
   cwd: string;
-  runtimeConfig: SandboxRuntimeConfig | null;
+  runtimeConfig: SandboxPolicy | null;
   allowGitCommonDir: boolean;
-  applyRuntimeConfigForSession: (
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ) => void;
+  applyRuntimeConfigForSession: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
 }): void {
   const { ctx, cwd, runtimeConfig, allowGitCommonDir, applyRuntimeConfigForSession } = options;
   if (!ctx || !runtimeConfig) return;
@@ -252,7 +248,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     commandId: string,
     wrappedCommand: string,
     cwd: string,
-    runtimeConfig: SandboxRuntimeConfig | null,
+    runtimeConfig: SandboxPolicy | null,
     onData: (data: Buffer) => void,
     signal?: AbortSignal,
     timeout?: number,
@@ -285,9 +281,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
         }, 500);
       };
 
-      // The Linux monitor filters attempts against configured write rules and does not
-      // report mandatory runtime denies within already-allowed paths, so runtime-protected
-      // continuation remains macOS-only.
+      // The Linux monitor now includes mandatory denies within cwd, but its telemetry is
+      // attacker-controlled and session-scoped. Keep live interruption macOS-only.
       const unsubscribeViolations =
         process.platform !== "darwin"
           ? () => undefined
@@ -429,14 +424,14 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     const attemptRuntimeConfig = runtimeConfig ? cloneRuntimeConfig(runtimeConfig) : null;
     const commandId = createSandboxCommandId();
 
+    const wrappedCommand = await SandboxManager.wrapWithSandbox(
+      command,
+      IS_MACOS ? MACOS_SANDBOX_SHELL : undefined,
+      attemptRuntimeConfig ?? undefined,
+      signal,
+      { commandId, commandText: command },
+    );
     try {
-      const wrappedCommand = await SandboxManager.wrapWithSandbox(
-        command,
-        IS_MACOS ? MACOS_SANDBOX_SHELL : undefined,
-        attemptRuntimeConfig ?? undefined,
-        signal,
-        { commandId, commandText: command },
-      );
       const attempt = await runSandboxAttempt(
         commandId,
         wrappedCommand,
@@ -459,7 +454,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     command: string;
     commandId: string;
     cwd: string;
-    runtimeConfig: SandboxRuntimeConfig | null;
+    runtimeConfig: SandboxPolicy | null;
     autoRetryAvailable: boolean;
   }): Promise<ProcessedSandboxAttempt> {
     const { attempt, command, commandId, cwd, runtimeConfig, autoRetryAvailable } = options;

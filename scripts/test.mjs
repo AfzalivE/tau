@@ -52,13 +52,14 @@ try {
     env,
   );
   if (process.exitCode === 0) {
-    for (const directory of ["extensions", "tests"]) {
+    for (const directory of ["extensions", "tests", "scripts", "patches", "packages"]) {
       await cp(path.join(rootDir, directory), path.join(buildDir, directory), {
         recursive: true,
         // Adjacent declarations can prevent TypeScript from emitting JavaScript runtime files.
         filter: (source) => !/\.[cm]?ts$/.test(source),
       });
     }
+    await cp(path.join(rootDir, "LICENSE"), path.join(buildDir, "LICENSE"));
     process.exitCode = await runNode(
       [
         "--enable-source-maps",

@@ -1,4 +1,4 @@
-import type { SandboxAskCallback, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { SandboxAskCallback } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -6,6 +6,7 @@ import {
   escapeSlashCommandArg,
   mutateStringList,
   type PromptMode,
+  type SandboxPolicy,
 } from "../config.js";
 type NetworkEventOutcome = "blocked" | "allowed";
 type NetworkEventReason = "explicit-deny-domain" | "missing-allowed-domain";
@@ -26,12 +27,9 @@ interface NetworkPermissions {
 export function createNetworkPermissions(options: {
   getContext: () => ExtensionContext | null;
   getPromptMode: () => PromptMode;
-  getRuntimeConfig: () => SandboxRuntimeConfig | null;
+  getRuntimeConfig: () => SandboxPolicy | null;
   isSuspended: () => boolean;
-  applyRuntimeConfigForSession: (
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ) => void;
+  applyRuntimeConfigForSession: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
   recordEvent: (event: NetworkPermissionEvent) => void;
   notify: (ctx: ExtensionContext, text: string, level?: "info" | "warning" | "error") => void;
 }): NetworkPermissions {

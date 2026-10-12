@@ -1,16 +1,26 @@
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import {
+  type SandboxRuntimeConfig,
+  SandboxRuntimeConfigSchema,
+} from "@anthropic-ai/sandbox-runtime";
+import { literalReadings } from "@anthropic-ai/sandbox-runtime/dist/sandbox/path-entries.js";
 import {
   containsGlobChars,
+  denyGlobRegex,
+  globPatternBaseDir,
   globToRegex,
+  isAtOrUnder,
   normalizePathForSandbox,
+  properAncestors,
+  removeTrailingGlobSuffix,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type PromptMode = "interactive" | "non-interactive";
 export type ListOp = "add" | "remove";
+type FilesystemRuleList = "denyRead" | "allowRead" | "allowWrite" | "denyWrite";
 
 type DefaultConfigExtension = {
   allowMachLookup?: string[];
@@ -18,10 +28,23 @@ type DefaultConfigExtension = {
   ignoreViolations?: string[];
 };
 
-export type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem"> & {
+// Tau normalizes configured filesystem rules to strings.
+export type SandboxPolicy = Omit<SandboxRuntimeConfig, "filesystem"> & {
+  filesystem: Omit<
+    SandboxRuntimeConfig["filesystem"],
+    "denyRead" | "allowRead" | "allowWrite" | "denyWrite"
+  > & {
+    denyRead: string[];
+    allowRead?: string[];
+    allowWrite: string[];
+    denyWrite: string[];
+  };
+};
+
+export type SandboxConfig = SandboxPolicy & {
   enabled?: boolean;
   mode?: PromptMode;
-  filesystem: SandboxRuntimeConfig["filesystem"] & {
+  filesystem: SandboxPolicy["filesystem"] & {
     allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
   };
@@ -652,9 +675,9 @@ function expandNetworkPathConfig(
 }
 
 function expandFilesystemPathConfig(
-  filesystem: SandboxRuntimeConfig["filesystem"],
+  filesystem: SandboxPolicy["filesystem"],
   cwd: string,
-): SandboxRuntimeConfig["filesystem"] {
+): SandboxPolicy["filesystem"] {
   return {
     ...filesystem,
     denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead", cwd) ?? [],
@@ -664,7 +687,7 @@ function expandFilesystemPathConfig(
   };
 }
 
-export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxRuntimeConfig {
+export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxPolicy {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
   const expandedNetwork = expandNetworkPathConfig(config.network, cwd);
   const expandedFilesystem = expandFilesystemPathConfig(filesystem, cwd);
@@ -672,7 +695,7 @@ export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxRunt
     ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]
     : expandedFilesystem.allowWrite;
 
-  return {
+  const runtimeConfig: SandboxPolicy = {
     network: {
       ...expandedNetwork,
       allowUnixSockets: deduplicateOptionalStrings(expandedNetwork.allowUnixSockets),
@@ -688,41 +711,110 @@ export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxRunt
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
   };
+
+  SandboxRuntimeConfigSchema.parse(runtimeConfig);
+  return runtimeConfig;
 }
 
-export function cloneRuntimeConfig(config: SandboxRuntimeConfig): SandboxRuntimeConfig {
+export function cloneRuntimeConfig(config: SandboxPolicy): SandboxPolicy {
   return structuredClone(config);
 }
 
-function normalizeSandboxPath(value: string, cwd?: string): string {
-  return normalizePathForSandbox(expandPath(value, cwd));
-}
-
-function matchesSandboxRule(path: string, rule: string, cwd?: string): boolean {
-  const normalizedPath = normalizeSandboxPath(path);
-  const normalizedRule = normalizeSandboxPath(rule, cwd);
-
-  if (containsGlobChars(rule)) {
-    return new RegExp(globToRegex(normalizedRule)).test(normalizedPath);
-  }
-
-  if (normalizedPath === normalizedRule) return true;
-
-  const prefix = normalizedRule.endsWith("/") ? normalizedRule : `${normalizedRule}/`;
-  return normalizedPath.startsWith(prefix);
-}
-
-export function inferSandboxRuleMatch(path: string, rules: string[], cwd?: string): string | null {
+export function inferSandboxRuleMatch(
+  path: string,
+  rules: string[],
+  list: FilesystemRuleList,
+  cwd?: string,
+): string | null {
+  const normalizedPath = normalizeSandboxPath(path, cwd);
   for (const rule of rules) {
-    if (matchesSandboxRule(path, rule, cwd)) return rule;
+    if (matchesSandboxRule(normalizedPath, rule, list, cwd)) return rule;
   }
 
   return null;
 }
 
+function matchesSandboxRule(
+  path: string,
+  rule: string,
+  list: FilesystemRuleList,
+  cwd?: string,
+): boolean {
+  const spelling = expandPath(rule, cwd);
+  const stripped = removeTrailingGlobSuffix(spelling);
+  const kind = list === "allowRead" || list === "allowWrite" ? "allow" : "deny";
+  if (!containsGlobChars(stripped)) {
+    return isAtOrUnder(path, normalizeSandboxPath(stripped));
+  }
+
+  if (process.platform === "linux") {
+    if (list === "allowWrite" || list === "denyWrite") {
+      // Linux drops write patterns unless they also name an actual path.
+      return literalReadings(stripped, kind).some(
+        (reading) => !reading.glob && isAtOrUnder(path, reading.path),
+      );
+    }
+
+    if (matchesLinuxReadGlob(path, normalizePathForSandbox(spelling))) return true;
+    return literalReadings(spelling, kind).some((reading) =>
+      reading.glob
+        ? matchesLinuxReadGlob(path, reading.path, reading.anchor)
+        : isAtOrUnder(path, reading.path),
+    );
+  }
+
+  const compile = kind === "deny" ? denyGlobRegex : globToRegex;
+  if (new RegExp(compile(normalizePathForSandbox(stripped))).test(path)) return true;
+
+  return literalReadings(stripped, kind).some((reading) => {
+    if (!reading.glob) return isAtOrUnder(path, reading.path);
+    // Only the tail is pattern. The anchor may itself contain glob characters.
+    return (
+      path.startsWith(`${reading.anchor}/`) &&
+      new RegExp(compile(reading.path.slice(reading.anchor.length))).test(
+        path.slice(reading.anchor.length),
+      )
+    );
+  });
+}
+
+function matchesLinuxReadGlob(path: string, pattern: string, anchor?: string): boolean {
+  const tail = anchor === undefined ? pattern : pattern.slice(anchor.length);
+  // Parent references in a glob are not names the backend's directory walk lists.
+  if (/(^|\/)\.\.(\/|$)/.test(tail)) return false;
+  const patternBase = globPatternBaseDir(tail);
+  const base =
+    anchor === undefined ? patternBase : anchor + (patternBase === "/" ? "" : patternBase);
+  if (!base || base === "/" || !isAtOrUnder(path, base)) return false;
+
+  const regex = new RegExp(globToRegex(tail), "s");
+  const candidates = [path, ...properAncestors(path)].filter((candidate) =>
+    isAtOrUnder(candidate, base),
+  );
+  // Probe only this path's depth, never enumerate a tree. An existing, unlinked
+  // matching ancestor covers its subtree. Abstain on symlink or inaccessible paths.
+  for (const candidate of candidates.reverse()) {
+    try {
+      const entry = lstatSync(candidate);
+      if (entry.isSymbolicLink()) return false;
+      if (regex.test(anchor === undefined ? candidate : candidate.slice(anchor.length)))
+        return true;
+      if (!entry.isDirectory()) return false;
+      accessSync(candidate, constants.R_OK | constants.X_OK);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function normalizeSandboxPath(value: string, cwd?: string): string {
+  return normalizePathForSandbox(expandPath(value, cwd), { literal: true });
+}
+
 function matchesSandboxRuleExactly(path: string, rule: string, cwd?: string): boolean {
   if (containsGlobChars(rule)) return false;
-  return normalizeSandboxPath(path) === normalizeSandboxPath(rule, cwd);
+  return normalizeSandboxPath(path, cwd) === normalizeSandboxPath(rule, cwd);
 }
 
 export function inferExactSandboxRuleMatch(
@@ -738,12 +830,13 @@ export function inferExactSandboxRuleMatch(
 }
 
 export function isSandboxWritablePath(
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   path: string,
   cwd?: string,
 ): boolean {
-  if (!inferSandboxRuleMatch(path, runtimeConfig.filesystem.allowWrite, cwd)) return false;
-  return inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, cwd) === null;
+  if (!inferSandboxRuleMatch(path, runtimeConfig.filesystem.allowWrite, "allowWrite", cwd))
+    return false;
+  return inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, "denyWrite", cwd) === null;
 }
 
 export function escapeSlashCommandArg(value: string): string {

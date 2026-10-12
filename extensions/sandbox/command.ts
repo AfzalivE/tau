@@ -1,4 +1,3 @@
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -9,6 +8,7 @@ import {
   type ListOp,
   type PromptMode,
   type SandboxConfigPath,
+  type SandboxPolicy,
 } from "./config.js";
 import {
   describeSandboxRuntimeState,
@@ -165,7 +165,7 @@ function getStringValueCompletions(
 function getMachLookupArgumentCompletions(options: {
   tokens: string[];
   endsWithSpace: boolean;
-  runtimeConfig: SandboxRuntimeConfig | null;
+  runtimeConfig: SandboxPolicy | null;
 }): Array<{ value: string; label: string; description?: string }> | null {
   const { tokens, endsWithSpace, runtimeConfig } = options;
 
@@ -195,7 +195,7 @@ function getMachLookupArgumentCompletions(options: {
 
 function getSandboxArgumentCompletions(
   prefix: string,
-  runtimeConfig: SandboxRuntimeConfig | null,
+  runtimeConfig: SandboxPolicy | null,
 ): Array<{ value: string; label: string; description?: string }> | null {
   const endsWithSpace = /\s$/.test(prefix);
   const tokens = parseCommandArgs(prefix);
@@ -309,7 +309,7 @@ function getSandboxArgumentCompletions(
 function requireRuntimeConfig(
   ctx: ExtensionContext,
   runtime: SandboxRuntime,
-): SandboxRuntimeConfig | null {
+): SandboxPolicy | null {
   const runtimeConfig = runtime.getRuntimeConfig();
   if (!runtimeConfig) {
     notify(ctx, "Sandbox is not initialized", "info");

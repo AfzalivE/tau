@@ -1,7 +1,7 @@
 import {
   SandboxManager,
+  SandboxRuntimeConfigSchema,
   type SandboxAskCallback,
-  type SandboxRuntimeConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -18,6 +18,7 @@ import {
   type PromptMode,
   type SandboxConfig,
   type SandboxConfigPath,
+  type SandboxPolicy,
 } from "./config.js";
 import { createNetworkPermissions } from "./permissions/network.js";
 
@@ -33,7 +34,7 @@ type SandboxRunMode = "sandbox" | "user-disabled" | SandboxBypassReason | Sandbo
 
 export type SandboxState =
   | { status: "pending" }
-  | { status: "active"; runtimeConfig: SandboxRuntimeConfig }
+  | { status: "active"; runtimeConfig: SandboxPolicy }
   | { status: "suspended" }
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
@@ -72,7 +73,7 @@ export interface SandboxRuntime {
   readonly context: ExtensionContext | null;
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
-  getRuntimeConfig(): SandboxRuntimeConfig | null;
+  getRuntimeConfig(): SandboxPolicy | null;
   withBashContext<T>(ctx: ExtensionContext, signal: AbortSignal, run: () => Promise<T>): Promise<T>;
   withPermissionContext<C extends ExtensionContext, T>(
     ctx: C,
@@ -84,14 +85,14 @@ export interface SandboxRuntime {
   enable(ctx: ExtensionContext): Promise<void>;
   disable(ctx: ExtensionContext): Promise<void>;
   setPromptMode(ctx: ExtensionContext, mode: PromptMode): void;
-  applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxRuntimeConfig): void;
+  applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxPolicy): void;
   recordEvent(event: SandboxEvent): void;
 }
 
 function setSandboxStatus(
   ctx: ExtensionContext,
   enabled: boolean,
-  runtimeConfig?: SandboxRuntimeConfig,
+  runtimeConfig?: SandboxPolicy,
   promptMode: PromptMode = DEFAULT_PROMPT_MODE,
 ): void {
   if (!ctx.hasUI) return;
@@ -150,7 +151,7 @@ export function getSandboxRunMode(state: SandboxState): SandboxRunMode {
   return state.reason;
 }
 
-function getStateRuntimeConfig(state: SandboxState): SandboxRuntimeConfig | null {
+function getStateRuntimeConfig(state: SandboxState): SandboxPolicy | null {
   return state.status === "active" ? state.runtimeConfig : null;
 }
 
@@ -275,13 +276,11 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     );
   }
 
-  function applyRuntimeConfigForSession(
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ): void {
+  function applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxPolicy): void {
     const nextConfig = cloneRuntimeConfig(runtimeConfig);
-    sandboxState = { status: "active", runtimeConfig: nextConfig };
+    SandboxRuntimeConfigSchema.parse(nextConfig);
     SandboxManager.updateConfig(nextConfig);
+    sandboxState = { status: "active", runtimeConfig: nextConfig };
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
@@ -318,7 +317,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   async function initializeSandboxRuntime(
     ctx: ExtensionContext,
     config: SandboxConfig,
-  ): Promise<SandboxRuntimeConfig | null> {
+  ): Promise<SandboxPolicy | null> {
     promptMode = normalizePromptMode(config.mode);
 
     const dependencyErrors = getSandboxDependencyErrors(config);
@@ -340,9 +339,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       return null;
     }
 
-    const runtimeConfig = toRuntimeConfig(config, ctx.cwd);
-
     try {
+      const runtimeConfig = toRuntimeConfig(config, ctx.cwd);
       await SandboxManager.initialize(runtimeConfig, askNetworkPermission, true);
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };

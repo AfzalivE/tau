@@ -517,11 +517,21 @@ describe("sandbox", { concurrency: false }, () => {
   });
 
   describe("recovering a blocked shell", () => {
-    for (const failure of ["missing dependencies", "initialization failure"] as const) {
+    for (const failure of [
+      "missing dependencies",
+      "initialization failure",
+      "invalid deny glob",
+    ] as const) {
       test(`${failure} cannot silently fall back to local bash; enable retries setup`, async () => {
         if (failure === "missing dependencies")
           boundary.dependencyErrors = ["fixture: no bubblewrap"];
-        else boundary.initializationError = new Error("fixture: sandbox setup refused");
+        else if (failure === "initialization failure")
+          boundary.initializationError = new Error("fixture: sandbox setup refused");
+        else {
+          const invalid = JSON.parse(configBytes);
+          invalid.filesystem.denyRead = [`${cwd}/*/`];
+          await writeFile(configPath, JSON.stringify(invalid));
+        }
         pi = await openSandbox(cwd, sandbox, failures);
         const probe = "printf '%s\\n' \"$PI_SESSION_ID\" > probe.txt; printf 'kraken ready\\n'";
         boundary.allowLocal(probe);
@@ -542,6 +552,7 @@ describe("sandbox", { concurrency: false }, () => {
 
         boundary.dependencyErrors = [];
         boundary.initializationError = undefined;
+        if (failure === "invalid deny glob") await writeFile(configPath, configBytes);
         boundary.attempts(probe, [{ script: probe }]);
         await pi.command("enable");
         assert.match(pi.status(), /sandbox \(interactive,/);
@@ -576,6 +587,43 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(await readFile(configPath, "utf8"), configBytes);
       });
     }
+  });
+
+  test("a rejected native policy update leaves the active Tau policy unchanged", async () => {
+    let checked = false;
+    pi = await openSandbox(
+      cwd,
+      (api) => {
+        const runtime = createRuntime(api);
+        api.on("session_start", async (_event, ctx) => {
+          await runtime.start(ctx);
+          const state = runtime.state;
+          const policy = runtime.getRuntimeConfig();
+          assert.ok(policy);
+          const nativePolicy = SandboxManager.getConfig();
+          const next = structuredClone(policy);
+          next.network.allowedDomains.push("kraken.invalid");
+          const update = mock.method(SandboxManager, "updateConfig", () => {
+            throw new Error("fixture: native policy rejected");
+          });
+          try {
+            assert.throws(
+              () => runtime.applyRuntimeConfigForSession(ctx, next),
+              /native policy rejected/,
+            );
+            assert.equal(runtime.state, state);
+            assert.equal(runtime.getRuntimeConfig(), policy);
+            assert.equal(SandboxManager.getConfig(), nativePolicy);
+            checked = true;
+          } finally {
+            update.mock.restore();
+          }
+        });
+        api.on("session_shutdown", (_event, ctx) => runtime.shutdown(ctx));
+      },
+      failures,
+    );
+    assert.equal(checked, true);
   });
 
   test("minimal Bash output preserves Sandbox approvals and execution", async () => {
