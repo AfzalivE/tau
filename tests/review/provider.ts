@@ -17,6 +17,14 @@ export const reviewModel = {
   provider: "review-fixture",
   input: ["text", "image"],
 } satisfies Model<string>;
+export const alternateReviewModel = {
+  ...reviewModel,
+  provider: "review-octopus-fixture",
+  api: "review-octopus-fixture",
+  id: "octopus",
+  name: "Scripted octopus",
+  reasoning: true,
+} satisfies Model<string>;
 
 /** The real CLI uses IPC for hosted generation or guarded localhost HTTP for native llama.cpp. */
 export default function childProvider(pi: ExtensionAPI) {
@@ -86,12 +94,14 @@ export default function childProvider(pi: ExtensionAPI) {
     });
   }
   if (llamaUrl) return;
-  return scriptedProvider(
-    reviewModel,
-    (request) =>
-      new Promise<AssistantMessage>((resolve) => {
-        process.once("message", (message) => resolve(message as AssistantMessage));
-        process.send?.({ type: "generation", ...request });
-      }),
-  )(pi);
+  for (const model of [reviewModel, alternateReviewModel]) {
+    scriptedProvider(
+      model,
+      (request) =>
+        new Promise<AssistantMessage>((resolve) => {
+          process.once("message", (message) => resolve(message as AssistantMessage));
+          process.send?.({ type: "generation", ...request });
+        }),
+    )(pi);
+  }
 }

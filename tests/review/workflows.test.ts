@@ -28,6 +28,7 @@ import {
   type ExtensionUIContext,
   type KeybindingsManager as AppKeybindingsManager,
   type TerminalInputHandler,
+  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
   getKeybindings,
@@ -45,7 +46,7 @@ import review from "../../extensions/review/index.js";
 import subagent from "../../extensions/subagent/index.js";
 import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
 import { assistantMessage, createPiResources, getPiCliPath, uiBoundary } from "../helpers/pi.js";
-import { providerPath, reviewModel } from "./provider.js";
+import { alternateReviewModel, providerPath, reviewModel } from "./provider.js";
 import { startLlamaRouter } from "./llama.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
@@ -69,6 +70,8 @@ const image: ImageContent = {
 describe("review", { concurrency: false }, () => {
   let directory: string;
   let cwd: string;
+  let agentDir: string;
+  let previousAgentDir: string | undefined;
   let app: Awaited<ReturnType<typeof openReview>> | undefined;
   let failures: unknown[];
   let children: { process: ChildProcess; closed: Promise<unknown>; hasClosed: boolean }[];
@@ -80,6 +83,7 @@ describe("review", { concurrency: false }, () => {
   let isolation: { args: string[]; tools: string[]; commands: string[]; activeTools: string[] }[];
 
   beforeEach(async () => {
+    previousAgentDir = process.env.PI_CODING_AGENT_DIR;
     failures = [];
     children = [];
     generations = [];
@@ -88,6 +92,9 @@ describe("review", { concurrency: false }, () => {
     llama = undefined;
     isolation = [];
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-review-workflows-"));
+    agentDir = path.join(directory, "agent");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    await mkdir(agentDir, { recursive: true });
     cwd = path.join(directory, "work");
     await mkdir(path.join(cwd, ".pi"), { recursive: true });
     await writeFile(path.join(cwd, "café.ts"), "export const acceptsExpired = true;\n");
@@ -282,6 +289,8 @@ describe("review", { concurrency: false }, () => {
       try {
         await llama?.dispose();
       } finally {
+        if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
         await rm(directory, { recursive: true, force: true });
       }
     }
@@ -349,6 +358,336 @@ describe("review", { concurrency: false }, () => {
     );
     assert.equal(app.mainRequests.length, 0);
     await assert.rejects(readFile(marker), { code: "ENOENT" });
+  });
+
+  test("runs every saved model against every saved focus with normalized defaults", async () => {
+    const patterns = [`${reviewModel.provider}/${reviewModel.id}:off`, "octo*:high"];
+    const focuses = ["general", "security"];
+    await writeFile(
+      path.join(agentDir, "review.json"),
+      JSON.stringify({
+        models: [`  ${patterns[0]}  `, patterns[1], patterns[0]],
+        focuses: [" General \t", " SECURITY ", "general"],
+      }),
+    );
+    respond = ({ args, model, context }) => {
+      assertReviewPrompt(
+        contentText(context.messages.find((message) => message.role === "user")!.content),
+        "diff",
+      );
+      const thinking = model.provider === reviewModel.provider ? "off" : "high";
+      assert.equal(args[args.indexOf("--model") + 1], `${model.provider}/${model.id}:${thinking}`);
+      return submit([]);
+    };
+    app = await openReview(
+      directory,
+      cwd,
+      failures,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      reviewModel,
+      {
+        extensions: [
+          scriptedProvider(alternateReviewModel, () => {
+            throw new Error("Review must not generate in the main session");
+          }),
+        ],
+        tools: [],
+      },
+    );
+    await app.run("/review commit HEAD");
+
+    assert.deepEqual(
+      app.report().details.focusStatus.map(({ model, focus, ok }) => [model, focus, ok]),
+      patterns.flatMap((pattern) => focuses.map((focus) => [pattern, focus, true])),
+    );
+    const signature = JSON.parse(app.report().details.request.signature);
+    assert.deepEqual(signature.models, [...patterns].sort());
+    assert.deepEqual(signature.focuses, focuses);
+    assert.equal(generations.length, 4, "duplicates must not add matrix workers");
+    for (const model of [reviewModel, alternateReviewModel]) {
+      const requests = generations.filter((request) => request.model.provider === model.provider);
+      assert.equal(requests.length, 2);
+      assert.ok(requests.every((request) => request.model.id === model.id));
+      assert.equal(
+        requests.filter((request) => request.args.at(-1)!.includes("specializing in security"))
+          .length,
+        1,
+      );
+    }
+    assert.deepEqual(app.report().details.findings, []);
+    assert.equal(app.mainRequests.length, 0);
+  });
+
+  test("overrides saved settings independently, reloads live edits, and supplies omitted defaults", async () => {
+    const configPath = path.join(agentDir, "review.json");
+    const primary = `${reviewModel.provider}/${reviewModel.id}`;
+    const alternate = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+    const allFocuses = ["general", "security", "reuse", "quality", "testing", "efficiency"];
+    await writeFile(configPath, JSON.stringify({ models: [alternate], focuses: ["security"] }));
+    respond = () => submit([]);
+    app = await openReview(
+      directory,
+      cwd,
+      failures,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      reviewModel,
+      {
+        extensions: [
+          scriptedProvider(alternateReviewModel, () => {
+            throw new Error("Review must not generate in the main session");
+          }),
+        ],
+        tools: [],
+      },
+    );
+    const run = async (options: string, models: string[], focuses: string[]) => {
+      const before = generations.length;
+      await app!.run(`/review commit HEAD ${options}`);
+      const signature = JSON.parse(app!.report().details.request.signature);
+      assert.deepEqual(signature.models, [...models].sort());
+      assert.deepEqual(signature.focuses, [...focuses].sort());
+      const effectiveModels = models.length ? models : [alternate];
+      const labels = models.length ? models : [alternateReviewModel.id];
+      assert.deepEqual(
+        app!.report().details.focusStatus.map(({ model, focus, ok }) => [model, focus, ok]),
+        labels.flatMap((model) => focuses.map((focus) => [model, focus, true])),
+      );
+      assert.equal(generations.length - before, effectiveModels.length * focuses.length);
+      for (const request of generations.slice(before))
+        assert.ok(effectiveModels.includes(`${request.model.provider}/${request.model.id}`));
+      return app!.report().details.request.signature;
+    };
+    const savedSignature = await run("", [alternate], ["security"]);
+    await writeFile(
+      configPath,
+      JSON.stringify({ model: [` ${alternate} `, alternate], focus: [" Security ", "security"] }),
+    );
+    assert.equal(await run("", [alternate], ["security"]), savedSignature);
+    const modelOverride = await run(`models=${primary}`, [primary], ["security"]);
+    assert.equal(await run(`model=${primary}`, [primary], ["security"]), modelOverride);
+    const focusOverride = await run("focuses=general", [alternate], ["general"]);
+    assert.equal(await run("focus=general", [alternate], ["general"]), focusOverride);
+    await run("focuses=all", [alternate], allFocuses);
+
+    await writeFile(configPath, JSON.stringify({ models: [primary], focuses: ["testing"] }));
+    await run("", [primary], ["testing"]);
+
+    await app.session.setModel(alternateReviewModel);
+    for (const config of [undefined, {}, { models: [] }, { model: [] }]) {
+      if (config === undefined) await rm(configPath);
+      else await writeFile(configPath, JSON.stringify(config));
+      await run("", [], allFocuses);
+    }
+    await writeFile(configPath, JSON.stringify({ focuses: ["quality"] }));
+    const focusOnly = await run("", [], ["quality"]);
+    await writeFile(configPath, JSON.stringify({ focus: ["quality"] }));
+    assert.equal(await run("", [], ["quality"]), focusOnly);
+    await writeFile(configPath, JSON.stringify({ models: [primary] }));
+    const modelOnly = await run("", [primary], allFocuses);
+    await writeFile(configPath, JSON.stringify({ model: [primary] }));
+    assert.equal(await run("", [primary], allFocuses), modelOnly);
+    await writeFile(configPath, JSON.stringify({ focuses: [" Security ", " ALL ", "all"] }));
+    await run("", [], allFocuses);
+    assert.equal(app.mainRequests.length, 0);
+  });
+
+  test("reuses bare and context-only fixes but matches explicit fixes against effective defaults", async () => {
+    const configPath = path.join(agentDir, "review.json");
+    const primary = `${reviewModel.provider}/${reviewModel.id}`;
+    const alternate = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+    await writeFile(path.join(cwd, "new-ticket.txt"), "The octopus needs an auto-scoped review.\n");
+    await writeFile(configPath, JSON.stringify({ models: [alternate], focuses: ["general"] }));
+    respond = () => submit([]);
+    app = await openReview(
+      directory,
+      cwd,
+      failures,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      reviewModel,
+      {
+        extensions: [
+          scriptedProvider(alternateReviewModel, () => {
+            throw new Error("Review must not generate in the main session");
+          }),
+        ],
+        tools: [],
+      },
+    );
+    await app.run("/review");
+    const saved = app.report();
+    await writeFile(configPath, JSON.stringify({ models: [primary], focuses: ["security"] }));
+    for (const command of ["/fix", '/fix context="Keep the café open 🐙"']) {
+      await app.session.prompt(command);
+      await app.settle();
+      assert.equal(
+        generations.length,
+        1,
+        "implicit fixes retain the last report despite changed defaults",
+      );
+      assert.deepEqual(app.report(), saved);
+    }
+
+    await app.session.prompt("/fix focus=general");
+    await app.settle();
+    assert.equal(generations.length, 2, "explicit focus compares the effective defaults");
+    const fresh = app.report();
+    assert.deepEqual(JSON.parse(fresh.details.request.signature).models, [primary]);
+    await app.session.prompt('/fix focus=general context="Preserve the garnish"');
+    await app.settle();
+    assert.equal(generations.length, 2, "unchanged defaults match without another paid review");
+    assert.deepEqual(app.report(), fresh);
+
+    await app.session.prompt("/fix auto");
+    await app.settle();
+    assert.equal(generations.length, 3, "explicit target compares the effective focus default");
+    assert.deepEqual(JSON.parse(app.report().details.request.signature).focuses, ["security"]);
+    const security = app.report();
+    await app.session.prompt('/fix auto context="Preserve the garnish"');
+    await app.settle();
+    assert.equal(generations.length, 3, "unchanged saved focuses match without another review");
+    assert.deepEqual(app.report(), security);
+
+    await writeFile(configPath, JSON.stringify({ models: [primary], focuses: ["testing"] }));
+    await app.session.prompt("/fix auto");
+    await app.settle();
+    assert.equal(generations.length, 4, "changing only default focuses refreshes an explicit fix");
+    assert.deepEqual(JSON.parse(app.report().details.request.signature).focuses, ["testing"]);
+
+    await writeFile(configPath, JSON.stringify({ models: [alternate], focuses: ["testing"] }));
+    await app.session.prompt("/fix auto");
+    await app.settle();
+    assert.equal(generations.length, 5, "explicit target also compares effective model defaults");
+    assert.deepEqual(JSON.parse(app.report().details.request.signature).models, [alternate]);
+    await app.session.prompt(`/fix auto models=${primary}`);
+    await app.settle();
+    assert.equal(generations.length, 6, "explicit models still use the saved focus default");
+    const signature = JSON.parse(app.report().details.request.signature);
+    assert.deepEqual(signature.models, [primary]);
+    assert.deepEqual(signature.focuses, ["testing"]);
+    const savedTesting = app.report();
+    await writeFile(configPath, JSON.stringify({ model: [primary], focus: ["testing"] }));
+    for (const command of [
+      "/fix auto",
+      `/fix auto model=${primary} focus=testing`,
+      `/fix auto models=${primary} focuses=testing`,
+    ]) {
+      await app.session.prompt(command);
+      await app.settle();
+      assert.equal(generations.length, 6, "aliases reuse the same effective review request");
+      assert.deepEqual(app.report(), savedTesting);
+    }
+    assert.equal(app.reports().length, 6);
+    assert.equal(app.mainRequests.length, 0, "clean reports never queue a fix generation");
+    assert.ok(app.notifications.some(({ message }) => /Nothing to fix/.test(message)));
+  });
+
+  test("validates the whole config unless both settings are explicit, without affecting help or triage", async () => {
+    const configPath = path.join(agentDir, "review.json");
+    const primary = `${reviewModel.provider}/${reviewModel.id}`;
+    app = await openReview(directory, cwd, failures);
+    const invalid = [
+      "{",
+      "null",
+      "[]",
+      '"octopus"',
+      JSON.stringify({ models: reviewModel.id }),
+      JSON.stringify({ model: reviewModel.id }),
+      JSON.stringify({ focusses: ["general"] }),
+      ...[null, {}, 7, [7], [" \t"], ["reply,octopus"]].flatMap((models) =>
+        ["models", "model"].map((field) => JSON.stringify({ [field]: models })),
+      ),
+      ...[
+        { models: [primary], model: [reviewModel.id] },
+        { models: [primary], model: [primary] },
+        { models: [primary], model: null },
+        { models: null, model: [primary] },
+        { focuses: ["general"], focus: ["security"] },
+        { focuses: ["general"], focus: ["general"] },
+        { focuses: ["general"], focus: null },
+        { focuses: null, focus: ["general"] },
+      ].map((config) => JSON.stringify(config)),
+      ...[
+        [],
+        null,
+        {},
+        "security",
+        7,
+        [7],
+        [" \t"],
+        ["octopus"],
+        ["general", "octopus"],
+        ["all", "octopus"],
+        ["general,security"],
+        ["all,"],
+      ].flatMap((focuses) =>
+        ["focuses", "focus"].map((field) =>
+          JSON.stringify({ models: [primary], [field]: focuses }),
+        ),
+      ),
+    ];
+    for (const config of invalid) {
+      await writeFile(configPath, config);
+      for (const command of [
+        "/review commit HEAD",
+        `/review commit HEAD models=${primary}`,
+        "/fix focus=general",
+      ]) {
+        const before = app.notifications.length;
+        await app.session.prompt(command);
+        await app.settle();
+        const notices = app.notifications.slice(before);
+        assert.equal(notices.length, 1, `${command}: ${config}`);
+        assert.equal(notices[0].type, "error", `${command}: ${config}`);
+        assert.ok(notices[0].message.includes(`Invalid review config at ${configPath}:`), config);
+        assert.equal(children.length, 0, "invalid defaults must not start workers");
+        assert.equal(app.reports().length, 0);
+      }
+    }
+    await app.session.prompt('/review commit HEAD focus=general models=""');
+    await app.settle();
+    assert.equal(
+      app.notifications.at(-1)!.type,
+      "error",
+      "empty CLI models do not bypass defaults",
+    );
+    const errors = app.notifications.filter(({ type }) => type === "error").length;
+    for (const command of ["/review help", "/fix help", "/fix loop help", "/triage help"]) {
+      await app.session.prompt(command);
+      await app.settle();
+      const entry: SessionEntry = app.reports().at(-1)!;
+      assert.equal(entry.type, "custom_message");
+      assert.equal((entry.details as { kind: string }).kind, "help");
+    }
+    assert.equal(children.length, 0);
+    await app.session.prompt("/triage not-an-octopus-pr");
+    await app.settle();
+    assert.match(app.notifications.at(-1)!.message, /Invalid PR reference/);
+    assert.equal(app.notifications.at(-1)!.message.includes(configPath), false);
+
+    respond = () => submit([]);
+    for (const config of [invalid.at(-1)!, "{"]) {
+      await writeFile(configPath, config);
+      const before = generations.length;
+      await app.run(`/review commit HEAD focus=general models=${primary}`);
+      await app.session.prompt(`/fix commit HEAD focus=general models=${primary}`);
+      await app.settle();
+      assert.equal(
+        generations.length - before,
+        1,
+        "both overrides bypass invalid defaults and then match the report",
+      );
+    }
+    assert.equal(app.notifications.filter(({ type }) => type === "error").length, errors + 1);
+    assert.equal(app.mainRequests.length, 0);
   });
 
   test("aggregates partial reviews, retries missing submission in the same session, and durably deduplicates findings", async () => {
@@ -967,9 +1306,27 @@ describe("review", { concurrency: false }, () => {
       git(cwd, "add", "REVIEW_GUIDELINES.md");
       const indexBefore = await readFile(path.join(cwd, ".git", "index"));
       const trackedDiffBefore = git(cwd, "diff", "HEAD");
+      const keepsDefaults = scope === "commit HEAD" && file === "café.ts";
+      const savedModel = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+      if (keepsDefaults)
+        await writeFile(
+          path.join(agentDir, "review.json"),
+          JSON.stringify({ models: [savedModel], focuses: ["general"] }),
+        );
       let reviews = 0;
-      respond = async () => {
+      respond = async ({ model }) => {
         assert.ok(++reviews <= 2, "unexpected extra review");
+        if (keepsDefaults) {
+          assert.equal(
+            model.provider,
+            alternateReviewModel.provider,
+            "a fix loop retains its initial defaults",
+          );
+          await writeFile(
+            path.join(agentDir, "review.json"),
+            JSON.stringify({ models: [reviewModel.id], focuses: ["security", "testing"] }),
+          );
+        }
         assert.equal(
           await readFile(path.join(cwd, file), "utf8"),
           `export const acceptsExpired = ${reviews === 1 ? "true" : "false"};\n`,
@@ -977,14 +1334,33 @@ describe("review", { concurrency: false }, () => {
         );
         return submit(reviews === 1 ? [{ ...finding, location: `${file}:1` }] : []);
       };
-      app = await openReview(directory, cwd, failures, [
-        toolCall("edit", {
-          path: file,
-          edits: [{ oldText: "acceptsExpired = true", newText: "acceptsExpired = false" }],
-        }),
-        assistantMessage("Expiry validation restored."),
-      ]);
-      await app.session.prompt(`/fix loop ${scope} focus=general`);
+      app = await openReview(
+        directory,
+        cwd,
+        failures,
+        [
+          toolCall("edit", {
+            path: file,
+            edits: [{ oldText: "acceptsExpired = true", newText: "acceptsExpired = false" }],
+          }),
+          assistantMessage("Expiry validation restored."),
+        ],
+        undefined,
+        undefined,
+        undefined,
+        reviewModel,
+        {
+          extensions: keepsDefaults
+            ? [
+                scriptedProvider(alternateReviewModel, () => {
+                  throw new Error("Review must not generate in the main session");
+                }),
+              ]
+            : [],
+          tools: [],
+        },
+      );
+      await app.session.prompt(`/fix loop ${scope}${keepsDefaults ? "" : " focus=general"}`);
       await app.settle();
 
       assert.equal(app.mainRequests.length, 2, "one native edit and its concluding model turn");
@@ -994,6 +1370,23 @@ describe("review", { concurrency: false }, () => {
         "only scope-relevant changes trigger follow-up review",
       );
       assert.equal(app.reports().length, expectedReviews);
+      if (keepsDefaults) {
+        for (const report of app.reports()) {
+          assert.equal(report.type, "custom_message");
+          const details = report.details as ReviewMessageDetails;
+          const signature = JSON.parse(details.request.signature);
+          assert.deepEqual(signature.models, [savedModel]);
+          assert.deepEqual(signature.focuses, ["general"]);
+          assert.deepEqual(
+            details.focusStatus.map(({ focus }) => focus),
+            ["general"],
+          );
+        }
+        assert.deepEqual(JSON.parse(await readFile(path.join(agentDir, "review.json"), "utf8")), {
+          models: [reviewModel.id],
+          focuses: ["security", "testing"],
+        });
+      }
       assert.equal(app.report().details.staleness, undefined);
       assert.equal(app.report().details.findings.length, expectedReviews === 2 ? 0 : 1);
       assert.equal(
