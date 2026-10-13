@@ -931,7 +931,7 @@ describe("sandbox", { concurrency: false }, () => {
   });
 
   describe("deciding what to do after a partially completed command", () => {
-    for (const { name, choice, allowed, retry } of [
+    for (const { name, choice, allowed, retry, elapsed = 2_000 } of [
       { name: "deny", choice: "Deny", allowed: false, retry: false },
       { name: "dismiss", choice: undefined, allowed: false, retry: false },
       {
@@ -941,10 +941,20 @@ describe("sandbox", { concurrency: false }, () => {
         retry: false,
       },
       { name: "explicitly retry once", choice: "Allow and retry now", allowed: true, retry: true },
+      {
+        name: "allow without retry when execution already exhausted its budget",
+        choice: "Allow but adapt for side-effects",
+        allowed: true,
+        retry: false,
+        elapsed: 5_000,
+      },
     ]) {
-      test(name, async () => {
+      test(name, async (t) => {
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
         const command = dinnerCommand;
-        boundary.attempts(command, permissionAttempts(target));
+        const attempts = permissionAttempts(target);
+        boundary.attempts(command, attempts);
+        boundary.onCommandClose(attempts[0]!.script, () => t.mock.timers.tick(elapsed));
         let prompts = 0;
         pi = await openSandbox(cwd, sandbox, failures, {
           ui: {
@@ -953,10 +963,11 @@ describe("sandbox", { concurrency: false }, () => {
               try {
                 assert.ok(title.includes(target));
                 assert.deepEqual(choices, [
-                  "Allow and retry now",
+                  ...(elapsed < 5_000 ? ["Allow and retry now"] : []),
                   "Allow but adapt for side-effects",
                   "Deny",
                 ]);
+                t.mock.timers.tick(60_000); // Waiting for approval is not command execution.
                 return choice;
               } catch (error) {
                 failures.push(error); // Tau catches dialog errors; do not lose test assertions.
@@ -966,9 +977,20 @@ describe("sandbox", { concurrency: false }, () => {
           },
         });
 
-        // Only a successful rerun can turn the tool into a success.
+        // Observe the real execution timers without replacing their scheduling.
+        const timers = t.mock.method(globalThis, "setTimeout");
         const output = bashOutput(await pi.bash(command), retry ? 0 : 1);
         assert.equal(prompts, 1);
+        assert.equal(boundary.spawnedScripts.length, retry ? 2 : 1);
+        assert.deepEqual(
+          timers.mock.calls
+            .map((call) => call.arguments[1])
+            .filter((delay) => delay === 5_000 || delay === 3_000),
+          retry ? [5_000, 3_000] : [5_000],
+          "approval waiting preserves, but does not replenish, the execution allowance",
+        );
+        if (retry) assert.match(output, /retried successfully/);
+        else assert.doesNotMatch(output, /retrying the command/);
         assert.equal(
           await readFile(path.join(cwd, "effects.txt"), "utf8"),
           "fed the kraken\n".repeat(retry ? 2 : 1),

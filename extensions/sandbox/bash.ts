@@ -380,9 +380,10 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     signal?: AbortSignal;
     timeout?: number;
     env?: NodeJS.ProcessEnv;
-    grant?: TemporaryPermissionGrant;
+    retry?: Extract<PermissionResolution, { kind: "allow-retry" }>;
   }): Promise<PreparedSandboxAttempt> {
-    const { command, cwd, onData, signal, timeout, env, grant } = options;
+    const { command, cwd, onData, signal, timeout, env, retry } = options;
+    const grant = retry?.grant;
 
     if (!grant) {
       maybeAllowGitMetadataWriteForSession({
@@ -418,6 +419,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         recordStaleGrant(grant);
         throw new Error("Sandbox policy changed while preparing the classifier-approved retry.");
       }
+      if (retry) onData(Buffer.from(retry.message));
       const attempt = await runSandboxAttempt(
         commandId,
         wrappedCommand,
@@ -559,7 +561,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         runtimeProtectedWriteViolations,
       }) ?? proposeMachLookupPermission({ ...proposalOptions, violations: machLookupViolations });
     if (proposal) processed.resolution = await resolvePermission(proposal);
-    if (processed.resolution?.message) {
+    if (processed.resolution?.message && processed.resolution.kind !== "allow-retry") {
       processed.postamble = appendOutputPostamble(
         processed.postamble,
         processed.resolution.message,
@@ -576,10 +578,10 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         throw new Error(`Working directory does not exist: ${cwd}`);
       }
 
-      const attemptStartedAt = Date.now();
       let attemptTimeout = timeout;
       let retry: Extract<PermissionResolution, { kind: "allow-retry" }> | undefined;
       for (;;) {
+        const attemptStartedAt = Date.now();
         const run = await prepareAndRunSandboxAttempt({
           command,
           cwd,
@@ -587,15 +589,18 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
           signal,
           timeout: attemptTimeout,
           env,
-          grant: retry?.grant,
+          retry,
         });
+        // Reserve the remaining execution allowance before classification or approval waits.
+        attemptTimeout = getRemainingTimeout(attemptTimeout, attemptStartedAt);
+        const autoRetryAvailable = !retry && (attemptTimeout === undefined || attemptTimeout > 0);
         let processed: ProcessedSandboxAttempt;
         try {
           processed = await processSandboxAttempt({
             ...run,
             command,
             cwd,
-            autoRetryAvailable: !retry,
+            autoRetryAvailable,
           });
         } catch (postProcessError) {
           reportPostProcessingError(postProcessError);
@@ -626,7 +631,9 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
 
         // A resolution from the retry can never schedule a third launch.
         const nextRetry =
-          !retry && processed.resolution?.kind === "allow-retry" ? processed.resolution : undefined;
+          autoRetryAvailable && processed.resolution?.kind === "allow-retry"
+            ? processed.resolution
+            : undefined;
         if (processed.postamble) {
           onData(
             Buffer.from(
@@ -638,14 +645,6 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         safeCleanupAfterCommand();
         if (!nextRetry) return { exitCode: processed.exitCode };
 
-        attemptTimeout = getRemainingTimeout(timeout, attemptStartedAt);
-        if (attemptTimeout !== undefined && attemptTimeout <= 0) {
-          const message = nextRetry.grant
-            ? "\n[sandbox] Classifier-approved retry skipped because the timeout was exhausted.\n"
-            : `\n${nextRetry.blockedTarget}\n\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
-          onData(Buffer.from(message));
-          return { exitCode: processed.exitCode };
-        }
         retry = nextRetry;
       }
     },
