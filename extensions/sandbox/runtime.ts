@@ -14,6 +14,7 @@ import {
   getSandboxConfigParseErrors,
   getSkippedUntrustedProjectConfigPaths,
   loadConfig,
+  isClassifierId,
   normalizePromptMode,
   toRuntimeConfig,
   type LoadedSandboxConfig,
@@ -22,12 +23,23 @@ import {
   type SandboxConfigPath,
   type SandboxPolicy,
 } from "./config.js";
-import { createSandboxReviewer, type SandboxReviewRequest } from "./classifier.js";
+import {
+  createSandboxReviewer,
+  delegatedReviewHistory,
+  SANDBOX_REVIEW_OUTCOMES,
+  type SandboxDelegation,
+  type SandboxReviewDiagnostic,
+  type SandboxReviewOutcome,
+  type SandboxReviewRequest,
+  type SandboxReviewResult,
+} from "./classifier.js";
+import { delegatedHistory, delegatedRequest, delegatedResult } from "./classifier/delegation.js";
 import { createPermissionResolver, type PermissionResolution } from "./permissions/dialog.js";
 import type { PermissionProposal } from "./permissions/proposal.js";
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
+const REVIEW_ENTRY_TYPE = "sandbox-review";
 
 type UiLevel = "info" | "warning" | "error";
 
@@ -58,7 +70,8 @@ export type SandboxEventReason =
   | "already-approved-still-failed"
   | "unknown";
 
-export interface SandboxEvent {
+export interface SandboxPermissionEvent {
+  type?: never;
   timestamp: number;
   kind: SandboxEventKind;
   outcome: SandboxEventOutcome;
@@ -68,7 +81,18 @@ export interface SandboxEvent {
   cwd?: string;
   summary: string;
   suggestedCommand?: string;
+  toolCallId?: string;
 }
+
+export interface SandboxReviewEvent extends SandboxReviewDiagnostic {
+  type: "review";
+  timestamp: number;
+  kind: "filesystem" | "network" | "mach-lookup";
+  toolCallId?: string;
+  persistenceFailed?: true;
+}
+
+export type SandboxEvent = SandboxPermissionEvent | SandboxReviewEvent;
 
 export interface SandboxInvocation<C extends ExtensionContext = ExtensionContext> {
   ctx: C;
@@ -76,6 +100,18 @@ export interface SandboxInvocation<C extends ExtensionContext = ExtensionContext
   prompts: Pick<ExtensionContext["ui"], "select" | "confirm">;
   usages: Usage[];
   pending: Set<Promise<boolean>>;
+  toolCallId?: string;
+  activeCommand?: { text: string; cwd: string };
+}
+
+interface SubagentReview {
+  ctx: ExtensionContext;
+  childId: string;
+  request: unknown;
+  history: unknown;
+  toolCallId?: string;
+  signal: AbortSignal;
+  result?: Promise<SandboxReviewResult>;
 }
 
 export interface SandboxRuntime {
@@ -89,6 +125,7 @@ export interface SandboxRuntime {
     ctx: C,
     signal: AbortSignal,
     run: (invocation: SandboxInvocation<C>) => Promise<T>,
+    toolCallId?: string,
   ): Promise<T>;
   resolvePermission(
     proposal: PermissionProposal,
@@ -257,13 +294,30 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let invocation: SandboxInvocation | undefined;
   let executionQueue: Promise<void> = Promise.resolve();
   let reviewerBusy = false;
+  let activeReview: AbortController | undefined;
+  let permissionGeneration = 0;
+  const owners = new WeakMap<
+    SandboxInvocation,
+    { generation: number; sessionId: string; leafId: string | null }
+  >();
   const reviewer = createSandboxReviewer(pi, {
     getSelection: () => sandboxConfig?.classifier,
   });
-  pi.on("session_tree", async () => {
+  pi.on("input", () => {
+    // New directions may still be queued rather than visible in the selected branch.
+    activeReview?.abort();
+  });
+  pi.events.on("sandbox:subagent-review", (data) => {
+    if (process.env.TAU_SUBAGENT_CHILD === "1") return;
+    const request = data as SubagentReview;
+    request.result = reviewSubagent(request);
+  });
+  pi.on("session_tree", async (_event, ctx) => {
+    permissionGeneration++;
     await cancelPermissionInvocations();
     permissionLifetime = new AbortController();
     reviewer.reset();
+    restoreReviewEvents(ctx);
   });
 
   function classifierEligible(ctx: ExtensionContext): boolean {
@@ -273,22 +327,118 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   async function review(
     owner: SandboxInvocation,
     request: SandboxReviewRequest,
-  ): Promise<string | undefined> {
-    if (
-      owner.signal.aborted ||
-      sandboxState.status !== "active" ||
-      !classifierEligible(owner.ctx) ||
-      reviewerBusy
-    )
-      return undefined;
+    delegation?: SandboxDelegation,
+  ): Promise<SandboxReviewResult> {
+    const skip = (outcome: SandboxReviewOutcome): SandboxReviewResult => ({
+      diagnostic: { outcome, attempted: false },
+    });
+    if (owner.signal.aborted) return skip("cancelled");
+    if (sandboxState.status !== "active") return skip("inactive");
+    if (!owner.ctx.hasUI || !["tui", "rpc"].includes(owner.ctx.mode)) return skip("ineligible");
+    if (owner.ctx.hasPendingMessages()) return skip("stale-context");
+    if (reviewerBusy) return skip("busy");
     reviewerBusy = true;
+    const contextChanged = new AbortController();
+    activeReview = contextChanged;
+    const signal = AbortSignal.any([owner.signal, contextChanged.signal]);
     try {
-      const result = await reviewer.review(owner.ctx, request, owner.signal, owner.prompts.select);
+      let result: SandboxReviewResult;
+      if (process.env.TAU_SUBAGENT_CHILD === "1") {
+        const normalized = delegatedRequest(request);
+        if (!normalized) return skip("invalid-input");
+        const handoff = {
+          request: normalized,
+          history: delegatedReviewHistory(owner.ctx),
+          toolCallId: safeToolCallId(owner.toolCallId) ? owner.toolCallId : undefined,
+          signal,
+          result: undefined as Promise<unknown> | undefined,
+        };
+        let received: unknown;
+        try {
+          pi.events.emit("subagent:sandbox-review", handoff);
+          if (!handoff.result) return skip("ineligible");
+          received = await handoff.result;
+        } catch {
+          return skip(owner.signal.aborted ? "cancelled" : "unavailable");
+        }
+        if (received === undefined) return skip(owner.signal.aborted ? "cancelled" : "ineligible");
+        result = delegatedResult(received);
+      } else {
+        result = await reviewer.review(
+          owner.ctx,
+          request,
+          signal,
+          owner.prompts.select,
+          delegation,
+        );
+      }
       if (result.usage) owner.usages.push(result.usage);
-      return result.approvedBy;
+      if (
+        !owner.signal.aborted &&
+        (contextChanged.signal.aborted || owner.ctx.hasPendingMessages())
+      ) {
+        delete result.approvedBy;
+        result.diagnostic = { ...result.diagnostic, outcome: "stale-context" };
+      }
+      return result;
     } finally {
+      activeReview = undefined;
       reviewerBusy = false;
     }
+  }
+
+  async function reviewSubagent(handoff: SubagentReview): Promise<SandboxReviewResult> {
+    const request = delegatedRequest(handoff.request);
+    const history = delegatedHistory(handoff.history);
+    if (
+      !request ||
+      !history ||
+      typeof handoff.childId !== "string" ||
+      !/^[\w-]{1,64}$/.test(handoff.childId)
+    ) {
+      return { diagnostic: { outcome: "invalid-input", attempted: false } };
+    }
+    return withPermissionLifetime(handoff.ctx, handoff.signal, async (signal) => {
+      const tool = safeToolCallId(handoff.toolCallId) ? `/${handoff.toolCallId}` : "";
+      const owner = permissionOwner(handoff.ctx, signal, `subagent/${handoff.childId}${tool}`);
+      const select = owner.prompts.select;
+      owner.prompts.select = (title, choices, options) =>
+        select(`${handoff.childId}\n${title}`, choices, options);
+      const policy = getStateRuntimeConfig(sandboxState);
+      const intent = authorizationContextKey(owner.ctx);
+      const result: SandboxReviewResult =
+        promptMode === "non-interactive"
+          ? { diagnostic: { outcome: "non-interactive" as const, attempted: false } }
+          : await review(owner, request, { childId: handoff.childId, history });
+      if (result.approvedBy) {
+        const stale =
+          signal.aborted || !ownerIsCurrent(owner)
+            ? "cancelled"
+            : getStateRuntimeConfig(sandboxState) !== policy
+              ? "stale-policy"
+              : authorizationContextKey(owner.ctx) !== intent
+                ? "stale-context"
+                : undefined;
+        if (stale) {
+          delete result.approvedBy;
+          result.diagnostic = { ...result.diagnostic, outcome: stale };
+        }
+      }
+      recordReview(request.kind, owner, result.diagnostic);
+      return result;
+    }).catch(() => ({ diagnostic: { outcome: "cancelled", attempted: false } }));
+  }
+
+  function authorizationContextKey(ctx: ExtensionContext): string {
+    return ctx.sessionManager
+      .getBranch()
+      .filter(
+        (entry) =>
+          entry.type === "context_edit" ||
+          (entry.type === "message" && entry.message.role === "user"),
+      )
+      .map((entry) => entry.id)
+      .join(",");
   }
 
   async function configureClassifier(ctx: ExtensionContext): Promise<void> {
@@ -319,6 +469,68 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     sandboxEvents.push(event);
     if (sandboxEvents.length > SANDBOX_EVENT_LIMIT) {
       sandboxEvents.splice(0, sandboxEvents.length - SANDBOX_EVENT_LIMIT);
+    }
+  }
+
+  function ownerIsCurrent(owner: SandboxInvocation): boolean {
+    const identity = owners.get(owner);
+    if (!identity || identity.generation !== permissionGeneration) return false;
+    try {
+      const manager = owner.ctx.sessionManager;
+      return (
+        manager.getSessionId() === identity.sessionId &&
+        (identity.leafId === null ||
+          manager.getBranch().some((entry) => entry.id === identity.leafId))
+      );
+    } catch {
+      // Pi invalidates contexts during session replacement and reload.
+      return false;
+    }
+  }
+
+  function recordPermissionEvent(event: SandboxPermissionEvent, owner: SandboxInvocation): void {
+    if (ownerIsCurrent(owner) && !owner.signal.aborted) {
+      recordSandboxEvent({
+        ...event,
+        toolCallId: safeToolCallId(owner.toolCallId) ? owner.toolCallId : undefined,
+      });
+    }
+  }
+
+  function recordReview(
+    kind: PermissionProposal["kind"],
+    owner: SandboxInvocation,
+    diagnostic: SandboxReviewDiagnostic,
+  ): void {
+    if (!ownerIsCurrent(owner)) return;
+    const classifier = diagnostic.classifier ?? reviewer.selection(owner.ctx);
+    const event = validatedReviewEvent({
+      type: "review",
+      timestamp: Date.now(),
+      kind,
+      outcome: diagnostic.outcome,
+      attempted: diagnostic.attempted,
+      ...(isClassifierId(classifier) && classifier.length <= 512 ? { classifier } : {}),
+      ...(diagnostic.label === undefined ? {} : { label: diagnostic.label }),
+      ...(safeToolCallId(owner.toolCallId) ? { toolCallId: owner.toolCallId } : {}),
+    });
+    if (!event) return;
+    try {
+      pi.appendEntry(REVIEW_ENTRY_TYPE, event);
+    } catch {
+      const failed: SandboxReviewEvent = { ...event, persistenceFailed: true };
+      recordSandboxEvent(failed);
+      return;
+    }
+    recordSandboxEvent(event);
+  }
+
+  function restoreReviewEvents(ctx: ExtensionContext): void {
+    sandboxEvents = [];
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "custom" || entry.customType !== REVIEW_ENTRY_TYPE) continue;
+      const event = validatedReviewEvent(entry.data);
+      if (event) recordSandboxEvent(event);
     }
   }
 
@@ -367,7 +579,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     getPromptMode: () => promptMode,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     applyRuntimeConfigForSession,
-    recordEvent: recordSandboxEvent,
+    recordEvent: recordPermissionEvent,
+    recordReview,
     notify,
     review,
   });
@@ -411,7 +624,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
             ...(port === undefined ? {} : { port }),
             scope: "this pending proxy connection only",
             commandAttribution:
-              "unknown: the native proxy provides no originating command identity or request payload",
+              "unknown: the native proxy provides no originating command identity or request payload; activeCommand is unverified context only",
+            ...(owner.activeCommand ? { activeCommand: owner.activeCommand } : {}),
           },
         },
       },
@@ -493,10 +707,12 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   async function start(ctx: ExtensionContext): Promise<void> {
+    permissionGeneration++;
     await cancelPermissionInvocations();
     permissionLifetime = new AbortController();
     setSandboxStatus(ctx, false);
     resetRuntimeState();
+    restoreReviewEvents(ctx);
     reviewer.reset();
     sessionCwd = ctx.cwd;
 
@@ -535,6 +751,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   async function shutdown(ctx: ExtensionContext): Promise<void> {
+    permissionGeneration++;
     await cancelPermissionInvocations();
     setSandboxStatus(ctx, false);
     if (getStateRuntimeConfig(sandboxState)) {
@@ -617,17 +834,12 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     ctx: C,
     signal: AbortSignal,
     run: (owner: SandboxInvocation<C>) => Promise<T>,
+    toolCallId?: string,
   ): Promise<T> {
     const completion = new AbortController();
     const combined = AbortSignal.any([signal, completion.signal]);
     return runSerially(async () => {
-      const owner: SandboxInvocation<C> = {
-        ctx,
-        signal: combined,
-        prompts: permissionPrompts(ctx, combined),
-        usages: [],
-        pending: new Set(),
-      };
+      const owner = permissionOwner(ctx, combined, toolCallId);
       invocation = owner;
       try {
         const result = await run(owner);
@@ -639,6 +851,27 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
         invocation = undefined;
       }
     }, combined);
+  }
+
+  function permissionOwner<C extends ExtensionContext>(
+    ctx: C,
+    signal: AbortSignal,
+    toolCallId?: string,
+  ): SandboxInvocation<C> {
+    const owner: SandboxInvocation<C> = {
+      ctx,
+      signal,
+      prompts: permissionPrompts(ctx, signal),
+      usages: [],
+      pending: new Set(),
+      toolCallId,
+    };
+    owners.set(owner, {
+      generation: permissionGeneration,
+      sessionId: ctx.sessionManager.getSessionId(),
+      leafId: ctx.sessionManager.getLeafId(),
+    });
+    return owner;
   }
 
   function runSerially<T>(task: () => Promise<T>, signal: AbortSignal): Promise<T> {
@@ -766,4 +999,60 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     applyRuntimeConfigForSession,
     recordEvent: recordSandboxEvent,
   };
+}
+
+/** Only a fixed diagnostic schema is restored. No provider text or permission payload is retained. */
+function validatedReviewEvent(value: unknown): SandboxReviewEvent | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const event = value as Record<string, unknown>;
+  const kind = (["filesystem", "network", "mach-lookup"] as const).find(
+    (kind) => kind === event.kind,
+  );
+  const outcome = SANDBOX_REVIEW_OUTCOMES.find((outcome) => outcome === event.outcome);
+  const label = (["low", "high", "approve", "escalate"] as const).find(
+    (label) => label === event.label,
+  );
+  const classifier =
+    isClassifierId(event.classifier) && event.classifier.length <= 512
+      ? event.classifier
+      : undefined;
+  const toolCallId = safeToolCallId(event.toolCallId) ? event.toolCallId : undefined;
+  const fields = [
+    "type",
+    "timestamp",
+    "kind",
+    "outcome",
+    "attempted",
+    "classifier",
+    "label",
+    "toolCallId",
+  ];
+  if (
+    Object.keys(event).some((key) => !fields.includes(key)) ||
+    event.type !== "review" ||
+    typeof event.timestamp !== "number" ||
+    !Number.isSafeInteger(event.timestamp) ||
+    event.timestamp < 0 ||
+    event.timestamp > 8_640_000_000_000_000 ||
+    kind === undefined ||
+    outcome === undefined ||
+    typeof event.attempted !== "boolean" ||
+    (event.classifier !== undefined && classifier === undefined) ||
+    (event.label !== undefined && (!event.attempted || label === undefined))
+  )
+    return undefined;
+  return {
+    type: "review",
+    timestamp: event.timestamp,
+    kind,
+    outcome,
+    attempted: event.attempted,
+    ...(classifier === undefined ? {} : { classifier }),
+    ...(label === undefined ? {} : { label }),
+    ...(toolCallId === undefined ? {} : { toolCallId }),
+  };
+}
+
+function safeToolCallId(value: unknown): value is string {
+  return typeof value === "string" && /^[\w.:/|+-]{1,256}$/.test(value);
 }

@@ -5,13 +5,14 @@ import { mock } from "node:test";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager, type SandboxAskCallback } from "@anthropic-ai/sandbox-runtime";
 import { assistantMessage, fixtureModel } from "../helpers/pi.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 
 const spawn = childProcess.spawn;
 const spawnSync = childProcess.spawnSync;
 export const approvalCommand = "printf 'iced biscuit\\n'";
+export const connectionCommand = "printf 'connected icing\\n'";
 const sandboxedCommand = "printf 'sandboxed biscuit\\n'";
 export const parentModel = { ...fixtureModel, reasoning: true };
 export const workerModel = {
@@ -53,6 +54,8 @@ export default function childProvider(pi: ExtensionAPI): void {
       },
     );
   if (process.env.TAU_SUBAGENT_TEST_SANDBOX === "1") {
+    let askNetwork: SandboxAskCallback | undefined;
+    const reviewConnection = process.env.TAU_SUBAGENT_TEST_REVIEW === "1";
     mock.method(
       childProcess,
       "spawn",
@@ -62,7 +65,11 @@ export default function childProvider(pi: ExtensionAPI): void {
           options.cwd !== process.cwd() ||
           args.length !== 2 ||
           args[0] !== "-c" ||
-          ![approvalCommand, sandboxedCommand].includes(args[1])
+          ![
+            approvalCommand,
+            sandboxedCommand,
+            ...(reviewConnection ? [connectionCommand] : []),
+          ].includes(args[1])
         )
           return reject(command, args, options);
         process.send?.({ type: "bash", command: args[1], cwd: options.cwd });
@@ -80,6 +87,18 @@ export default function childProvider(pi: ExtensionAPI): void {
       return spawnSync(...args);
     });
     mock.method(SandboxManager, "wrapWithSandbox", async (command: string) => {
+      if (reviewConnection && command === connectionCommand) {
+        assert.ok(askNetwork);
+        const policy = structuredClone(SandboxManager.getConfig());
+        const allowed = await askNetwork({ host: "icing.invalid", port: 443 });
+        assert.deepEqual(
+          SandboxManager.getConfig(),
+          policy,
+          "one connection cannot mutate child policy",
+        );
+        if (!allowed) throw new Error("aborted");
+        return connectionCommand;
+      }
       if (command !== approvalCommand) return reject("unplanned sandbox command", command);
       return sandboxedCommand;
     });
@@ -87,8 +106,9 @@ export default function childProvider(pi: ExtensionAPI): void {
     mock.method(
       SandboxManager,
       "initialize",
-      async (...[config]: Parameters<typeof SandboxManager.initialize>) => {
+      async (...[config, ask]: Parameters<typeof SandboxManager.initialize>) => {
         SandboxManager.updateConfig(config);
+        askNetwork = ask;
       },
     );
     pi.on("session_start", () => {
@@ -108,7 +128,9 @@ export default function childProvider(pi: ExtensionAPI): void {
     if (
       event.toolName === "bash" &&
       ((event.input.command === shellCommand && shellCommand) ||
-        (process.env.TAU_SUBAGENT_TEST_SANDBOX === "1" && event.input.command === approvalCommand))
+        (process.env.TAU_SUBAGENT_TEST_SANDBOX === "1" &&
+          event.input.command === approvalCommand) ||
+        (process.env.TAU_SUBAGENT_TEST_REVIEW === "1" && event.input.command === connectionCommand))
     )
       return;
     reject(event.toolName);

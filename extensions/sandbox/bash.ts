@@ -365,6 +365,14 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     notify(ctx, message, "warning");
   }
 
+  function recordStaleGrant(grant: TemporaryPermissionGrant): void {
+    try {
+      grant.onStalePolicy();
+    } catch {
+      // Diagnostic persistence must not replace the freshness error or skip cleanup.
+    }
+  }
+
   async function prepareAndRunSandboxAttempt(options: {
     command: string;
     cwd: string;
@@ -387,6 +395,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     }
     const policy = getRuntimeConfig();
     if (grant && policy !== grant.policy) {
+      recordStaleGrant(grant);
       throw new Error(
         "Sandbox policy changed after classification; the temporary retry was cancelled.",
       );
@@ -406,6 +415,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     try {
       if (signal?.aborted) throw new Error("aborted");
       if (grant && getRuntimeConfig() !== grant.policy) {
+        recordStaleGrant(grant);
         throw new Error("Sandbox policy changed while preparing the classifier-approved retry.");
       }
       const attempt = await runSandboxAttempt(

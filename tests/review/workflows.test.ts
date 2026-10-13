@@ -209,7 +209,7 @@ describe("review", { concurrency: false }, () => {
             ...(shellCommand ? { TAU_REVIEW_TEST_BASH: shellCommand } : {}),
             ...(llama ? { TAU_REVIEW_LLAMA_URL: llama.url } : {}),
           },
-          stdio: [...options.stdio, "ipc"],
+          stdio: rpc ? options.stdio : [...options.stdio, "ipc"],
         },
       );
       const closed = once(proc, "close");

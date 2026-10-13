@@ -1,5 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { SandboxReviewRequest } from "../classifier.js";
+import type {
+  SandboxReviewDiagnostic,
+  SandboxReviewRequest,
+  SandboxReviewResult,
+} from "../classifier.js";
 import {
   cloneRuntimeConfig,
   escapeSlashCommandArg,
@@ -8,7 +12,7 @@ import {
   type PromptMode,
   type SandboxPolicy,
 } from "../config.js";
-import type { SandboxEvent, SandboxInvocation } from "../runtime.js";
+import type { SandboxPermissionEvent, SandboxInvocation } from "../runtime.js";
 import { mutateMachLookupAllowList } from "./mach-lookup.js";
 import type { PermissionProposal, TemporaryPermissionGrant } from "./proposal.js";
 
@@ -36,8 +40,13 @@ export function createPermissionResolver(options: {
   review: (
     invocation: SandboxInvocation,
     request: SandboxReviewRequest,
-  ) => Promise<string | undefined>;
-  recordEvent: (event: SandboxEvent) => void;
+  ) => Promise<Omit<SandboxReviewResult, "usage">>;
+  recordEvent: (event: SandboxPermissionEvent, invocation: SandboxInvocation) => void;
+  recordReview: (
+    kind: PermissionProposal["kind"],
+    invocation: SandboxInvocation,
+    diagnostic: SandboxReviewDiagnostic,
+  ) => void;
   notify: (ctx: ExtensionContext, text: string, level?: "info" | "warning" | "error") => void;
 }): (proposal: PermissionProposal, invocation: SandboxInvocation) => Promise<PermissionResolution> {
   // Only manual grants share a decision: they authorize the host for the session.
@@ -52,18 +61,33 @@ export function createPermissionResolver(options: {
     const denied = () => createPermissionResolution("deny", blockedTarget);
     if (signal.aborted) return denied();
     if (options.getPromptMode() === "non-interactive" || !ctx.hasUI) {
-      record(proposal, "blocked");
+      options.recordReview(proposal.kind, invocation, {
+        outcome: "non-interactive",
+        attempted: false,
+      });
+      record(proposal, invocation, "blocked");
       const message = `${permissionSummary(proposal)}\n[sandbox] To temporarily allow for this session, run: ${permissionCommand(proposal)}`;
       if (proposal.kind === "network") options.notify(ctx, message, "warning");
       return { kind: "deny", message };
     }
     if (proposal.alreadyApplied) {
-      record(proposal, "blocked");
+      options.recordReview(proposal.kind, invocation, {
+        outcome: "retry-unavailable",
+        attempted: false,
+      });
+      record(proposal, invocation, "blocked");
       return createPermissionResolution("allow-adapt", blockedTarget, false);
     }
 
-    if (proposal.automatic && options.getRuntimeConfig() === proposal.policy) {
-      const classifier = await options.review(invocation, {
+    let diagnostic: SandboxReviewDiagnostic;
+    if (options.getRuntimeConfig() !== proposal.policy) {
+      diagnostic = { outcome: "stale-policy", attempted: false };
+    } else if (proposal.kind !== "network" && !proposal.autoRetryAvailable) {
+      diagnostic = { outcome: "retry-unavailable", attempted: false };
+    } else if (!proposal.automatic) {
+      diagnostic = { outcome: "unsupported-permission", attempted: false };
+    } else {
+      const result = await options.review(invocation, {
         kind: proposal.kind,
         command: proposal.command,
         cwd: proposal.cwd,
@@ -73,12 +97,20 @@ export function createPermissionResolver(options: {
         retry: proposal.kind !== "network",
         evidence: proposal.automatic.evidence,
       });
-      if (signal.aborted) return denied();
+      diagnostic = result.diagnostic;
       const current = options.getRuntimeConfig() === proposal.policy;
-      if (classifier && current) {
+      if (signal.aborted) diagnostic = { ...diagnostic, outcome: "cancelled" };
+      else if (result.approvedBy && !current) {
+        diagnostic = { ...diagnostic, outcome: "stale-policy" };
+      }
+      options.recordReview(proposal.kind, invocation, diagnostic);
+      if (signal.aborted) return denied();
+      const classifier = result.approvedBy;
+      if (classifier && diagnostic.outcome === "approved" && current) {
         const connection = proposal.kind === "network";
         record(
           proposal,
+          invocation,
           "allowed",
           connection
             ? `classifier ${classifier} approved one pending connection; session policy unchanged`
@@ -88,14 +120,37 @@ export function createPermissionResolver(options: {
         return {
           kind: "allow-retry",
           blockedTarget,
-          grant: { config: proposal.automatic.config, policy: proposal.policy },
+          grant: {
+            config: proposal.automatic.config,
+            policy: proposal.policy,
+            onStalePolicy: staleReviewRecorder(proposal.kind, invocation, diagnostic),
+          },
           message: `\n[sandbox] Classifier ${classifier} approved a temporary ${proposal.kind} exception and one retry. Session policy is unchanged.\n`,
         };
       }
       // A proxy request must go through the native matcher again after a policy change.
       if (!current && proposal.kind === "network") return denied();
+      return manualDecision(proposal, invocation);
     }
+    options.recordReview(proposal.kind, invocation, diagnostic);
     if (signal.aborted) return denied();
+    if (diagnostic.outcome === "stale-policy" && proposal.kind === "network") return denied();
+    return manualDecision(proposal, invocation);
+  }
+
+  function staleReviewRecorder(
+    kind: PermissionProposal["kind"],
+    invocation: SandboxInvocation,
+    diagnostic: SandboxReviewDiagnostic,
+  ): () => void {
+    const stale: SandboxReviewDiagnostic = { ...diagnostic, outcome: "stale-policy" };
+    return () => options.recordReview(kind, invocation, stale);
+  }
+
+  async function manualDecision(
+    proposal: PermissionProposal,
+    invocation: SandboxInvocation,
+  ): Promise<PermissionResolution> {
     if (proposal.kind !== "network") return manual(proposal, invocation);
 
     const key = proposal.action.value;
@@ -112,8 +167,9 @@ export function createPermissionResolver(options: {
 
   async function manual(
     proposal: PermissionProposal,
-    { ctx, prompts, signal }: SandboxInvocation,
+    invocation: SandboxInvocation,
   ): Promise<PermissionResolution> {
+    const { ctx, prompts, signal } = invocation;
     const title = permissionTitle(proposal);
     const blockedTarget = `${title}.`;
     let decision: PermissionDecision = "deny";
@@ -138,14 +194,14 @@ export function createPermissionResolver(options: {
         );
       }
     }
+    if (signal.aborted) return createPermissionResolution("deny", blockedTarget);
     const latest = options.getRuntimeConfig();
     if (
-      signal.aborted ||
       decision === "deny" ||
       !latest ||
       (proposal.kind === "network" && latest !== proposal.policy)
     ) {
-      record(proposal, "blocked");
+      record(proposal, invocation, "blocked");
       return createPermissionResolution("deny", blockedTarget);
     }
 
@@ -153,7 +209,7 @@ export function createPermissionResolver(options: {
     const next = cloneRuntimeConfig(latest);
     const changed = applyAction(next, proposal.action);
     if (changed) options.applyRuntimeConfigForSession(ctx, next);
-    record(proposal, "allowed");
+    record(proposal, invocation, "allowed");
     if (proposal.kind === "network") {
       options.notify(
         ctx,
@@ -167,21 +223,28 @@ export function createPermissionResolver(options: {
 
   function record(
     proposal: PermissionProposal,
+    invocation: SandboxInvocation,
     outcome: "allowed" | "blocked",
     summary = permissionEventSummary(proposal, outcome),
   ): void {
-    options.recordEvent({
-      timestamp: Date.now(),
-      kind: proposal.kind,
-      outcome,
-      reason: proposal.reason,
-      target: proposal.target,
-      command: proposal.command,
-      cwd: proposal.cwd,
-      summary,
-      suggestedCommand:
-        outcome === "blocked" && !proposal.alreadyApplied ? permissionCommand(proposal) : undefined,
-    });
+    options.recordEvent(
+      {
+        timestamp: Date.now(),
+        toolCallId: invocation.toolCallId,
+        kind: proposal.kind,
+        outcome,
+        reason: proposal.reason,
+        target: proposal.target,
+        command: proposal.command,
+        cwd: proposal.cwd,
+        summary,
+        suggestedCommand:
+          outcome === "blocked" && !proposal.alreadyApplied
+            ? permissionCommand(proposal)
+            : undefined,
+      },
+      invocation,
+    );
   }
 
   return resolve;
@@ -195,7 +258,7 @@ function permissionTitle(proposal: PermissionProposal): string {
         : proposal.operation === "write"
           ? "write to"
           : "access to";
-    return `Sandbox blocked filesystem ${operation} ${proposal.target}`;
+    return `Sandbox blocked ${operation} ${proposal.target}`;
   }
   if (proposal.kind === "mach-lookup") {
     return `Sandbox blocked access to macOS service ${proposal.target}`;
@@ -208,7 +271,7 @@ function permissionSummary(proposal: PermissionProposal): string {
     const operation = ["read", "write"].includes(proposal.operation)
       ? proposal.operation
       : "access";
-    return `[sandbox] Blocked filesystem ${operation}: ${proposal.target}`;
+    return `[sandbox] Blocked ${operation}: ${proposal.target}`;
   }
   if (proposal.kind === "mach-lookup") {
     return `[sandbox] Blocked macOS service lookup: ${proposal.target}`;

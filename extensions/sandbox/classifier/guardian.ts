@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Api, ClassifierContext, Model, Usage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SandboxReviewDiagnostic } from "../classifier.js";
 
 const PROVIDER = "openai-codex";
 const MODEL = "gpt-5.6-luna";
@@ -21,9 +22,12 @@ export async function reviewWithGuardian(
   signal: AbortSignal,
   onResponse: (response: { status: number }) => void,
   timeoutMs: number,
-): Promise<{ approved: boolean; usage?: Usage }> {
+): Promise<{ diagnostic: SandboxReviewDiagnostic; usage?: Usage }> {
   const model = guardianModel(ctx);
-  if (!model || signal.aborted) return { approved: false };
+  if (!model || signal.aborted)
+    return {
+      diagnostic: { outcome: signal.aborted ? "cancelled" : "unavailable", attempted: false },
+    };
   const sessionId = ctx.sessionManager.getSessionId();
   const threadId = randomUUID();
   const turnId = randomUUID();
@@ -107,18 +111,36 @@ export async function reviewWithGuardian(
     )
     .result();
   const text = result.content.filter((block) => block.type === "text");
-  const approved =
-    !signal.aborted &&
+  const label =
+    text.length === 1 && (text[0].text === "low" || text[0].text === "high")
+      ? text[0].text
+      : undefined;
+  const valid =
     result.stopReason === "stop" &&
     result.errorMessage === undefined &&
+    result.api === model.api &&
     result.provider === PROVIDER &&
     result.model === MODEL &&
     // Empty encrypted reasoning envelopes are normal Responses metadata, not extra classifier labels.
     result.content.every(
       (block) => block.type === "text" || (block.type === "thinking" && !block.thinking),
     ) &&
-    text.length === 1 &&
-    text[0].text === "low";
-  // A label is not a probability. Unexpected content, partial output, and empty replies all escalate.
-  return { approved, usage: result.usage };
+    label !== undefined;
+  // Validate the complete reply, never an early token. Persist only known labels, not response text.
+  return {
+    diagnostic: {
+      attempted: true,
+      ...(label ? { label } : {}),
+      outcome: signal.aborted
+        ? "cancelled"
+        : result.stopReason === "error" || result.stopReason === "aborted"
+          ? "provider-error"
+          : !valid
+            ? "invalid-response"
+            : label === "low"
+              ? "approved"
+              : "escalated",
+    },
+    usage: result.usage,
+  };
 }

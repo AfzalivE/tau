@@ -1,4 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import type { Writable } from "node:stream";
+import type { ReviewMessage } from "./review.js";
 import type {
   JsonAgentSessionEvent,
   RpcCommand,
@@ -9,9 +11,16 @@ import type {
 
 export type ChildEvent = JsonAgentSessionEvent | RpcExtensionUIRequest;
 
+interface IpcHandler {
+  receive: (message: unknown) => void;
+  disconnect: () => void;
+  close: () => Promise<void>;
+}
+
 /** Own the native RPC process, its LF-delimited protocol, and all pending requests through close. */
 export class SubagentProcess {
-  private readonly process: ChildProcessWithoutNullStreams;
+  private readonly process: ChildProcess;
+  private readonly stdin: Writable;
   private readonly pending = new Map<
     string,
     {
@@ -37,16 +46,25 @@ export class SubagentProcess {
     env: NodeJS.ProcessEnv,
     onEvent: (event: ChildEvent) => void,
     onClose: (error?: Error) => void,
+    private readonly ipc?: IpcHandler,
   ) {
     this.process = spawn("pi", ["--mode", "rpc", ...args], {
       cwd,
       env,
       detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
     });
-    this.process.stdout.setEncoding("utf8");
-    this.process.stderr.setEncoding("utf8");
-    this.process.stdout.on("data", (chunk: string) => {
+    const { stdin, stdout, stderr } = this.process;
+    if (!stdin || !stdout || !stderr) {
+      this.process.kill();
+      throw new Error("Subagent RPC pipes are unavailable");
+    }
+    this.stdin = stdin;
+    this.process.on("message", (message) => this.ipc?.receive(message));
+    this.process.on("disconnect", () => this.ipc?.disconnect());
+    stdout.setEncoding("utf8");
+    stderr.setEncoding("utf8");
+    stdout.on("data", (chunk: string) => {
       try {
         this.buffer += chunk;
         let newline: number;
@@ -79,14 +97,15 @@ export class SubagentProcess {
         this.fail(error);
       }
     });
-    this.process.stderr.on("data", (chunk: string) => {
+    stderr.on("data", (chunk: string) => {
       this.stderr = (this.stderr + chunk).slice(-8192);
     });
     this.process.on("error", (error) => this.fail(error));
-    this.process.stdin.on("error", (error) => this.fail(error));
+    this.stdin.on("error", (error) => this.fail(error));
     this.completion = new Promise<void>((resolve) => {
       this.process.once("close", (code, signal) => {
         this.closed = true;
+        this.ipc?.disconnect();
         clearTimeout(this.escalation);
         const error =
           this.failure ??
@@ -116,9 +135,31 @@ export class SubagentProcess {
     if (!this.closed && !this.stopping) this.write(response);
   }
 
+  sendIpc(message: ReviewMessage): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.closed || !this.process.connected) {
+        reject(new Error("Subagent review IPC disconnected"));
+        return;
+      }
+      this.process.send(message, (error) => {
+        if (error) {
+          this.ipc?.disconnect();
+          if (this.process.connected) this.process.disconnect();
+          reject(error);
+        } else resolve();
+      });
+    });
+  }
+
   async stop(): Promise<void> {
     if (!this.closed && !this.stopping) {
       this.stopping = true;
+      // Native cancellation must reach the child even while a late review result is in transit.
+      // Write both records in order without waiting for clear_queue's round-trip acknowledgement.
+      const cancellation = this.failure
+        ? Promise.resolve()
+        : Promise.allSettled([this.send({ type: "clear_queue" }), this.send({ type: "abort" })]);
+      const reviews = this.ipc?.close();
       let terminating = false;
       const terminate = () => {
         if (terminating || this.closed) return;
@@ -128,12 +169,11 @@ export class SubagentProcess {
         this.signal("SIGTERM");
         this.escalation = setTimeout(() => this.signal("SIGKILL"), 1000);
       };
-      this.escalation = setTimeout(terminate, 250);
-      this.shutdownRequest = (
-        this.failure
-          ? Promise.resolve()
-          : this.send({ type: "clear_queue" }).then(() => this.send({ type: "abort" }))
-      ).then(terminate, terminate);
+      // Keep IPC alive for billed review work, then bound a missing native abort acknowledgement.
+      this.shutdownRequest = Promise.resolve(reviews).then(() => {
+        if (!this.closed) this.escalation = setTimeout(terminate, 250);
+        return cancellation.then(terminate, terminate);
+      }, terminate);
     }
     await this.completion;
     await this.shutdownRequest;
@@ -155,7 +195,7 @@ export class SubagentProcess {
 
   private write(message: RpcCommand | RpcExtensionUIResponse): void {
     try {
-      this.process.stdin.write(`${JSON.stringify(message)}\n`);
+      this.stdin.write(`${JSON.stringify(message)}\n`);
     } catch (error) {
       this.fail(error);
     }

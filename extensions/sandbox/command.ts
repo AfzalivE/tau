@@ -347,11 +347,25 @@ function renderSandboxDoctorReport(options: {
   }
 
   for (const event of [...events].reverse()) {
+    if (event.type === "review") {
+      lines.push(
+        "",
+        `- [${formatSandboxEventTimestamp(event.timestamp)}] [${event.kind}] [review] ${event.outcome}`,
+        `  Attempted: ${event.attempted ? "yes" : "no"}`,
+        ...(event.classifier ? [`  Classifier: ${event.classifier}`] : []),
+        ...(event.label ? [`  Label: ${event.label}`] : []),
+        ...(event.toolCallId ? [`  Tool call: ${event.toolCallId}`] : []),
+        ...(event.persistenceFailed ? ["  Session persistence failed."] : []),
+        "  Review outcome is not a permission decision.",
+      );
+      continue;
+    }
     lines.push(
       "",
       `- [${formatSandboxEventTimestamp(event.timestamp)}] [${event.kind}] [${event.outcome}] ${event.reason}`,
       ...(event.target ? [`  Target: ${event.target}`] : []),
       ...(event.command ? [`  Command: ${event.command}`] : []),
+      ...(event.toolCallId ? [`  Tool call: ${event.toolCallId}`] : []),
       `  Summary: ${event.summary}`,
       ...(event.suggestedCommand
         ? ["  Suggested session fix:", `    ${event.suggestedCommand}`]
