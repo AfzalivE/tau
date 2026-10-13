@@ -256,7 +256,14 @@ describe("subagent configuration", { concurrency: false }, () => {
       /Stay within its scope and do not delegate further/,
     );
     await app.session.reload();
-    await app.session.prompt("Keep working within scope.");
+    await app.session.sendCustomMessage(
+      { customType: "assignment-update", content: "Keep working within scope.", display: false },
+      { triggerTurn: true },
+    );
+    assert.match(
+      getCurrentSystemPrompt(app.generations.at(-1)!.context.messages),
+      /Stay within its scope and do not delegate further/,
+    );
     assert.equal(app.session.getToolDefinition("subagent"), undefined);
     assert.ok(!app.session.getActiveToolNames().includes("subagent"));
   });

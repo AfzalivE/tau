@@ -12,8 +12,13 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Opt-in Sandbox permission review for main and subagent commands, using Pi classifiers or experimental Codex Guardian, with diagnostics.
 - Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
 
+### Changed
+
+- **Breaking:** Requires Pi 1.2.0 or newer.
+
 ### Fixed
 
+- Refresh repo memory and preserve extension instructions in Answer, Loop, and Subagent-triggered runs.
 - Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
 - Preserve newer Sandbox policy changes when manually approving macOS service access.
 - Prevent fabricated traversal diagnostics in command output from masking a command failure.

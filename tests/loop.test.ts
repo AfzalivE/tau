@@ -146,13 +146,14 @@ describe("loop", { concurrency: false }, () => {
       "tool continuations are not loop iterations",
     );
     const afterRead = app.requests[1].context.messages;
-    assert.deepEqual(
-      afterRead.slice(-2).map((message) => message.role),
-      ["toolResult", "system"],
-      "Pi's persisted prompt update remains in the provider transcript after the tool result",
+    assert.equal(afterRead.at(-1)?.role, "toolResult");
+    assert.equal(
+      getCurrentSystemPrompt(afterRead),
+      getCurrentSystemPrompt(app.requests[0].context.messages),
+      "the custom-start prompt remains unchanged after the tool result",
     );
     assert.match(getCurrentSystemPrompt(afterRead), /Reply to the user's message\./);
-    assert.equal(messageText(afterRead.at(-2)!), report);
+    assert.equal(messageText(afterRead.at(-1)!), report);
     assert.equal(messageText(app.requests[2].context.messages.at(-1)!), interjection);
     assert.equal(messageText(app.requests[3].context.messages.at(-1)!), testsPrompt);
     assert.deepEqual(

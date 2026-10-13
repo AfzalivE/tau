@@ -194,7 +194,10 @@ describe("answer", { concurrency: false }, () => {
     assert.equal(answers.length, 1);
     assert.equal(answers[0].customType, "answers");
     assert.equal(answers[0].display, true);
-    assert.equal(answers[0].parentId, questionEntry);
+    const answerParent = reopened.getEntry(answers[0].parentId!);
+    assert.ok(answerParent?.type === "message");
+    assert.equal(answerParent.message.role, "system");
+    assert.equal(answerParent.parentId, questionEntry);
     const content = answers[0].content;
     assert.ok(typeof content === "string");
     assert.equal(
