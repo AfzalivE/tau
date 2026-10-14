@@ -26,6 +26,8 @@ export interface FilesystemViolation {
   processName?: string;
   readAccess?: FilesystemReadAccess;
   writeAccess?: FilesystemWriteAccess;
+  /** The policy rule a caller already matched, such as a native file-tool guard. */
+  matchedRule?: string;
 }
 
 export function proposeFilesystemPermission(options: {
@@ -323,22 +325,16 @@ function buildFilesystemAllowAction(
   if (!violation.path) return null;
 
   if (violation.kind !== "read") {
-    const matchedDeny = inferSandboxRuleMatch(
-      violation.path,
-      runtimeConfig.filesystem.denyWrite,
-      "denyWrite",
-      cwd,
-    );
+    const matchedDeny =
+      (violation.kind === "write" ? violation.matchedRule : undefined) ??
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyWrite, "denyWrite", cwd);
     if (matchedDeny) return { list: "deny-write", op: "remove", value: matchedDeny };
   }
 
   if (violation.kind !== "write") {
-    const matchedDeny = inferSandboxRuleMatch(
-      violation.path,
-      runtimeConfig.filesystem.denyRead,
-      "denyRead",
-      cwd,
-    );
+    const matchedDeny =
+      (violation.kind === "read" ? violation.matchedRule : undefined) ??
+      inferSandboxRuleMatch(violation.path, runtimeConfig.filesystem.denyRead, "denyRead", cwd);
     if (matchedDeny || violation.kind === "read") {
       return { list: "deny-read", op: "remove", value: matchedDeny ?? violation.path };
     }

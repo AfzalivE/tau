@@ -11,7 +11,11 @@ import {
   SandboxManager,
   type SandboxAskCallback,
 } from "@anthropic-ai/sandbox-runtime";
-import type { AgentToolCallOutcome, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type {
+  AgentToolCallOutcome,
+  AgentToolResult,
+  BeforeToolCallResult,
+} from "@earendil-works/pi-agent-core";
 import {
   createProvider,
   type ClassifierContext,
@@ -2427,6 +2431,47 @@ exit 73`,
       assert.ok(
         records.some((record) => record.type === "session-stop" && record.data.reason === "quit"),
       );
+    });
+
+    test("native tool calls enforce read, write, and mandatory policy through Pi's interception", async () => {
+      const config = JSON.parse(configBytes);
+      config.filesystem.denyRead = [target];
+      await writeFile(configPath, JSON.stringify({ ...config, mode: "non-interactive" }));
+      pi = await openSandbox(cwd, sandbox, failures, { tools: ["bash", "read", "write"] });
+      for (const [name, args] of [
+        ["read", { path: target }],
+        ["write", { path: target, content: "overwrite" }],
+        ["write", { path: path.join(cwd, ".git", "hooks", "pre-commit"), content: "overwrite" }],
+      ] as [string, Record<string, string>][]) {
+        const toolCall = { type: "toolCall" as const, id: "guarded-tool", name, arguments: args };
+        const result: BeforeToolCallResult | undefined = await pi.session.agent.beforeToolCall?.({
+          toolCall,
+          args,
+          assistantMessage: { ...assistantMessage(""), content: [toolCall] },
+          context: pi.session.agent.state,
+        });
+        assert.equal(result?.block, true, name);
+        assert.match(result?.reason ?? "", /[Ss]andbox/);
+      }
+      assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+      const args = { path: path.join(cwd, "safe.txt"), content: "eight arms" };
+      const toolCall = {
+        type: "toolCall" as const,
+        id: "safe-tool",
+        name: "write",
+        arguments: args,
+      };
+      const allowed: BeforeToolCallResult | undefined = await pi.session.agent.beforeToolCall?.({
+        toolCall,
+        args,
+        assistantMessage: { ...assistantMessage(""), content: [toolCall] },
+        context: pi.session.agent.state,
+      });
+      assert.equal(allowed?.block, undefined, allowed?.reason);
+      const write = pi.session.agent.state.tools.find((tool) => tool.name === "write");
+      assert.ok(write);
+      await write.execute(toolCall.id, args);
+      assert.equal(await readFile(args.path, "utf8"), "eight arms");
     });
   });
 

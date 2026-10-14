@@ -59,11 +59,12 @@ import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-
 
 import { createSandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
+import { registerFileToolGuard } from "./file-tools.js";
 import { createSandboxRuntime, getSandboxRunMode, type SandboxInvocation } from "./runtime.js";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
   pi.registerFlag("no-sandbox", {
-    description: "Disable OS-level sandboxing for bash commands",
+    description: "Disable OS-level bash sandboxing and native file-tool guardrails",
     type: "boolean",
     default: false,
   });
@@ -226,6 +227,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     failedUsage.clear();
   });
 
+  registerFileToolGuard(pi, runtime);
   registerSandboxCommand(pi, runtime);
 }
 

@@ -1,9 +1,9 @@
 import { lstat, readlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { containsGlobChars } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import { findMandatoryWriteRule } from "./mandatory-write-policy.ts";
-import { inferSandboxRuleMatch, normalizeSandboxPath, resolveSandboxPath } from "./utils.ts";
+import { inferSandboxRuleMatch as inferPolicyRuleMatch, type SandboxPolicy } from "./config.ts";
+import { normalizeSandboxPath, resolveSandboxPath } from "./utils.ts";
 
 export type FileToolAccessKind = "read" | "write";
 export type FileToolReadAccess = "metadata" | "data";
@@ -105,7 +105,7 @@ export async function resolveFileToolAccesses(
  */
 export function findFileToolPolicyViolation(
   accesses: FileToolAccess[] | null,
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   cwd: string,
 ): FileToolPolicyViolation | null {
   if (!accesses) return null;
@@ -113,8 +113,18 @@ export function findFileToolPolicyViolation(
   for (const access of accesses) {
     if (access.kind === "read") {
       const readAllowed =
-        inferSandboxRuleMatch(access.path, runtimeConfig.filesystem.allowRead ?? [], cwd) !== null;
-      const readDenied = inferSandboxRuleMatch(access.path, runtimeConfig.filesystem.denyRead, cwd);
+        inferSandboxRuleMatch(
+          access.path,
+          runtimeConfig.filesystem.allowRead ?? [],
+          "allowRead",
+          cwd,
+        ) !== null;
+      const readDenied = inferSandboxRuleMatch(
+        access.path,
+        runtimeConfig.filesystem.denyRead,
+        "denyRead",
+        cwd,
+      );
       if (readDenied && !readAllowed) {
         return { access, reason: "explicit-deny-read", matchedRule: readDenied };
       }
@@ -141,11 +151,19 @@ export function findFileToolPolicyViolation(
       };
     }
 
-    const deniedWrite = inferSandboxRuleMatch(access.path, runtimeConfig.filesystem.denyWrite, cwd);
+    const deniedWrite = inferSandboxRuleMatch(
+      access.path,
+      runtimeConfig.filesystem.denyWrite,
+      "denyWrite",
+      cwd,
+    );
     if (deniedWrite) {
       return { access, reason: "explicit-deny-write", matchedRule: deniedWrite };
     }
-    if (inferSandboxRuleMatch(access.path, runtimeConfig.filesystem.allowWrite, cwd) === null) {
+    if (
+      inferSandboxRuleMatch(access.path, runtimeConfig.filesystem.allowWrite, "allowWrite", cwd) ===
+      null
+    ) {
       return { access, reason: "missing-allow-write" };
     }
   }
@@ -162,7 +180,7 @@ export interface FileToolGuardOptions {
   toolName: string;
   input: unknown;
   cwd: string;
-  getRuntimeConfig: () => SandboxRuntimeConfig | null;
+  getRuntimeConfig: () => SandboxPolicy | null;
   onViolation: (violation: FileToolPolicyViolation) => Promise<FileToolGuardApproval>;
   inactiveReason?: string;
 }
@@ -241,7 +259,7 @@ async function guardFileToolAccesses(
 
 function findDeniedTraversalRule(
   searchPath: string,
-  runtimeConfig: SandboxRuntimeConfig,
+  runtimeConfig: SandboxPolicy,
   cwd: string,
 ): string | null {
   const allowRead = runtimeConfig.filesystem.allowRead ?? [];
@@ -250,8 +268,8 @@ function findDeniedTraversalRule(
   for (const rule of runtimeConfig.filesystem.denyRead) {
     const ruleRoot = getRuleTraversalRoot(rule, cwd);
     if (!pathsOverlap(normalizedSearchPath, ruleRoot)) continue;
-    if (inferSandboxRuleMatch(searchPath, allowRead, cwd)) continue;
-    if (inferSandboxRuleMatch(ruleRoot, allowRead, cwd)) continue;
+    if (inferSandboxRuleMatch(searchPath, allowRead, "allowRead", cwd)) continue;
+    if (inferSandboxRuleMatch(ruleRoot, allowRead, "allowRead", cwd)) continue;
     return rule;
   }
 
@@ -327,4 +345,19 @@ function isMissingPathError(error: unknown): boolean {
     "code" in error &&
     (error.code === "ENOENT" || error.code === "ENOTDIR")
   );
+}
+
+/** Match file-tool paths with policy rules. Literal paths and rules are normalized through their
+ * existing ancestor, so aliases such as /var and /private/var match even for new files. */
+function inferSandboxRuleMatch(
+  path: string,
+  rules: string[],
+  list: Parameters<typeof inferPolicyRuleMatch>[2],
+  cwd: string,
+): string | null {
+  const normalizedRules = rules.map((rule) =>
+    containsGlobChars(rule) ? rule : normalizeSandboxPath(rule, cwd),
+  );
+  const match = inferPolicyRuleMatch(normalizeSandboxPath(path, cwd), normalizedRules, list, cwd);
+  return match === null ? null : rules[normalizedRules.indexOf(match)];
 }
