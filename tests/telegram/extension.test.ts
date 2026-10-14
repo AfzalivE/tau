@@ -132,6 +132,90 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     );
   });
 
+  for (const tokenSource of ["env", "keychain"] as const) {
+    test(
+      `reconnect ticks start a stopped daemon once and read the ${tokenSource} token only for that start`,
+      { skip: tokenSource === "keychain" && process.platform !== "darwin" && "macOS Keychain" },
+      async () => {
+        const agentDir = getAgentDir();
+        const cwd = path.join(agentDir, "otter-workshop");
+        await mkdir(path.join(agentDir, "telegram"), { recursive: true });
+        await mkdir(cwd, { recursive: true });
+        await writeFile(
+          path.join(agentDir, "telegram", "config.json"),
+          JSON.stringify({ pairedChatId: 42 }),
+        );
+        if (tokenSource === "keychain") delete process.env.TAU_TELEGRAM_BOT_TOKEN;
+        const probes = stoppedDaemonSocket(agentDir);
+        let keychainReads = 0;
+        let launches = 0;
+        let launched!: () => void;
+        const launchRefused = new Promise<void>((resolve) => (launched = resolve));
+        // Answer the Keychain lookup with a fixture token; any other subprocess fails the test.
+        mock.method(
+          childProcess,
+          "execFile",
+          (command: string, args: string[], _options: unknown, callback: Function) => {
+            assert.equal(command, "security");
+            assert.equal(args[0], "find-generic-password");
+            keychainReads++;
+            callback(null, "fixture-only-keychain-token\n");
+          },
+        );
+        mock.method(childProcess, "spawn", () => {
+          launches++;
+          launched();
+          throw new Error("Fixture refuses detached daemon startup");
+        });
+        syncBuiltinESMExports();
+        resources = await createPiResources(cwd, agentDir, [telegram]);
+        ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
+        await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+
+        // The first attempt probes, then probes again inside the refused startup.
+        await launchRefused;
+        await new Promise((resolve) => setImmediate(resolve));
+        for (let tick = 1; tick <= 5; tick++) {
+          mock.timers.tick(3_000);
+          await probes.reach(2 + tick);
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.equal(launches, 1);
+        assert.equal(keychainReads, tokenSource === "keychain" ? 1 : 0);
+        assert.equal(probes.count(), 7, "later ticks only look for a daemon started elsewhere");
+      },
+    );
+  }
+
+  test("unpaired reconnect ticks neither read the token nor probe the daemon", async () => {
+    const agentDir = getAgentDir();
+    const cwd = path.join(agentDir, "otter-workshop");
+    await mkdir(cwd, { recursive: true });
+    delete process.env.TAU_TELEGRAM_BOT_TOKEN;
+    const probes = stoppedDaemonSocket(agentDir);
+    let keychainReads = 0;
+    mock.method(
+      childProcess,
+      "execFile",
+      (_command: string, _args: string[], _options: unknown, callback: Function) => {
+        keychainReads++;
+        callback(new Error("No otter token"), "");
+      },
+    );
+    syncBuiltinESMExports();
+    resources = await createPiResources(cwd, agentDir, [telegram]);
+    ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
+    await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+
+    mock.timers.tick(30_000);
+    // The explicit status command is the only token read and daemon probe.
+    await session.prompt("/telegram status");
+
+    assert.equal(keychainReads, process.platform === "darwin" ? 1 : 0);
+    assert.equal(probes.count(), 1);
+  });
+
   for (const unavailable of ["unpaired", "missing capability", "disconnected"] as const) {
     test(`tree navigation reconciles live Telegram availability when ${unavailable}, preserving other branch tools`, async () => {
       const agentDir = getAgentDir();
@@ -526,6 +610,29 @@ function substituteDaemonTransport(agentDir: string, failures: unknown[]) {
       persistent.destroy();
       await closed;
     },
+  };
+}
+
+/** Refuse every daemon socket connection and let tests await each probe. */
+function stoppedDaemonSocket(agentDir: string) {
+  let count = 0;
+  const waiters: { target: number; resolve: () => void }[] = [];
+  mock.method(net, "connect", (socketPath: string) => {
+    assert.equal(socketPath, path.join(agentDir, "run", "telegram.sock"));
+    count++;
+    for (const waiter of waiters.filter(({ target }) => count >= target)) waiter.resolve();
+    const socket = new net.Socket();
+    queueMicrotask(() =>
+      socket.emit("error", Object.assign(new Error("No otter daemon"), { code: "ENOENT" })),
+    );
+    return socket;
+  });
+  return {
+    count: () => count,
+    reach: (target: number) =>
+      count >= target
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => waiters.push({ target, resolve })),
   };
 }
 

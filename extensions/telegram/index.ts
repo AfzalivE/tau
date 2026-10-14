@@ -495,6 +495,7 @@ export default function (pi: ExtensionAPI) {
     lastCtx: null as ExtensionContext | null,
     connectPromise: null as Promise<void> | null,
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
+    daemonStartFailed: false,
     paired: false,
     daemonCapabilities: new Set<string>(),
     sendFileToolRegistered: false,
@@ -764,16 +765,24 @@ export default function (pi: ExtensionAPI) {
     if (state.connectPromise) return;
 
     const cfg = await loadConfig();
-    const tokenInfo = await resolveTelegramBotToken();
-    if (!tokenInfo.token || cfg.pairedChatId === undefined) return;
+    if (cfg.pairedChatId === undefined) return;
 
     const daemonUp = await canConnectSocket();
+    if (!daemonUp) {
+      if (state.daemonStartFailed) return;
+      const tokenInfo = await resolveTelegramBotToken();
+      if (!tokenInfo.token) {
+        state.daemonStartFailed = true;
+        return;
+      }
+    }
 
     try {
       await connectPersistent(ctx, { ensureDaemon: !daemonUp });
       updateMeta(ctx);
     } catch {
-      // ignore; next loop tick will retry
+      // Later ticks only join a daemon started elsewhere until a connection succeeds.
+      if (!daemonUp) state.daemonStartFailed = true;
     }
   }
 
@@ -1031,6 +1040,7 @@ export default function (pi: ExtensionAPI) {
       state.sessionNo = msg.sessionNo;
       state.paired = msg.paired;
       state.daemonCapabilities = new Set(msg.capabilities);
+      state.daemonStartFailed = false;
       updateTelegramSendFileToolAvailability();
       stopAutoConnectLoop();
       if (state.lastCtx?.hasUI) {
