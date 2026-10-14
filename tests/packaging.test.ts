@@ -23,6 +23,7 @@ const patchedPaths = [
   "dist/index.d.ts",
   linuxUtilsPath,
   "dist/sandbox/linux-sandbox-utils.d.ts",
+  "dist/utils/which.js",
   "README.md",
 ];
 const runtimeAssets = [

@@ -1,0 +1,42 @@
+diff --git a/dist/utils/which.js b/dist/utils/which.js
+--- a/dist/utils/which.js
++++ b/dist/utils/which.js
+@@ -1,7 +1,10 @@
+ import { spawnSync } from 'node:child_process';
++import { accessSync, constants, statSync } from 'node:fs';
++import { isAbsolute } from 'node:path';
+ /**
+  * Find the path to an executable, similar to the `which` command.
+  * Uses Bun.which when running in Bun, falls back to spawnSync for Node.js.
++ * Under Node.js, absolute paths are checked directly instead of via `which`.
+  *
+  * @param bin - The name of the executable to find
+  * @returns The full path to the executable, or null if not found
+@@ -11,6 +14,9 @@ export function whichSync(bin) {
+     if (typeof globalThis.Bun !== 'undefined') {
+         return globalThis.Bun.which(bin);
+     }
++    if (isAbsolute(bin)) {
++        return isExecutableFile(bin) ? bin : null;
++    }
+     // Fallback to Node.js implementation
+     const result = spawnSync('which', [bin], {
+         encoding: 'utf8',
+@@ -22,4 +28,16 @@ export function whichSync(bin) {
+     }
+     return null;
+ }
++function isExecutableFile(path) {
++    try {
++        if (!statSync(path).isFile()) {
++            return false;
++        }
++        accessSync(path, constants.X_OK);
++        return true;
++    }
++    catch {
++        return false;
++    }
++}
+ //# sourceMappingURL=which.js.map
+\ No newline at end of file

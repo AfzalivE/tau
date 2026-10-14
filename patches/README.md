@@ -4,6 +4,7 @@ Tau pins `@anthropic-ai/sandbox-runtime` to `0.0.79`. Each upstream fix has its 
 
 - `sandbox-runtime-0.0.79-pr-673.patch`: Linux file-preservation fix [#673](https://github.com/anthropics/sandbox-runtime/pull/673), commit [`fdd5c2d4`](https://github.com/anthropics/sandbox-runtime/commit/fdd5c2d4523bd7b8e707ae377c2631d64798f818).
 - `sandbox-runtime-0.0.79-pr-695.patch`: per-command policy handoffs from [#695](https://github.com/anthropics/sandbox-runtime/pull/695), based on commit [`e9137fd9`](https://github.com/anthropics/sandbox-runtime/commit/e9137fd9aa0d90e7b6ba0a82a1e169adc95551ee), plus local, unpublished fixes for its shallow command-config types and documentation scope. Those fixes are not in the linked commit.
+- `sandbox-runtime-0.0.79-which-absolute-path.patch`: fork-specific fix for [#548](https://github.com/anthropics/sandbox-runtime/issues/548), related to [#567](https://github.com/anthropics/sandbox-runtime/pull/567). Node.js checks absolute executable paths directly instead of running `which` with a one-second timeout, which can report an existing shell as missing.
 
 The exact version keeps application checked against the audited release. The helper discovers all `.patch` files in this directory and applies them in filename order. No patch list or runtime download is required.
 
