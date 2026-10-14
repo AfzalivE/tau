@@ -57,6 +57,7 @@ export type SandboxPolicy = Omit<SandboxRuntimeConfig, "filesystem"> & {
 export type SandboxConfig = SandboxPolicy & {
   enabled?: boolean;
   mode?: PromptMode;
+  debug?: boolean;
   required?: boolean;
   commands: SandboxCommandConfig;
   /** Omit to offer setup. False keeps manual approvals; a provider/model selects a reviewer. */
@@ -90,6 +91,7 @@ const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_]
 const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
+  debug: false,
   required: false,
   commands: DEFAULT_COMMAND_CONFIG,
   network: {
@@ -418,6 +420,7 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
+    debug: coerceBoolean(config.debug, false, "debug"),
     required: coerceBoolean(config.required, false, "required"),
     commands: {
       blocked: coerceStringArray(config.commands?.blocked, [], "commands.blocked"),
@@ -583,6 +586,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   const result: SandboxConfig = { ...base };
 
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
+  if (overrides.debug !== undefined) result.debug = overrides.debug;
   if (overrides.required !== undefined) result.required = overrides.required;
   if (isPlainObject(overrides.commands)) {
     result.commands = { ...base.commands, ...overrides.commands };

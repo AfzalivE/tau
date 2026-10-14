@@ -80,6 +80,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     type: "boolean",
     default: false,
   });
+  pi.registerFlag("sandbox-debug", {
+    description: "Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG)",
+    type: "boolean",
+    default: false,
+  });
+
   const runtime = createSandboxRuntime(pi);
   const failedUsage = new Map<string, Usage>();
   // Pi converts thrown tool errors to results. Restore already-incurred review usage at
@@ -100,6 +106,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         enabled: true,
         mode: runtime.promptMode,
         required: runtime.required,
+        debug: runtime.config?.debug,
         commands: structuredClone(runtime.config?.commands),
         filesystem: {
           ...cloned.filesystem,
@@ -214,8 +221,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     failedUsage.clear();
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
-    await runtime.shutdown(ctx);
+  pi.on("session_shutdown", async (event, ctx) => {
+    await runtime.shutdown(ctx, event.reason);
     failedUsage.clear();
   });
 

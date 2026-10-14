@@ -4,7 +4,20 @@ import {
   type SandboxAskCallback,
 } from "@anthropic-ai/sandbox-runtime";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+
+import {
+  createSandboxAuditLog,
+  getSandboxAuditLogPath,
+  subscribeToNewViolations,
+  type SandboxAuditLog,
+} from "./audit-log.js";
+import { findBlockedCommand } from "./command-policy.js";
+import { createSandboxDebugLog, type SandboxDebugLine } from "./debug.js";
 
 import {
   DEFAULT_PROMPT_MODE,
@@ -87,6 +100,10 @@ export interface SandboxRuntime {
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
   readonly required: boolean;
+  readonly auditLog: string;
+  readonly debugLines: SandboxDebugLine[];
+  describeDebugLogging(): string;
+  setDebugLogging(enabled: boolean): void;
   checkCommand(command: string, cwd: string): string | undefined;
   getRuntimeConfig(): SandboxPolicy | null;
   runBash<C extends ExtensionContext, T>(
@@ -105,8 +122,8 @@ export interface SandboxRuntime {
     signal: AbortSignal | undefined,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T>;
-  start(ctx: ExtensionContext): Promise<void>;
-  shutdown(ctx: ExtensionContext): Promise<void>;
+  start(ctx: ExtensionContext, reason?: string): Promise<void>;
+  shutdown(ctx: ExtensionContext, reason?: string): Promise<void>;
   enable(ctx: ExtensionContext): Promise<void>;
   disable(ctx: ExtensionContext): Promise<void>;
   setPromptMode(ctx: ExtensionContext, mode: PromptMode): void;
@@ -261,6 +278,11 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let invocation: SandboxInvocation | undefined;
   let executionQueue: Promise<void> = Promise.resolve();
   let reviewerBusy = false;
+  const debug = createSandboxDebugLog();
+  let auditLog: SandboxAuditLog | null = null;
+  let auditPath: string | null = null;
+  let auditError: string | null = null;
+  let unsubscribeAudit: (() => void) | undefined;
   const reviewer = createSandboxReviewer(pi, {
     getSelection: () => sandboxConfig?.classifier,
   });
@@ -319,6 +341,63 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     });
   }
 
+  function auditPolicy(config: SandboxPolicy) {
+    return {
+      network: {
+        allowedDomains: config.network.allowedDomains,
+        deniedDomains: config.network.deniedDomains,
+        allowLocalBinding: config.network.allowLocalBinding,
+        allowAllUnixSockets: config.network.allowAllUnixSockets,
+        allowUnixSockets: config.network.allowUnixSockets,
+        allowMachLookup: config.network.allowMachLookup,
+      },
+      filesystem: config.filesystem,
+    };
+  }
+
+  function startAudit(ctx: ExtensionContext, reason: string): void {
+    auditPath = getSandboxAuditLogPath(getAgentDir(), ctx.sessionManager.getSessionId());
+    auditError = null;
+    const onError = (error: unknown) => {
+      if (auditError) return;
+      auditError = error instanceof Error ? error.message : String(error);
+      notify(ctx, `Sandbox audit logging failed (${auditPath}): ${auditError}`, "warning");
+    };
+    try {
+      const log = createSandboxAuditLog({
+        agentDir: getAgentDir(),
+        sessionId: ctx.sessionManager.getSessionId(),
+        cwd: ctx.cwd,
+        onError,
+      });
+      auditLog = log;
+      log.append("session-start", { reason, sessionFile: ctx.sessionManager.getSessionFile() });
+      unsubscribeAudit = subscribeToNewViolations(
+        SandboxManager.getSandboxViolationStore(),
+        (violation) =>
+          log.append(
+            "runtime-violation",
+            {
+              line: violation.line,
+              command: violation.command,
+              violationTimestamp: violation.timestamp.toISOString(),
+            },
+            violation.timestamp,
+          ),
+        (dropped) => log.append("runtime-violation-gap", { dropped }),
+      );
+    } catch (error) {
+      onError(error);
+    }
+  }
+
+  function stopAudit(reason: string): void {
+    unsubscribeAudit?.();
+    unsubscribeAudit = undefined;
+    auditLog?.append("session-stop", { reason });
+    auditLog?.close();
+    auditLog = null;
+  }
 
   function checkCommand(command: string, cwd: string): string | undefined {
     const match = findBlockedCommand(command, sandboxConfig?.commands.blocked ?? []);
@@ -339,6 +418,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
+    auditLog?.append("policy-event", event, event.timestamp);
     if (sandboxEvents.length > SANDBOX_EVENT_LIMIT) {
       sandboxEvents.splice(0, sandboxEvents.length - SANDBOX_EVENT_LIMIT);
     }
@@ -382,6 +462,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     SandboxRuntimeConfigSchema.parse(nextConfig);
     SandboxManager.updateConfig(nextConfig);
     sandboxState = { status: "active", runtimeConfig: nextConfig };
+    auditLog?.append("runtime-policy", { reason: "session-update", ...auditPolicy(nextConfig) });
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
@@ -476,6 +557,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       await SandboxManager.initialize(runtimeConfig, askNetworkPermission, true);
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
+      auditLog?.append("runtime-policy", { reason: "initialize", ...auditPolicy(activeConfig) });
       return activeConfig;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : `${error}`;
@@ -518,16 +600,24 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       }
     }
     sandboxConfig = loadedConfig.config;
+    debug.setEnabled(sandboxConfig.debug === true || pi.getFlag("sandbox-debug") === true);
+    auditLog?.append("configuration", {
+      configPaths: sandboxConfigPaths,
+      policy: { ...sandboxConfig, network: auditPolicy(sandboxConfig).network },
+    });
     return loadedConfig.config;
   }
 
-  async function start(ctx: ExtensionContext): Promise<void> {
+  async function start(ctx: ExtensionContext, reason = "startup"): Promise<void> {
     await cancelPermissionInvocations();
+    stopAudit("session-restart");
+    debug.start();
     permissionLifetime = new AbortController();
     setSandboxStatus(ctx, false);
     resetRuntimeState();
     reviewer.reset();
     sessionCwd = ctx.cwd;
+    startAudit(ctx, reason);
 
     const noSandbox = pi.getFlag("no-sandbox") as boolean;
     if (noSandbox) {
@@ -563,7 +653,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     announceSandboxState(pi, ctx, true, "Sandbox initialized");
   }
 
-  async function shutdown(ctx: ExtensionContext): Promise<void> {
+  async function shutdown(ctx: ExtensionContext, reason = "quit"): Promise<void> {
     await cancelPermissionInvocations();
     setSandboxStatus(ctx, false);
     if (getStateRuntimeConfig(sandboxState)) {
@@ -574,6 +664,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       }
     }
 
+    stopAudit(reason);
+    debug.stop();
     resetRuntimeState();
     sessionCwd = process.cwd();
   }
@@ -784,6 +876,14 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     get required() {
       return pi.getFlag("sandbox-required") === true || sandboxConfig?.required === true;
     },
+    get auditLog() {
+      return auditError ? `failed (${auditPath}): ${auditError}` : (auditPath ?? "not initialized");
+    },
+    get debugLines() {
+      return debug.lines;
+    },
+    describeDebugLogging: debug.describe,
+    setDebugLogging: debug.setEnabled,
     checkCommand,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     runBash,

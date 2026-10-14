@@ -2295,6 +2295,7 @@ exit 73`,
               enabled: true,
               mode: "interactive",
               required: false,
+              debug: false,
               commands: { blocked: [], excluded: [], exclusionsEnabled: true },
               filesystem: {
                 ...expectedPolicy.filesystem,
@@ -2385,6 +2386,39 @@ exit 73`,
       await assert.rejects(pi.bash("printf escaped"), /matches commands.excluded/);
       await assert.rejects(pi.bash("touch escaped"), /blocked executable/);
       assert.equal(pi.permissionCount(), 0);
+    });
+
+    test("disabled exclusions stay sandboxed and audit runtime violations even after command success", async () => {
+      const commands = { blocked: [], excluded: ["printf"], exclusionsEnabled: false };
+      await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), commands }));
+      const probe = "printf 'sandboxed squid\\n'";
+      const violation = `bash(42) deny(1) file-write-data ${target}`;
+      boundary.attempts(probe, [{ script: probe, violation }]);
+      pi = await openSandbox(cwd, sandbox, failures);
+      assert.equal(bashOutput(await pi.bash(probe)), "sandboxed squid\n");
+      const sessionId = pi.session.sessionId;
+      await pi.dispose();
+      const records = (
+        await readFile(path.join(getAgentDir(), "logs", "sandbox", `${sessionId}.jsonl`), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.ok(
+        records.some(
+          (record) =>
+            record.type === "configuration" &&
+            record.data.policy.commands.exclusionsEnabled === false,
+        ),
+      );
+      assert.ok(
+        records.some(
+          (record) => record.type === "runtime-violation" && record.data.line === violation,
+        ),
+      );
+      assert.ok(
+        records.some((record) => record.type === "session-stop" && record.data.reason === "quit"),
+      );
     });
   });
 });
