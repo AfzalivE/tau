@@ -235,24 +235,14 @@ test(
 );
 
 test(
-  "native command status, timeout, and JVM adapter use the Pi execution path",
+  "native command status, timeout, and JVM proxy agent use the Pi execution path",
   { skip: nativeSkip },
   (t) => {
-    const f = fixture(t, {
-      network: {
-        allowedDomains: [],
-        deniedDomains: [],
-        allowLocalBinding: true,
-        jvmProxy: process.platform === "darwin",
-      },
-    });
+    const f = fixture(t, { network: { allowedDomains: [], deniedDomains: [] } });
     assert.equal(run(f, ["-c", "exit 37"]).status, 37);
     assert.equal(run(f, ["--timeout", "0.2", "-c", "sleep 10"]).status, 124);
-    if (process.platform === "darwin") {
-      const result = run(f, ["-c", "printf '%s' \"$JAVA_TOOL_OPTIONS\""]);
-      assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.match(result.stdout, /-Dhttps?\.proxyHost=127\.0\.0\.1/);
-      assert.match(result.stdout, /-Dhttps?\.proxyPort=\d+/);
-    }
+    const result = run(f, ["-c", "printf '%s' \"$JAVA_TOOL_OPTIONS\""]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /-javaagent:\S*srt-proxy-agent\.jar/);
   },
 );

@@ -57,7 +57,11 @@ describe("global sandbox permission persistence", { concurrency: false }, () => 
   });
 
   test("saves one default-based list and restores it in another project", async () => {
-    const original = { note: "Keep the octopus 🐙", network: { jvmProxy: true }, debug: true };
+    const original = {
+      note: "Keep the octopus 🐙",
+      network: { allowAllUnixSockets: false },
+      debug: true,
+    };
     await fs.writeFile(configPath, JSON.stringify(original));
     const defaults = config.loadConfig(cwd).config;
     const result = await persistence.saveGlobalPermission(cwd, domain("ink.invalid"), options);

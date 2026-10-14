@@ -492,7 +492,6 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           `    Allowed: ${runtimeConfig.network.allowedDomains.join(", ") || "(none)"}`,
           `    Denied: ${runtimeConfig.network.deniedDomains.join(", ") || "(none)"}`,
           `    allowLocalBinding: ${runtimeConfig.network.allowLocalBinding ? "true" : "false"}`,
-          `    jvmProxy: ${runtime.config?.network.jvmProxy ? "true" : "false"}`,
           `    allowAllUnixSockets: ${runtimeConfig.network.allowAllUnixSockets ? "true" : "false"}`,
           `    allowUnixSockets: ${runtimeConfig.network.allowUnixSockets?.join(", ") || "(none)"}`,
           ...(IS_MACOS
