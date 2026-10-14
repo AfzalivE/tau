@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import { findExcludedCommand, type SimpleCommand } from "./command-policy.js";
 import {
+  DEFAULT_COMMAND_CONFIG,
   cloneRuntimeConfig,
   inferSandboxRuleMatch,
   isSandboxWritablePath,
@@ -112,6 +114,8 @@ interface SandboxedBashOpsOptions {
   getSandboxConfig: () => SandboxConfig | null;
   getRuntimeConfig: () => SandboxPolicy | null;
   applyRuntimeConfigForSession: (ctx: ExtensionContext, runtimeConfig: SandboxPolicy) => void;
+  isRequired: () => boolean;
+  checkCommand: (command: string, cwd: string) => string | undefined;
   recordEvent?: (event: SandboxEvent) => void;
   resolvePermission: (proposal: PermissionProposal) => Promise<PermissionResolution>;
 }
@@ -200,6 +204,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     getSandboxConfig,
     getRuntimeConfig,
     applyRuntimeConfigForSession,
+    isRequired,
+    checkCommand,
     recordEvent,
     resolvePermission,
   } = options;
@@ -340,6 +346,55 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
           interruptedByFilesystemViolation,
           runtimeProtectedWriteViolations: Array.from(runtimeProtectedWriteViolations.values()),
         });
+      });
+    });
+  }
+
+  async function runExcludedCommand(
+    command: SimpleCommand,
+    cwd: string,
+    onData: (data: Buffer) => void,
+    signal?: AbortSignal,
+    timeout?: number,
+    env?: NodeJS.ProcessEnv,
+  ): Promise<{ exitCode: number | null }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command.rawExecutable, command.args, {
+        cwd,
+        env: { ...(env ?? process.env), ...command.env },
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let timedOut = false;
+      let timer: NodeJS.Timeout | undefined;
+      let escalation: NodeJS.Timeout | undefined;
+      const onAbort = () => killProcessGroup(child);
+      const cleanup = () => {
+        clearTimeout(timer);
+        clearTimeout(escalation);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      if (timeout !== undefined) {
+        timer = setTimeout(() => {
+          timedOut = true;
+          killProcessGroup(child, "SIGTERM");
+          escalation = setTimeout(() => killProcessGroup(child), 2000);
+        }, timeout * 1000);
+      }
+      child.stdout?.on("data", onData);
+      child.stderr?.on("data", onData);
+      child.on("error", (error) => {
+        cleanup();
+        killProcessGroup(child);
+        reject(error);
+      });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+      child.on("close", (exitCode) => {
+        cleanup();
+        if (signal?.aborted) reject(new Error("aborted"));
+        else if (timedOut) reject(new Error(`timeout:${timeout}`));
+        else resolve({ exitCode });
       });
     });
   }
@@ -564,6 +619,32 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       validateTimeout(timeout);
       if (!existsSync(cwd)) {
         throw new Error(`Working directory does not exist: ${cwd}`);
+      }
+
+      const blocked = checkCommand(command, cwd);
+      if (blocked) throw new Error(blocked);
+      const commands = getSandboxConfig()?.commands ?? DEFAULT_COMMAND_CONFIG;
+      const excluded = findExcludedCommand(command, commands.excluded, commands.exclusionsEnabled);
+      if (excluded) {
+        const required = isRequired();
+        const summary = required
+          ? `Sandbox is required, but this command matches commands.excluded entry \`${excluded.pattern}\`. Disable exclusions to test it inside the sandbox.`
+          : `command bypassed sandbox via commands.excluded entry \`${excluded.pattern}\``;
+        recordEvent?.({
+          timestamp: Date.now(),
+          kind: "command",
+          outcome: required ? "blocked" : "allowed",
+          reason: "excluded-command",
+          target: excluded.executable,
+          command,
+          cwd,
+          summary,
+        });
+        if (required) throw new Error(summary);
+        const message = `[sandbox] Running excluded command outside sandbox: ${excluded.rawExecutable} (matched ${excluded.pattern})`;
+        onData(Buffer.from(`${message}\n`));
+        notify(ctx, message);
+        return runExcludedCommand(excluded.command, cwd, onData, signal, timeout, env);
       }
 
       const attemptStartedAt = Date.now();

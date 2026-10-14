@@ -43,8 +43,10 @@ export type SandboxState =
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
 
-type SandboxEventKind = "filesystem" | "network" | "mach-lookup" | "init" | "runtime";
+type SandboxEventKind = "filesystem" | "network" | "mach-lookup" | "init" | "runtime" | "command";
 export type SandboxEventReason =
+  | "blocked-command"
+  | "excluded-command"
   | "explicit-deny-read"
   | "explicit-deny-write"
   | "explicit-deny-domain"
@@ -84,6 +86,8 @@ export interface SandboxRuntime {
   readonly promptMode: PromptMode;
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
+  readonly required: boolean;
+  checkCommand(command: string, cwd: string): string | undefined;
   getRuntimeConfig(): SandboxPolicy | null;
   runBash<C extends ExtensionContext, T>(
     ctx: C,
@@ -315,6 +319,24 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     });
   }
 
+
+  function checkCommand(command: string, cwd: string): string | undefined {
+    const match = findBlockedCommand(command, sandboxConfig?.commands.blocked ?? []);
+    if (!match) return undefined;
+    const summary = `Sandbox blocked executable \`${match.rawExecutable}\` (matched commands.blocked entry \`${match.blocked}\`).`;
+    recordSandboxEvent({
+      timestamp: Date.now(),
+      kind: "command",
+      outcome: "blocked",
+      reason: "blocked-command",
+      target: match.executable,
+      command,
+      cwd,
+      summary,
+    });
+    return summary;
+  }
+
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
     if (sandboxEvents.length > SANDBOX_EVENT_LIMIT) {
@@ -487,6 +509,13 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
     if (parseErrors.length > 0) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
+      if (pi.getFlag("sandbox-required") === true || loadedConfig.config.required) {
+        requestShutdownWithError(
+          ctx,
+          "Sandbox is required; refusing to run with invalid configuration.",
+        );
+        return null;
+      }
     }
     sandboxConfig = loadedConfig.config;
     return loadedConfig.config;
@@ -752,6 +781,10 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     get events() {
       return sandboxEvents;
     },
+    get required() {
+      return pi.getFlag("sandbox-required") === true || sandboxConfig?.required === true;
+    },
+    checkCommand,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     runBash,
     resolvePermission,

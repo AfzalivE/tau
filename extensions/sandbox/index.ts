@@ -74,6 +74,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     type: "string",
   });
 
+  pi.registerFlag("sandbox-required", {
+    description:
+      "Require sandboxed Bash execution; refuse disabled configs, invalid configs, and command exclusions",
+    type: "boolean",
+    default: false,
+  });
   const runtime = createSandboxRuntime(pi);
   const failedUsage = new Map<string, Usage>();
   // Pi converts thrown tool errors to results. Restore already-incurred review usage at
@@ -93,6 +99,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         ...cloned,
         enabled: true,
         mode: runtime.promptMode,
+        required: runtime.required,
+        commands: structuredClone(runtime.config?.commands),
         filesystem: {
           ...cloned.filesystem,
           allowTempDirs: false,
@@ -100,7 +108,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         },
       };
     } else if (runtime.state.status === "bypassed" || runtime.state.status === "suspended") {
-      handoff.config = { enabled: false };
+      if (runtime.required) handoff.error = "Sandbox is required but is not active.";
+      else handoff.config = { enabled: false, commands: structuredClone(runtime.config?.commands) };
     } else {
       handoff.error = "Sandbox is not ready. Fix its setup before starting a subagent.";
     }
@@ -111,9 +120,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     ...localBashTool,
     label: "bash (sandbox-aware)",
     async execute(id, params, signal, onUpdate, ctx) {
+      const blocked = runtime.checkCommand(params.command, ctx.cwd);
+      if (blocked) throw new Error(blocked);
       const state = runtime.state;
       if (state.status !== "active") {
-        const allowsUnsandboxed = state.status === "bypassed" || state.status === "suspended";
+        const allowsUnsandboxed =
+          !runtime.required && (state.status === "bypassed" || state.status === "suspended");
         if (!allowsUnsandboxed) {
           const runMode = getSandboxRunMode(state);
 
@@ -133,6 +145,17 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               "Sandbox session initialization is incomplete. Retry after session startup or run /sandbox enable.";
           }
 
+          if (runtime.required)
+            reason = `Sandbox is required but is not active (${runMode}). Check the configuration and sandbox startup diagnostics.`;
+          runtime.recordEvent({
+            timestamp: Date.now(),
+            kind: "runtime",
+            outcome: "blocked",
+            reason: state.status === "blocked" ? state.reason : "unknown",
+            command: params.command,
+            cwd: ctx.cwd,
+            summary: reason,
+          });
           throw new Error(reason);
         }
         return localBashTool.execute(id, params, signal, onUpdate, ctx);
@@ -151,6 +174,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
                   getSandboxConfig: () => runtime.config,
                   getRuntimeConfig: () => runtime.getRuntimeConfig(),
                   applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
+                  isRequired: () => runtime.required,
+                  checkCommand: runtime.checkCommand,
                   recordEvent: runtime.recordEvent,
                   resolvePermission: (proposal) => runtime.resolvePermission(proposal, owner),
                 }).exec(command, cwd, { ...options, signal: owner.signal });
@@ -171,8 +196,21 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    await runtime.start(ctx);
+  pi.on("tool_call", (event, ctx) => {
+    if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
+    const reason = runtime.checkCommand(event.input.command, ctx.cwd);
+    return reason ? { block: true, reason } : undefined;
+  });
+  pi.on("user_bash", (event, ctx) => {
+    const reason = runtime.checkCommand(event.command, ctx.cwd);
+    if (reason)
+      return {
+        result: { output: `${reason}\n`, exitCode: 126, cancelled: false, truncated: false },
+      };
+  });
+
+  pi.on("session_start", async (event, ctx) => {
+    await runtime.start(ctx, event.reason);
     failedUsage.clear();
   });
 

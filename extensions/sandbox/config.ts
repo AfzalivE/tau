@@ -29,6 +29,18 @@ type DefaultConfigExtension = {
   ignoreViolations?: string[];
 };
 
+export interface SandboxCommandConfig {
+  blocked: string[];
+  excluded: string[];
+  exclusionsEnabled: boolean;
+}
+
+export const DEFAULT_COMMAND_CONFIG: SandboxCommandConfig = {
+  blocked: [],
+  excluded: [],
+  exclusionsEnabled: true,
+};
+
 // Tau normalizes configured filesystem rules to strings.
 export type SandboxPolicy = Omit<SandboxRuntimeConfig, "filesystem"> & {
   filesystem: Omit<
@@ -45,6 +57,8 @@ export type SandboxPolicy = Omit<SandboxRuntimeConfig, "filesystem"> & {
 export type SandboxConfig = SandboxPolicy & {
   enabled?: boolean;
   mode?: PromptMode;
+  required?: boolean;
+  commands: SandboxCommandConfig;
   /** Omit to offer setup. False keeps manual approvals; a provider/model selects a reviewer. */
   classifier?: string | false;
   filesystem: SandboxPolicy["filesystem"] & {
@@ -76,6 +90,8 @@ const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_]
 const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
+  required: false,
+  commands: DEFAULT_COMMAND_CONFIG,
   network: {
     allowedDomains: [
       // System
@@ -351,6 +367,13 @@ function cleanStringArray(value: unknown[], field: string): string[] {
   return cleaned;
 }
 
+function coerceBoolean(value: unknown, fallback: boolean, field: string): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  console.error(`Warning: Expected ${field} to be a boolean; using defaults.`);
+  return fallback;
+}
+
 function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
   if (!Array.isArray(value)) {
     console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
@@ -395,6 +418,16 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
+    required: coerceBoolean(config.required, false, "required"),
+    commands: {
+      blocked: coerceStringArray(config.commands?.blocked, [], "commands.blocked"),
+      excluded: coerceStringArray(config.commands?.excluded, [], "commands.excluded"),
+      exclusionsEnabled: coerceBoolean(
+        config.commands?.exclusionsEnabled,
+        true,
+        "commands.exclusionsEnabled",
+      ),
+    },
     ...(config.classifier !== undefined
       ? { classifier: normalizeClassifier(config.classifier) }
       : {}),
@@ -550,6 +583,10 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   const result: SandboxConfig = { ...base };
 
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
+  if (overrides.required !== undefined) result.required = overrides.required;
+  if (isPlainObject(overrides.commands)) {
+    result.commands = { ...base.commands, ...overrides.commands };
+  }
   if (overrides.classifier !== undefined)
     result.classifier = normalizeClassifier(overrides.classifier);
   if (overrides.mode !== undefined) {

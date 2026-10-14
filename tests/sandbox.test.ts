@@ -636,7 +636,10 @@ describe("sandbox", { concurrency: false }, () => {
 
         await pi.command("disable");
         assert.equal(pi.status(), "");
-        assert.deepEqual(pi.handoff().config, { enabled: false });
+        assert.deepEqual(pi.handoff().config, {
+          enabled: false,
+          commands: { blocked: [], excluded: [], exclusionsEnabled: true },
+        });
         assert.equal(
           bashOutput(await pi.bash(probe)),
           "kraken ready\n",
@@ -2291,6 +2294,8 @@ exit 73`,
               ...expectedPolicy,
               enabled: true,
               mode: "interactive",
+              required: false,
+              commands: { blocked: [], excluded: [], exclusionsEnabled: true },
               filesystem: {
                 ...expectedPolicy.filesystem,
                 allowTempDirs: false,
@@ -2353,6 +2358,34 @@ exit 73`,
       decision.resolve(undefined);
       await Promise.allSettled([execution, disabling]);
     }
+  });
+
+  describe("fork policy controls", () => {
+    test("strict sandbox mode rejects every outside-sandbox route and passes restrictions to children", async () => {
+      const commands = { blocked: ["touch"], excluded: ["printf"], exclusionsEnabled: true };
+      await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), commands }));
+      pi = await openSandbox(cwd, sandbox, failures, { flags: { "sandbox-required": true } });
+      await assert.rejects(pi.bash("printf escaped"), /matches commands.excluded/);
+      await assert.rejects(pi.bash("touch escaped"), /blocked executable/);
+      assert.equal(pi.permissionCount(), 0);
+      const inheritedPolicy = structuredClone(pi.handoff().config);
+      const handoff = pi.handoff().config as { required: boolean; commands: typeof commands };
+      assert.equal(handoff.required, true);
+      assert.deepEqual(handoff.commands, commands);
+      handoff.commands.blocked.length = 0;
+      await assert.rejects(pi.bash("touch escaped"), /blocked executable/);
+      await pi.command("disable");
+      await assert.rejects(pi.bash("printf escaped"), /Sandbox is required but is not active/);
+      assert.match(pi.handoff().error ?? "", /required/);
+      assert.match(await pi.command("doctor"), /excluded-command/);
+      await pi.dispose();
+      const childConfig = path.join(directory, "child-sandbox.json");
+      await writeFile(childConfig, JSON.stringify(inheritedPolicy));
+      pi = await openSandbox(cwd, sandbox, failures, { flags: { "sandbox-config": childConfig } });
+      await assert.rejects(pi.bash("printf escaped"), /matches commands.excluded/);
+      await assert.rejects(pi.bash("touch escaped"), /blocked executable/);
+      assert.equal(pi.permissionCount(), 0);
+    });
   });
 });
 
