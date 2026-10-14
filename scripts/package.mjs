@@ -39,11 +39,14 @@ async function buildPackage(packageName) {
     await copyResources(pi[resourceType] ?? [], outputDir);
   }
 
-  await bundleSandboxRuntime(outputDir);
+  const bundlesSandboxRuntime = Boolean(
+    packageJson.dependencies?.["@anthropic-ai/sandbox-runtime"],
+  );
+  if (bundlesSandboxRuntime) await bundleSandboxRuntime(outputDir);
 
   const generatedPackageJson = {
     ...packageJson,
-    bundleDependencies: ["@anthropic-ai/sandbox-runtime"],
+    ...(bundlesSandboxRuntime ? { bundleDependencies: ["@anthropic-ai/sandbox-runtime"] } : {}),
     files: [
       ...resourceTypes.filter((resourceType) => pi[resourceType]?.length),
       "README.md",

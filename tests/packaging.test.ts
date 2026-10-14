@@ -47,8 +47,12 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
 
   before(async () => {
     installed = await installedRuntimePackages();
-    // Bypass version-manager shims that require the user's non-isolated home.
-    npmCli = await realpath(path.join(path.dirname(process.execPath), "npm"));
+    // Bypass version-manager shims that require the user's non-isolated home. Some managers,
+    // such as mise, install npm itself as a shell wrapper, so prefer the packaged CLI.
+    const nodePrefix = path.dirname(path.dirname(process.execPath));
+    npmCli = await realpath(
+      path.join(nodePrefix, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    ).catch(() => realpath(path.join(path.dirname(process.execPath), "npm")));
     compiler = path.join(
       path.dirname(findPackageJSON("typescript", import.meta.url)!),
       "bin",
@@ -74,6 +78,17 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
       // Keep real sandbox packaging metadata. Unrelated Tau/Pi dependencies and
       // resources are outside this offline install workflow, not replaced SDKs.
       manifest.dependencies = { [runtimeName]: manifest.dependencies[runtimeName] };
+      delete manifest.peerDependencies;
+      manifest.pi = { extensions: ["../../extensions/octopus.ts"] };
+      await writeJson(manifestPath, manifest);
+    }
+    // Fork packages use the same bundling path. Build them without the runtime or their
+    // resources, so each case performs the same work as upstream; check:pack packs them fully.
+    for (const name of await readdir(path.join(fixture, "packages"))) {
+      if (packageNames.includes(name)) continue;
+      const manifestPath = path.join(fixture, "packages", name, "package.json");
+      const manifest = await readJson(manifestPath);
+      delete manifest.dependencies;
       delete manifest.peerDependencies;
       manifest.pi = { extensions: ["../../extensions/octopus.ts"] };
       await writeJson(manifestPath, manifest);
