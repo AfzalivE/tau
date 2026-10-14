@@ -1,12 +1,27 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { normalizePathForSandbox } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
+import {
+  type SandboxRuntimeConfig,
+  SandboxRuntimeConfigSchema,
+} from "@anthropic-ai/sandbox-runtime";
+import { literalReadings } from "@anthropic-ai/sandbox-runtime/dist/sandbox/path-entries.js";
+import {
+  containsGlobChars,
+  denyGlobRegex,
+  globPatternBaseDir,
+  globToRegex,
+  isAtOrUnder,
+  normalizePathForSandbox,
+  properAncestors,
+  removeTrailingGlobSuffix,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type PromptMode = "interactive" | "non-interactive";
 export type ListOp = "add" | "remove";
+export type FilesystemList = "deny-read" | "allow-write" | "deny-write";
+type FilesystemRuleList = "denyRead" | "allowRead" | "allowWrite" | "denyWrite";
 
 type DefaultConfigExtension = {
   allowMachLookup?: string[];
@@ -14,26 +29,25 @@ type DefaultConfigExtension = {
   ignoreViolations?: string[];
 };
 
-export interface SandboxCommandConfig {
-  blocked: string[];
-  excluded: string[];
-  exclusionsEnabled: boolean;
-}
-
-export const DEFAULT_COMMAND_CONFIG: SandboxCommandConfig = {
-  blocked: [],
-  excluded: [],
-  exclusionsEnabled: true,
+// Tau normalizes configured filesystem rules to strings.
+export type SandboxPolicy = Omit<SandboxRuntimeConfig, "filesystem"> & {
+  filesystem: Omit<
+    SandboxRuntimeConfig["filesystem"],
+    "denyRead" | "allowRead" | "allowWrite" | "denyWrite"
+  > & {
+    denyRead: string[];
+    allowRead?: string[];
+    allowWrite: string[];
+    denyWrite: string[];
+  };
 };
 
-export type SandboxConfig = Omit<SandboxRuntimeConfig, "filesystem" | "network"> & {
+export type SandboxConfig = SandboxPolicy & {
   enabled?: boolean;
   mode?: PromptMode;
-  debug?: boolean;
-  required?: boolean;
-  commands: SandboxCommandConfig;
-  network: SandboxRuntimeConfig["network"] & { jvmProxy?: boolean };
-  filesystem: SandboxRuntimeConfig["filesystem"] & {
+  /** Omit to offer setup. False keeps manual approvals; a provider/model selects a reviewer. */
+  classifier?: string | false;
+  filesystem: SandboxPolicy["filesystem"] & {
     allowTempDirs?: boolean;
     allowGitCommonDir?: boolean;
   };
@@ -62,11 +76,7 @@ const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_]
 const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
-  debug: false,
-  required: false,
-  commands: DEFAULT_COMMAND_CONFIG,
   network: {
-    jvmProxy: false,
     allowedDomains: [
       // System
       "localhost",
@@ -307,7 +317,7 @@ export function normalizePromptMode(value: unknown): PromptMode {
 
 function expandPath(value: string, cwd?: string): string {
   const expanded =
-    value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+    value === "~" ? homedir() : value.startsWith("~/") ? homedir() + value.slice(1) : value;
   return cwd && !expanded.startsWith("/") ? resolve(cwd, expanded) : expanded;
 }
 
@@ -341,13 +351,6 @@ function cleanStringArray(value: unknown[], field: string): string[] {
   return cleaned;
 }
 
-function coerceBoolean(value: unknown, fallback: boolean, field: string): boolean {
-  if (value === undefined) return fallback;
-  if (typeof value === "boolean") return value;
-  console.error(`Warning: Expected ${field} to be a boolean; using defaults.`);
-  return fallback;
-}
-
 function coerceStringArray(value: unknown, fallback: string[], field: string): string[] {
   if (!Array.isArray(value)) {
     console.error(`Warning: Expected ${field} to be a string[]; using defaults.`);
@@ -372,25 +375,31 @@ function coerceOptionalStringArray(
   return cleanStringArray(value, field);
 }
 
+export function isClassifierId(value: unknown): value is string {
+  return (
+    typeof value === "string" && !containsControlCharacter(value) && /^[^\s/]+\/[^\s]+$/.test(value)
+  );
+}
+
+function normalizeClassifier(value: unknown): string | false | undefined {
+  if (value === undefined || value === false) return value;
+  if (isClassifierId(value)) return value;
+  console.error(
+    "Warning: Expected classifier to be false or provider/model; using manual approvals.",
+  );
+  return false;
+}
+
 function finalizeConfig(config: SandboxConfig): SandboxConfig {
   return {
     ...config,
     enabled: typeof config.enabled === "boolean" ? config.enabled : DEFAULT_CONFIG.enabled,
     mode: normalizePromptMode(config.mode),
-    debug: coerceBoolean(config.debug, false, "debug"),
-    required: coerceBoolean(config.required, false, "required"),
-    commands: {
-      blocked: coerceStringArray(config.commands?.blocked, [], "commands.blocked"),
-      excluded: coerceStringArray(config.commands?.excluded, [], "commands.excluded"),
-      exclusionsEnabled: coerceBoolean(
-        config.commands?.exclusionsEnabled,
-        true,
-        "commands.exclusionsEnabled",
-      ),
-    },
+    ...(config.classifier !== undefined
+      ? { classifier: normalizeClassifier(config.classifier) }
+      : {}),
     network: {
       ...config.network,
-      jvmProxy: coerceBoolean(config.network?.jvmProxy, false, "network.jvmProxy"),
       allowedDomains: coerceStringArray(
         config.network?.allowedDomains,
         DEFAULT_CONFIG.network.allowedDomains,
@@ -446,16 +455,12 @@ function finalizeConfig(config: SandboxConfig): SandboxConfig {
   };
 }
 
-function loadOverrideConfig(
-  cwd: string,
-  overrideConfigPath: string,
-  globalConfig?: Partial<SandboxConfig>,
-): LoadedSandboxConfig {
+function loadOverrideConfig(cwd: string, overrideConfigPath: string): LoadedSandboxConfig {
   const resolvedPath = expandPath(overrideConfigPath, cwd);
 
   let source: string;
   try {
-    source = readConfigSource(resolvedPath, globalConfig);
+    source = readFileSync(resolvedPath, "utf-8");
   } catch (error) {
     const code =
       error instanceof Error && "code" in error && typeof error.code === "string"
@@ -474,7 +479,7 @@ function loadOverrideConfig(
 
   let overrideConfig: Partial<SandboxConfig>;
   try {
-    overrideConfig = parseSandboxConfig(source);
+    overrideConfig = JSON.parse(source);
   } catch (error) {
     throw new SandboxConfigLoadError(
       "parse-error",
@@ -492,24 +497,22 @@ function loadOverrideConfig(
 export function loadConfig(
   cwd: string,
   overrideConfigPath?: string,
-  options: { projectTrusted?: boolean; globalConfig?: Partial<SandboxConfig> } = {},
+  options: { projectTrusted?: boolean } = {},
 ): LoadedSandboxConfig {
   if (overrideConfigPath) {
-    return loadOverrideConfig(cwd, overrideConfigPath, options.globalConfig);
+    return loadOverrideConfig(cwd, overrideConfigPath);
   }
 
   const projectConfigPath = join(cwd, CONFIG_DIR_NAME, "sandbox.json");
   const globalConfigPath = join(getAgentDir(), "sandbox.json");
 
-  let globalConfig: Partial<SandboxConfig> = options.globalConfig ?? {};
+  let globalConfig: Partial<SandboxConfig> = {};
   let projectConfig: Partial<SandboxConfig> = {};
   const paths: SandboxConfigPath[] = [];
 
-  if (options.globalConfig !== undefined) {
-    paths.push({ label: "Global", path: globalConfigPath, status: "loaded" });
-  } else if (existsSync(globalConfigPath)) {
+  if (existsSync(globalConfigPath)) {
     try {
-      globalConfig = parseSandboxConfig(readFileSync(globalConfigPath, "utf-8"));
+      globalConfig = JSON.parse(readFileSync(globalConfigPath, "utf-8"));
       paths.push({ label: "Global", path: globalConfigPath, status: "loaded" });
     } catch (e) {
       paths.push({ label: "Global", path: globalConfigPath, status: "parse-error" });
@@ -522,9 +525,7 @@ export function loadConfig(
       paths.push({ label: "Project", path: projectConfigPath, status: "skipped-untrusted" });
     } else {
       try {
-        projectConfig = parseSandboxConfig(
-          readConfigSource(projectConfigPath, options.globalConfig),
-        );
+        projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
         paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
       } catch (e) {
         paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
@@ -541,29 +542,6 @@ export function loadConfig(
   };
 }
 
-// A global publication also changes symlink aliases, but not distinct hard links after atomic rename.
-function readConfigSource(path: string, globalConfig?: Partial<SandboxConfig>): string {
-  if (globalConfig !== undefined) {
-    const globalPath = join(getAgentDir(), "sandbox.json");
-    let sameTarget = resolve(path) === resolve(globalPath);
-    if (!sameTarget) {
-      try {
-        sameTarget = realpathSync(path) === realpathSync(globalPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-    }
-    if (sameTarget) return JSON.stringify(globalConfig);
-  }
-  return readFileSync(path, "utf-8");
-}
-
-function parseSandboxConfig(source: string): Partial<SandboxConfig> {
-  const config: unknown = JSON.parse(source);
-  if (!isPlainObject(config)) throw new Error("Sandbox config must be a JSON object.");
-  return config as Partial<SandboxConfig>;
-}
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -572,11 +550,8 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   const result: SandboxConfig = { ...base };
 
   if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
-  if (overrides.debug !== undefined) result.debug = overrides.debug;
-  if (overrides.required !== undefined) result.required = overrides.required;
-  if (isPlainObject(overrides.commands)) {
-    result.commands = { ...base.commands, ...overrides.commands };
-  }
+  if (overrides.classifier !== undefined)
+    result.classifier = normalizeClassifier(overrides.classifier);
   if (overrides.mode !== undefined) {
     result.mode = normalizePromptMode(overrides.mode);
   }
@@ -641,11 +616,7 @@ function containsControlCharacter(value: string): boolean {
   return false;
 }
 
-export function hasPathConfigReference(value: string): boolean {
-  return value.search(ENV_PATH_REFERENCE_PATTERN) !== -1;
-}
-
-export function expandPathConfigEntry(value: string, field: string): string | null {
+export function resolveSandboxPath(value: string, field: string, cwd: string): string | null {
   const source = value.trim();
   if (!source) return null;
 
@@ -680,24 +651,29 @@ export function expandPathConfigEntry(value: string, field: string): string | nu
     return null;
   }
 
-  return expanded;
+  return expandPath(expanded, cwd);
 }
 
-function expandPathConfigList(values: string[] | undefined, field: string): string[] | undefined {
+function expandPathConfigList(
+  values: string[] | undefined,
+  field: string,
+  cwd: string,
+): string[] | undefined {
   if (!values) return undefined;
 
   return values
-    .map((value) => expandPathConfigEntry(value, field))
+    .map((value) => resolveSandboxPath(value, field, cwd))
     .filter((value): value is string => value !== null);
 }
 
 function expandMitmProxyPathConfig(
   mitmProxy: SandboxRuntimeConfig["network"]["mitmProxy"],
+  cwd: string,
 ): SandboxRuntimeConfig["network"]["mitmProxy"] {
   if (!mitmProxy) return undefined;
   if (!isPlainObject(mitmProxy) || typeof mitmProxy.socketPath !== "string") return mitmProxy;
 
-  const socketPath = expandPathConfigEntry(mitmProxy.socketPath, "network.mitmProxy.socketPath");
+  const socketPath = resolveSandboxPath(mitmProxy.socketPath, "network.mitmProxy.socketPath", cwd);
   if (!socketPath) {
     console.error("Warning: Disabling network.mitmProxy because its socketPath did not expand.");
     return undefined;
@@ -708,36 +684,41 @@ function expandMitmProxyPathConfig(
 
 function expandNetworkPathConfig(
   network: SandboxRuntimeConfig["network"],
+  cwd: string,
 ): SandboxRuntimeConfig["network"] {
   return {
     ...network,
-    allowUnixSockets: expandPathConfigList(network.allowUnixSockets, "network.allowUnixSockets"),
-    mitmProxy: expandMitmProxyPathConfig(network.mitmProxy),
+    allowUnixSockets: expandPathConfigList(
+      network.allowUnixSockets,
+      "network.allowUnixSockets",
+      cwd,
+    ),
+    mitmProxy: expandMitmProxyPathConfig(network.mitmProxy, cwd),
   };
 }
 
 function expandFilesystemPathConfig(
-  filesystem: SandboxRuntimeConfig["filesystem"],
-): SandboxRuntimeConfig["filesystem"] {
+  filesystem: SandboxPolicy["filesystem"],
+  cwd: string,
+): SandboxPolicy["filesystem"] {
   return {
     ...filesystem,
-    denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead") ?? [],
-    allowRead: expandPathConfigList(filesystem.allowRead, "filesystem.allowRead"),
-    allowWrite: expandPathConfigList(filesystem.allowWrite, "filesystem.allowWrite") ?? [],
-    denyWrite: expandPathConfigList(filesystem.denyWrite, "filesystem.denyWrite") ?? [],
+    denyRead: expandPathConfigList(filesystem.denyRead, "filesystem.denyRead", cwd) ?? [],
+    allowRead: expandPathConfigList(filesystem.allowRead, "filesystem.allowRead", cwd),
+    allowWrite: expandPathConfigList(filesystem.allowWrite, "filesystem.allowWrite", cwd) ?? [],
+    denyWrite: expandPathConfigList(filesystem.denyWrite, "filesystem.denyWrite", cwd) ?? [],
   };
 }
 
-export function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
+export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxPolicy {
   const { allowGitCommonDir: _allowGitCommonDir, allowTempDirs, ...filesystem } = config.filesystem;
-  const { jvmProxy: _jvmProxy, ...network } = config.network;
-  const expandedNetwork = expandNetworkPathConfig(network);
-  const expandedFilesystem = expandFilesystemPathConfig(filesystem);
+  const expandedNetwork = expandNetworkPathConfig(config.network, cwd);
+  const expandedFilesystem = expandFilesystemPathConfig(filesystem, cwd);
   const allowWrite = allowTempDirs
     ? [...expandedFilesystem.allowWrite, ...getTemporaryWritePaths()]
     : expandedFilesystem.allowWrite;
 
-  return {
+  const runtimeConfig: SandboxPolicy = {
     network: {
       ...expandedNetwork,
       allowUnixSockets: deduplicateOptionalStrings(expandedNetwork.allowUnixSockets),
@@ -753,10 +734,138 @@ export function toRuntimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
   };
+
+  SandboxRuntimeConfigSchema.parse(runtimeConfig);
+  return runtimeConfig;
 }
 
-export function cloneRuntimeConfig(config: SandboxRuntimeConfig): SandboxRuntimeConfig {
+export function cloneRuntimeConfig(config: SandboxPolicy): SandboxPolicy {
   return structuredClone(config);
+}
+
+export function getFilesystemListValues(config: SandboxPolicy, list: FilesystemList): string[] {
+  if (list === "deny-read") return config.filesystem.denyRead;
+  if (list === "allow-write") return config.filesystem.allowWrite;
+  return config.filesystem.denyWrite;
+}
+
+export function inferSandboxRuleMatch(
+  path: string,
+  rules: string[],
+  list: FilesystemRuleList,
+  cwd?: string,
+): string | null {
+  const normalizedPath = normalizeSandboxPath(path, cwd);
+  for (const rule of rules) {
+    if (matchesSandboxRule(normalizedPath, rule, list, cwd)) return rule;
+  }
+
+  return null;
+}
+
+function matchesSandboxRule(
+  path: string,
+  rule: string,
+  list: FilesystemRuleList,
+  cwd?: string,
+): boolean {
+  const spelling = expandPath(rule, cwd);
+  const stripped = removeTrailingGlobSuffix(spelling);
+  const kind = list === "allowRead" || list === "allowWrite" ? "allow" : "deny";
+  if (!containsGlobChars(stripped)) {
+    return isAtOrUnder(path, normalizeSandboxPath(stripped));
+  }
+
+  if (process.platform === "linux") {
+    if (list === "allowWrite" || list === "denyWrite") {
+      // Linux drops write patterns unless they also name an actual path.
+      return literalReadings(stripped, kind).some(
+        (reading) => !reading.glob && isAtOrUnder(path, reading.path),
+      );
+    }
+
+    if (matchesLinuxReadGlob(path, normalizePathForSandbox(spelling))) return true;
+    return literalReadings(spelling, kind).some((reading) =>
+      reading.glob
+        ? matchesLinuxReadGlob(path, reading.path, reading.anchor)
+        : isAtOrUnder(path, reading.path),
+    );
+  }
+
+  const compile = kind === "deny" ? denyGlobRegex : globToRegex;
+  if (new RegExp(compile(normalizePathForSandbox(stripped))).test(path)) return true;
+
+  return literalReadings(stripped, kind).some((reading) => {
+    if (!reading.glob) return isAtOrUnder(path, reading.path);
+    // Only the tail is pattern. The anchor may itself contain glob characters.
+    return (
+      path.startsWith(`${reading.anchor}/`) &&
+      new RegExp(compile(reading.path.slice(reading.anchor.length))).test(
+        path.slice(reading.anchor.length),
+      )
+    );
+  });
+}
+
+function matchesLinuxReadGlob(path: string, pattern: string, anchor?: string): boolean {
+  const tail = anchor === undefined ? pattern : pattern.slice(anchor.length);
+  // Parent references in a glob are not names the backend's directory walk lists.
+  if (/(^|\/)\.\.(\/|$)/.test(tail)) return false;
+  const patternBase = globPatternBaseDir(tail);
+  const base =
+    anchor === undefined ? patternBase : anchor + (patternBase === "/" ? "" : patternBase);
+  if (!base || base === "/" || !isAtOrUnder(path, base)) return false;
+
+  const regex = new RegExp(globToRegex(tail), "s");
+  const candidates = [path, ...properAncestors(path)].filter((candidate) =>
+    isAtOrUnder(candidate, base),
+  );
+  // Probe only this path's depth, never enumerate a tree. An existing, unlinked
+  // matching ancestor covers its subtree. Abstain on symlink or inaccessible paths.
+  for (const candidate of candidates.reverse()) {
+    try {
+      const entry = lstatSync(candidate);
+      if (entry.isSymbolicLink()) return false;
+      if (regex.test(anchor === undefined ? candidate : candidate.slice(anchor.length)))
+        return true;
+      if (!entry.isDirectory()) return false;
+      accessSync(candidate, constants.R_OK | constants.X_OK);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function normalizeSandboxPath(value: string, cwd?: string): string {
+  return normalizePathForSandbox(expandPath(value, cwd), { literal: true });
+}
+
+function matchesSandboxRuleExactly(path: string, rule: string, cwd?: string): boolean {
+  if (containsGlobChars(rule)) return false;
+  return normalizeSandboxPath(path, cwd) === normalizeSandboxPath(rule, cwd);
+}
+
+export function inferExactSandboxRuleMatch(
+  path: string,
+  rules: string[],
+  cwd?: string,
+): string | null {
+  for (const rule of rules) {
+    if (matchesSandboxRuleExactly(path, rule, cwd)) return rule;
+  }
+
+  return null;
+}
+
+export function isSandboxWritablePath(
+  runtimeConfig: SandboxPolicy,
+  path: string,
+  cwd?: string,
+): boolean {
+  if (!inferSandboxRuleMatch(path, runtimeConfig.filesystem.allowWrite, "allowWrite", cwd))
+    return false;
+  return inferSandboxRuleMatch(path, runtimeConfig.filesystem.denyWrite, "denyWrite", cwd) === null;
 }
 
 export function escapeSlashCommandArg(value: string): string {

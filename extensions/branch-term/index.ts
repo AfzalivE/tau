@@ -157,7 +157,7 @@ function showCommandMessage(
   command: string,
 ): void {
   const copiedToClipboard = copyToClipboard(command);
-  if (!ctx.hasUI) {
+  if (ctx.mode === "print") {
     console.log(formatCommandMessageIntro(intro, copiedToClipboard));
     console.log(command);
     return;
@@ -269,9 +269,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       const leafId = ctx.sessionManager.getLeafId();
-      const hasAssistantReply = ctx.sessionManager
+      const hasPersistedMessage = ctx.sessionManager
         .getEntries()
-        .some((entry) => entry.type === "message" && entry.message.role === "assistant");
+        .some(
+          (entry) =>
+            entry.type === "message" &&
+            (entry.message.role === "user" || entry.message.role === "assistant"),
+        );
 
       let forkFile: string;
       if (leafId && hasValidSessionFile(sessionFile)) {
@@ -285,7 +289,7 @@ export default function (pi: ExtensionAPI) {
         }
         forkFile = persistFork(forkManager);
       } else {
-        if (leafId && hasAssistantReply) {
+        if (leafId && hasPersistedMessage) {
           throw new Error(`Current session file is missing or invalid: ${sessionFile}`);
         }
 
@@ -293,7 +297,7 @@ export default function (pi: ExtensionAPI) {
           ? "Current session has no persisted history yet. Opening a fresh session."
           : "Selected conversation is empty. Opening a fresh session.";
         if (ctx.hasUI) ctx.ui.notify(message, "warning");
-        else console.log(message);
+        else console.error(message);
 
         forkFile = persistFork(
           SessionManager.create(ctx.cwd, ctx.sessionManager.getSessionDir(), {

@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
 import { readFileSync, watch, writeFileSync } from "node:fs";
 
-const [, , directory, keyFile] = process.argv;
+const [, , directory, keyFile, launcherFile] = process.argv;
 const denied = (error) => error?.code === "EACCES" || error?.code === "EPERM";
+writeFileSync("nursery log.txt", "eight eggs\n");
+assert.throws(
+  () => writeFileSync(launcherFile, "The kraken left port.\n"),
+  denied,
+  "session write access must not include the launcher's directory",
+);
+console.log("BOUND");
 assert.throws(() => readFileSync(keyFile), denied, "the synthetic SSH key must remain unreadable");
 assert.throws(
   () => writeFileSync(".env", "INK=stolen\n"),
   denied,
   "watcher access must not open protected configuration for writing",
+);
+assert.throws(
+  () => writeFileSync(".env.tide", "TIDE=stolen\n"),
+  denied,
+  "relative deny-write globs must stay bound to the session",
 );
 console.log("PROTECTED");
 

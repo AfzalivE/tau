@@ -21,12 +21,12 @@ import {
   createAgentSession,
   createAgentSessionRuntime,
   initTheme,
-  type KeybindingsManager,
   SessionManager,
+  type AgentSessionEvent,
   type CustomEntry,
+  type ExtensionCommandContext,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { TuiMainScreen, type Terminal } from "@earendil-works/pi-tui";
 import worktree from "../extensions/worktree.js";
 import {
   assistantMessage,
@@ -155,6 +155,134 @@ describe("worktree", { concurrency: false }, () => {
     assert.ok(ui.render(restore).includes(restore.data!.command));
   });
 
+  for (const mode of ["json", "rpc", "print"] as const) {
+    test(`exposes manual worktree commands and list results in ${mode} without changing model context or Git bytes`, async () => {
+      const output: string[] = [];
+      const diagnostics: string[] = [];
+      mock.method(console, "log", (...parts: unknown[]) =>
+        output.push(parts.map(String).join(" ")),
+      );
+      mock.method(console, "error", (...parts: unknown[]) =>
+        diagnostics.push(parts.map(String).join(" ")),
+      );
+      const detached = path.join(directory!, "detached dock");
+      git(repo, "worktree", "add", "--detach", detached, "HEAD");
+      git(repo, "worktree", "lock", "--reason", "Otter asleep inside", detached);
+      const untracked = Buffer.from([0, 255, 10, 13, 42]);
+      await writeFile(path.join(detached, "only-here.bin"), untracked);
+      const indexPath = git(
+        repo,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+      ).trim();
+      const index = await readFile(indexPath);
+      const sourceFile = history.getSessionFile()!;
+      const before = await readFile(sourceFile);
+      const context = structuredClone(history.buildSessionContext());
+      ui = await openWorktree(directory!, history, failures, {}, mode);
+      const events: AgentSessionEvent[] = [];
+      const unsubscribe = ui.session.subscribe((event) => events.push(structuredClone(event)));
+
+      try {
+        await ui.prompt("/worktree new lifeboat");
+        await ui.prompt("/worktree list");
+      } finally {
+        unsubscribe();
+      }
+
+      const target = `${repo}-lifeboat`;
+      const head = git(repo, "rev-parse", "HEAD").trim();
+      assert.equal(git(target, "rev-parse", "HEAD").trim(), head);
+      assert.equal(git(target, "branch", "--show-current").trim(), "lifeboat");
+      assert.deepEqual(await readFile(indexPath), index);
+      assert.deepEqual(await readFile(path.join(detached, "only-here.bin")), untracked);
+      assert.deepEqual(history.buildSessionContext(), context);
+      assert.deepEqual(ui.session.messages, context.messages);
+      assert.equal(ui.session.pendingMessageCount, 0);
+      assert.equal(ui.session.sessionFile, sourceFile);
+      assert.equal(ui.cwd, repo);
+      assert.deepEqual(diagnostics, []);
+      assert.equal(external!.clipboard.length, 1);
+      const command = external!.clipboard[0];
+      assert.deepEqual(interpretCommand(command, directory!), {
+        cwd: target,
+        program: "pi",
+        args: [],
+      });
+
+      if (mode === "print") {
+        assert.deepEqual(events, []);
+        assert.equal(output.length, 3);
+        assert.equal(output[1], command);
+        assert.match(output[2], /detached@\w+ \*.*locked:Otter asleep inside/);
+        assert.ok(output[2].includes(detached));
+        assert.deepEqual(ui.notices, []);
+        assert.deepEqual(await readFile(sourceFile), before);
+      } else {
+        assert.deepEqual(output, []);
+        const entry = commandEntry(SessionManager.open(sourceFile), "worktree-open-command");
+        assert.equal(entry.data!.command, command);
+        assert.equal(entry.data!.copiedToClipboard, true);
+        assert.deepEqual(events[0], { type: "entry_appended", entry });
+        assert.deepEqual((await readFile(sourceFile)).subarray(0, before.length), before);
+        if (mode === "json") {
+          assert.equal(events.length, 2);
+          const list = events[1];
+          assert.equal(list.type, "entry_appended");
+          assert.equal(list.entry.type, "custom");
+          assert.equal(list.entry.customType, "worktree-list");
+          assert.deepEqual(list.entry.data, {
+            items: [
+              {
+                wt: { path: repo, head, branchRef: "refs/heads/main" },
+                branch: "main",
+                isCurrent: true,
+                isMain: true,
+                status: "clean",
+                pathState: "ok",
+                tracked: false,
+              },
+              {
+                wt: {
+                  path: detached,
+                  head,
+                  detached: true,
+                  locked: true,
+                  lockedReason: "Otter asleep inside",
+                },
+                branch: `detached@${head.slice(0, 7)}`,
+                isCurrent: false,
+                isMain: false,
+                status: "dirty",
+                pathState: "ok",
+                tracked: false,
+              },
+              {
+                wt: { path: target, head, branchRef: "refs/heads/lifeboat" },
+                branch: "lifeboat",
+                isCurrent: false,
+                isMain: false,
+                status: "clean",
+                pathState: "ok",
+                tracked: false,
+              },
+            ],
+          });
+          assert.deepEqual(SessionManager.open(sourceFile).getEntries().at(-1), list.entry);
+          assert.deepEqual(ui.notices, []);
+        } else {
+          assert.equal(events.length, 1);
+          const list = ui.notices.at(-1);
+          assert.equal(list?.type, "info");
+          assert.match(list.message, /detached@\w+ \*.*locked:Otter asleep inside/);
+          assert.ok(list.message.includes(detached));
+        }
+      }
+    });
+  }
+
   test("copies opted-in cache bytes and symlinks without copying an explicitly excluded private subtree", async () => {
     await writeFile(path.join(repo, ".gitignore"), "cache/\n");
     await writeFile(
@@ -227,20 +355,76 @@ describe("worktree", { concurrency: false }, () => {
     );
   });
 
+  test("switches a persisted user-only session with its exact history and resumes it", async () => {
+    const target = `${repo}-user-only`;
+    git(repo, "worktree", "add", "-b", "user-only", target);
+    history = SessionManager.create(repo, path.join(directory!, "session vault"));
+    history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
+    ui = await openWorktree(directory!, history, failures);
+    const entries = structuredClone(history.getEntries());
+
+    await ui.prompt("/worktree switch user-only");
+
+    assert.equal(ui.cwd, target);
+    const resumed = SessionManager.open(ui.session.sessionFile!);
+    assert.deepEqual(resumed.getEntries().slice(0, entries.length), entries);
+    assert.equal(
+      SessionManager.continueRecent(target, history.getSessionDir()).getSessionFile(),
+      resumed.getSessionFile(),
+    );
+  });
+
+  test("does not treat missing user-only history as a new empty session", async () => {
+    const target = `${repo}-missing-user-history`;
+    git(repo, "worktree", "add", "-b", "missing-user-history", target);
+    history = SessionManager.create(repo, path.join(directory!, "session vault"));
+    history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
+    const sourceFile = history.getSessionFile()!;
+    await rm(sourceFile);
+    ui = await openWorktree(directory!, history, failures);
+
+    await ui.prompt(
+      "/worktree switch missing-user-history",
+      `Current session file is missing or invalid: ${sourceFile}`,
+    );
+    assert.equal(ui.cwd, repo, "the running session must not switch to a fresh fork");
+    assert.deepEqual(await SessionManager.list(target), [], "no replacement session is launched");
+  });
+
+  test("does not discard persisted history outside the selected empty branch when its file is missing", async () => {
+    const target = `${repo}-empty-selected-branch`;
+    git(repo, "worktree", "add", "-b", "empty-selected-branch", target);
+    history = conversation(repo, path.join(directory!, "session vault"));
+    history.resetLeaf();
+    assert.ok(
+      history.getEntries().some((entry) => entry.type === "message"),
+      "the source tree still contains persisted messages",
+    );
+    ui = await openWorktree(directory!, history, failures);
+    const sourceFile = history.getSessionFile()!;
+    await rm(sourceFile);
+
+    await ui.prompt(
+      "/worktree switch empty-selected-branch",
+      `Current session file is missing or invalid: ${sourceFile}`,
+    );
+
+    assert.equal(ui.cwd, repo, "the missing source must not be replaced with a fresh session");
+    assert.deepEqual(await SessionManager.list(target), [], "no replacement session is launched");
+  });
+
   for (const storage of ["default", "custom vault"] as const) {
     for (const leaf of ["selected", "live", "empty"] as const) {
       test(`switch preserves the ${leaf} conversation tree, respects cancellation, and resumes from ${storage} storage`, async () => {
         const target = `${repo}-lifeboat`;
         git(repo, "worktree", "add", "-b", "lifeboat", target);
-        history = conversation(
-          repo,
-          storage === "default" ? undefined : path.join(directory!, "custom vault"),
-        );
+        const sessionDir =
+          storage === "default" ? undefined : path.join(directory!, "custom vault");
+        history =
+          leaf === "empty"
+            ? SessionManager.create(repo, sessionDir)
+            : conversation(repo, sessionDir);
         if (leaf === "empty") {
-          history = SessionManager.create(
-            repo,
-            storage === "default" ? undefined : history.getSessionDir(),
-          );
           history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
           history.appendMessage(assistantMessage("Not until the otter arrives."));
         }
@@ -401,69 +585,52 @@ describe("worktree", { concurrency: false }, () => {
     });
   }
 
-  for (const action of ["switch", "archive"] as const) {
-    test(`the list picker targets the selected detached worktree for ${action}, not another checkout at the same commit`, async () => {
+  for (const action of ["switch", "archive", "dismiss worktree", "dismiss action"] as const) {
+    test(`the list picker preserves exact detached worktree identity for ${action}`, async () => {
       const first = path.join(directory!, "a-detached");
       const second = path.join(directory!, "b-detached");
       git(repo, "worktree", "add", "--detach", first, "HEAD");
       git(repo, "worktree", "add", "--detach", second, "HEAD");
       await writeFile(path.join(first, "only-here.txt"), "The otter chose this dock.\n");
+      let selections = 0;
       let archivePrompted = false;
       ui = await openWorktree(directory!, history, failures, {
         select: async (title, options) => {
+          selections++;
+          if (selections === 1) {
+            const labels = options.map(stripVTControlCharacters);
+            assert.ok(labels.some((label) => label.endsWith(second)));
+            const selected = labels.findIndex((label) => label.endsWith(first));
+            assert.notEqual(selected, -1);
+            assert.match(labels[selected], /detached@\w+ \*/);
+            assert.equal(new Set(labels).size, labels.length);
+            return action === "dismiss worktree" ? undefined : options[selected];
+          }
+          if (selections === 2) {
+            assert.ok(title.includes(first), "actions must describe the selected path");
+            assert.deepEqual(options, ["Switch", "Archive"]);
+            if (action === "dismiss action") return undefined;
+            return choose(options, action === "switch" ? /^Switch$/ : /^Archive$/);
+          }
           assert.equal(action, "archive");
           assert.ok(title.includes(first), "archive confirmation must describe the selected path");
           assert.match(title, /uncommitted changes/);
           archivePrompted = true;
           return choose(options, /^Cancel$/);
         },
-        custom: async (factory) => {
-          let done = false;
-          let result: Parameters<Parameters<typeof factory>[3]>[0] | undefined;
-          const screen = new TuiMainScreen(terminalBoundary());
-          let component: Awaited<ReturnType<typeof factory>> | undefined;
-          try {
-            component = await factory(
-              screen,
-              ui!.session.extensionRunner.getUIContext().theme,
-              // Pi exports this app manager only as a type. The picker uses real SelectList keybindings,
-              // not this injected argument; reject access rather than simulate an application manager.
-              new Proxy({} as KeybindingsManager, {
-                get(_target, key) {
-                  throw new Error(`Unexpected application keybinding access: ${String(key)}`);
-                },
-              }),
-              (value) => {
-                done = true;
-                result = value;
-              },
-            );
-            const rendered = component.render(1000).map(stripVTControlCharacters).join("\n");
-            assert.ok(rendered.includes(first) && rendered.includes(second));
-            assert.match(rendered, /detached@\w+ \*/);
-            assert.ok(component.handleInput);
-            component.handleInput("\x1b[B"); // Main is first; select the first detached checkout.
-            component.handleInput(action === "switch" ? "\r" : "a");
-            assert.ok(done, "the requested action completes the actual picker");
-            return result!;
-          } finally {
-            try {
-              component?.dispose?.();
-            } finally {
-              screen.stop({ preserveScreen: true });
-            }
-          }
-        },
       });
+      const sourceFile = ui.session.sessionFile;
 
       await ui.prompt("/worktree list");
 
       assert.equal(
         ui.cwd,
         action === "switch" ? first : repo,
-        "display labels are not unique worktree identities",
+        "detached commit labels repeat, so selection must retain the option's exact path",
       );
       assert.equal(archivePrompted, action === "archive");
+      assert.equal(selections, action === "dismiss worktree" ? 1 : action === "archive" ? 3 : 2);
+      if (action !== "switch") assert.equal(ui.session.sessionFile, sourceFile);
       assert.equal(
         await readFile(path.join(first, "only-here.txt"), "utf8"),
         "The otter chose this dock.\n",
@@ -539,6 +706,7 @@ async function openWorktree(
   history: SessionManager,
   failures: unknown[],
   interaction: Partial<ExtensionUIContext> = {},
+  mode: ExtensionCommandContext["mode"] = "tui",
 ) {
   const controls = { cancelSwitch: false };
   const notices: { message: string; type?: string }[] = [];
@@ -591,21 +759,24 @@ async function openWorktree(
     const bind = async () => {
       const session = runtime.session;
       await session.bindExtensions({
-        mode: "tui",
-        uiContext: uiBoundary(
-          {
-            theme: session.extensionRunner.getUIContext().theme,
-            setStatus: (key, value) => {
-              if (value === undefined) statuses.delete(key);
-              else statuses.set(key, value);
-            },
-            notify: (message, type) => {
-              notices.push({ message, type });
-            },
-            ...interaction,
-          },
-          failures,
-        ),
+        mode,
+        uiContext:
+          mode === "tui" || mode === "rpc"
+            ? uiBoundary(
+                {
+                  theme: session.extensionRunner.getUIContext().theme,
+                  setStatus: (key, value) => {
+                    if (value === undefined) statuses.delete(key);
+                    else statuses.set(key, value);
+                  },
+                  notify: (message, type) => {
+                    notices.push({ message, type });
+                  },
+                  ...interaction,
+                },
+                failures,
+              )
+            : undefined,
         commandContextActions: {
           waitForIdle: () => session.waitForIdle(),
           newSession: (options) => runtime.newSession(options),
@@ -620,6 +791,7 @@ async function openWorktree(
     runtime.setRebindSession(bind);
     await bind();
     return {
+      notices,
       get cancelSwitch() {
         return controls.cancelSwitch;
       },
@@ -632,13 +804,15 @@ async function openWorktree(
       get cwd() {
         return runtime.cwd;
       },
-      async prompt(text: string) {
+      async prompt(text: string, expectedError?: string) {
         await runtime.session.prompt(text, { source: "interactive" });
-        assert.deepEqual(
-          notices.filter((notice) => notice.type === "error"),
-          [],
-          "command errors must be visible failures",
-        );
+        const errors = notices.filter((notice) => notice.type === "error");
+        if (expectedError) {
+          assert.equal(errors.length, 1, "expected command error is surfaced to the user");
+          assert.ok(errors[0]!.message.includes(expectedError));
+        } else {
+          assert.deepEqual(errors, [], "command errors must be visible failures");
+        }
         assert.equal(statuses.size, 0, "completed commands release their status");
       },
       render(entry: CustomEntry) {
@@ -766,14 +940,4 @@ function interpretCommand(command: string, cwd: string) {
   const words = result.stdout.split("\0");
   assert.equal(words.pop(), "");
   return { cwd: words[0], program: words[1], args: words.slice(2) };
-}
-
-/** Supply dimensions and inert shutdown for real layout; screen.stop owns pending render cancellation. No physical terminal starts. */
-function terminalBoundary() {
-  return new Proxy({ columns: 1000, rows: 30, showCursor() {}, stop() {} } as Terminal, {
-    get(target, key) {
-      if (key in target) return Reflect.get(target, key);
-      throw new Error(`Unexpected terminal operation: ${String(key)}`);
-    },
-  });
 }

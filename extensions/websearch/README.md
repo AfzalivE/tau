@@ -8,7 +8,14 @@ Optionally create `websearch.json` in your Pi agent directory (normally `~/.pi/a
 
 ```json
 {
-  "routes": ["pi:openai-codex", "pi:anthropic", "pi:gemini", "firefox:gemini", "chromium:gemini"],
+  "routes": [
+    "pi:openai-codex",
+    "pi:openai",
+    "pi:anthropic",
+    "pi:gemini",
+    "firefox:gemini",
+    "chromium:gemini"
+  ],
   "profiles": {
     "firefox": "default-release",
     "chromium": "Default"

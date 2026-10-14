@@ -2,6 +2,7 @@
 import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundleSandboxRuntime } from "./sandbox-runtime.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packagesDir = path.join(rootDir, "packages");
@@ -38,8 +39,11 @@ async function buildPackage(packageName) {
     await copyResources(pi[resourceType] ?? [], outputDir);
   }
 
+  await bundleSandboxRuntime(outputDir);
+
   const generatedPackageJson = {
     ...packageJson,
+    bundleDependencies: ["@anthropic-ai/sandbox-runtime"],
     files: [
       ...resourceTypes.filter((resourceType) => pi[resourceType]?.length),
       "README.md",

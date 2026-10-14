@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Type } from "typebox";
 import childProcess, { type ChildProcess, type SpawnOptions } from "node:child_process";
 import { once } from "node:events";
 import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -14,17 +15,20 @@ import {
   type AssistantMessage,
   type ImageContent,
   type JsonObject,
+  type Model,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  defineTool,
   CustomEditor,
   getSelectListTheme,
-  getPackageDir,
   initTheme,
   SessionManager,
+  type ExtensionFactory,
   type ExtensionUIContext,
   type KeybindingsManager as AppKeybindingsManager,
   type TerminalInputHandler,
+  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
   getKeybindings,
@@ -41,8 +45,9 @@ import {
 import review from "../../extensions/review/index.js";
 import subagent from "../../extensions/subagent/index.js";
 import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
-import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
-import { providerPath, reviewModel } from "./provider.js";
+import { assistantMessage, createPiResources, getPiCliPath, uiBoundary } from "../helpers/pi.js";
+import { alternateReviewModel, providerPath, reviewModel } from "./provider.js";
+import { startLlamaRouter } from "./llama.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
@@ -65,6 +70,8 @@ const image: ImageContent = {
 describe("review", { concurrency: false }, () => {
   let directory: string;
   let cwd: string;
+  let agentDir: string;
+  let previousAgentDir: string | undefined;
   let app: Awaited<ReturnType<typeof openReview>> | undefined;
   let failures: unknown[];
   let children: { process: ChildProcess; closed: Promise<unknown>; hasClosed: boolean }[];
@@ -72,14 +79,22 @@ describe("review", { concurrency: false }, () => {
   let respond: (request: ChildGeneration) => AssistantMessage | Promise<AssistantMessage>;
   let responderWork: Promise<void>[];
   let shellCommand: string | undefined;
+  let llama: Awaited<ReturnType<typeof startLlamaRouter>> | undefined;
+  let isolation: { args: string[]; tools: string[]; commands: string[]; activeTools: string[] }[];
 
   beforeEach(async () => {
+    previousAgentDir = process.env.PI_CODING_AGENT_DIR;
     failures = [];
     children = [];
     generations = [];
     responderWork = [];
     shellCommand = undefined;
+    llama = undefined;
+    isolation = [];
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-review-workflows-"));
+    agentDir = path.join(directory, "agent");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    await mkdir(agentDir, { recursive: true });
     cwd = path.join(directory, "work");
     await mkdir(path.join(cwd, ".pi"), { recursive: true });
     await writeFile(path.join(cwd, "café.ts"), "export const acceptsExpired = true;\n");
@@ -118,29 +133,47 @@ describe("review", { concurrency: false }, () => {
     ] as const) {
       mock.method(childProcess, method, reject);
     }
-    const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "0.87.1");
-    const cli = path.join(getPackageDir(), manifest.bin.pi);
-    // Resolve `pi` to the pinned executable and add only an offline generation provider.
+    const cli = await getPiCliPath();
+    // Resolve `pi` to the pinned executable and add only the offline provider/network guard.
     // Git and the child's JSON protocol, native tools and durable sessions remain real.
     mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {
       assert.equal(options.cwd, cwd, "repository work belongs to the owning session cwd");
-      if (
-        command === "git" &&
-        [
-          "rev-parse",
-          "branch",
-          "diff",
-          "ls-files",
-          "hash-object",
-          "status",
-          "symbolic-ref",
-          "merge-base",
-        ].includes(args[0])
-      ) {
-        return spawn(command, args, options);
+      if (command === "git") {
+        let subcommand = args[0];
+        if (subcommand === "--no-optional-locks") {
+          assert.deepEqual(args.slice(0, 3), [
+            "--no-optional-locks",
+            "-c",
+            "diff.autoRefreshIndex=false",
+          ]);
+          subcommand = args[3];
+        }
+        if (
+          [
+            "rev-parse",
+            "branch",
+            "diff",
+            "ls-files",
+            "hash-object",
+            "status",
+            "symbolic-ref",
+            "merge-base",
+          ].includes(subcommand)
+        ) {
+          return spawn(command, args, options);
+        }
       }
       if (command !== "pi") return reject(command);
+      if (!args.includes("rpc")) {
+        for (const flag of [
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+        ])
+          assert.ok(args.includes(flag));
+        assert.equal(args.includes("builtin:llama.cpp"), Boolean(llama));
+      }
       assert.ok(Array.isArray(options.stdio));
       const rpc = args[0] === "--mode" && args[1] === "rpc";
       const proc = spawn(
@@ -174,6 +207,7 @@ describe("review", { concurrency: false }, () => {
               ? options.env?.PI_CODING_AGENT_DIR
               : path.join(directory, "child-agent"),
             ...(shellCommand ? { TAU_REVIEW_TEST_BASH: shellCommand } : {}),
+            ...(llama ? { TAU_REVIEW_LLAMA_URL: llama.url } : {}),
           },
           stdio: [...options.stdio, "ipc"],
         },
@@ -187,29 +221,49 @@ describe("review", { concurrency: false }, () => {
         (error) => failures.push(error),
       );
       children.push(child);
-      proc.on("message", (message: Generation & { type: string; error?: string }) => {
-        if (message.type !== "generation") {
-          failures.push(message);
-          return;
-        }
-        const request = { ...message, args, process: proc };
-        generations.push(request);
-        const work = Promise.resolve()
-          .then(() => respond(request))
-          .then((reply) => {
-            if (proc.connected) proc.send(reply);
-          })
-          .catch((error) => {
-            failures.push(error);
-            if (proc.connected)
-              proc.send({
-                ...assistantMessage(""),
-                stopReason: "error",
-                errorMessage: String(error),
-              });
-          });
-        responderWork.push(work);
-      });
+      proc.on(
+        "message",
+        (
+          message: Generation & {
+            type: string;
+            error?: string;
+            tools: string[];
+            commands: string[];
+            activeTools: string[];
+          },
+        ) => {
+          if (message.type === "isolation") {
+            isolation.push({
+              args,
+              tools: message.tools,
+              commands: message.commands,
+              activeTools: message.activeTools,
+            });
+            return;
+          }
+          if (message.type !== "generation") {
+            failures.push(message);
+            return;
+          }
+          const request = { ...message, args, process: proc };
+          generations.push(request);
+          const work = Promise.resolve()
+            .then(() => respond(request))
+            .then((reply) => {
+              if (proc.connected) proc.send(reply);
+            })
+            .catch((error) => {
+              failures.push(error);
+              if (proc.connected)
+                proc.send({
+                  ...assistantMessage(""),
+                  stopReason: "error",
+                  errorMessage: String(error),
+                });
+            });
+          responderWork.push(work);
+        },
+      );
       return proc;
     });
     syncBuiltinESMExports();
@@ -232,8 +286,408 @@ describe("review", { concurrency: false }, () => {
       app = undefined;
       mock.restoreAll();
       syncBuiltinESMExports();
-      await rm(directory, { recursive: true, force: true });
+      try {
+        await llama?.dispose();
+      } finally {
+        if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+        await rm(directory, { recursive: true, force: true });
+      }
     }
+  });
+
+  test("isolates native llama.cpp focus and dedup workers while retaining the selected provider", async () => {
+    let focusCount = 0;
+    const reply = (tools: string[]): { tool?: string; payload: JsonObject } => {
+      if (tools.includes("submit_review"))
+        return {
+          tool: "submit_review",
+          payload: {
+            findings: [{ ...finding, finding: `${finding.finding} Focus ${++focusCount}.` }],
+          },
+        };
+      assert.deepEqual(tools, []);
+      return { payload: { groups: [{ ids: [1, 2], reason: "same expiry check" }] } };
+    };
+    llama = await startLlamaRouter(directory, cwd, failures, (request) =>
+      reply(request.tools?.map((tool) => tool.function.name) ?? []),
+    );
+    const model = await llama.discover();
+    const agentDir = path.join(directory, "child-agent");
+    const marker = path.join(directory, "unrelated-activation");
+    await mkdir(path.join(agentDir, "extensions"), { recursive: true });
+    await writeFile(
+      path.join(agentDir, "extensions", "unrelated.ts"),
+      `import { writeFileSync } from 'node:fs'; export default function () { writeFileSync(${JSON.stringify(marker)}, 'extension'); }`,
+    );
+    await writeFile(
+      path.join(agentDir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          unrelated: {
+            command: process.execPath,
+            args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'mcp')`],
+            exposure: "codemode",
+          },
+        },
+      }),
+    );
+    app = await openReview(directory, cwd, failures, [], undefined, undefined, undefined, model);
+    await app.run("/review commit HEAD focus=general,security");
+    assert.equal(
+      app.report().details.findings.length,
+      1,
+      "deduplication must execute, not fall back silently",
+    );
+    assert.equal(focusCount, 2);
+    assert.equal(isolation.length, 3, "two focus children and one dedup child");
+    for (const worker of isolation) {
+      if (worker.args.includes("--no-tools")) assert.deepEqual(worker.activeTools, []);
+      else assert.ok(worker.activeTools.includes("submit_review"));
+      assert.ok(!worker.activeTools.includes("submit_triage"));
+      assert.ok(!worker.tools.includes("codemode") && !worker.tools.includes("tool_search"));
+      assert.ok(!worker.commands.includes("mcp"));
+      assert.ok(!worker.activeTools.includes("subagent"));
+      assert.ok(!worker.commands.includes("review") && !worker.commands.includes("triage"));
+      assert.ok(worker.commands.includes("llama"));
+    }
+    assert.equal(
+      llama.requests.length,
+      3,
+      "submission terminates each worker without another inference",
+    );
+    assert.equal(app.mainRequests.length, 0);
+    await assert.rejects(readFile(marker), { code: "ENOENT" });
+  });
+
+  test("runs every saved model against every saved focus with normalized defaults", async () => {
+    const patterns = [`${reviewModel.provider}/${reviewModel.id}:off`, "octo*:high"];
+    const focuses = ["general", "security"];
+    await writeFile(
+      path.join(agentDir, "review.json"),
+      JSON.stringify({
+        models: [`  ${patterns[0]}  `, patterns[1], patterns[0]],
+        focuses: [" General \t", " SECURITY ", "general"],
+      }),
+    );
+    respond = ({ args, model, context }) => {
+      assertReviewPrompt(
+        contentText(context.messages.find((message) => message.role === "user")!.content),
+        "diff",
+      );
+      const thinking = model.provider === reviewModel.provider ? "off" : "high";
+      assert.equal(args[args.indexOf("--model") + 1], `${model.provider}/${model.id}:${thinking}`);
+      return submit([]);
+    };
+    app = await openReview(
+      directory,
+      cwd,
+      failures,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      reviewModel,
+      {
+        extensions: [
+          scriptedProvider(alternateReviewModel, () => {
+            throw new Error("Review must not generate in the main session");
+          }),
+        ],
+        tools: [],
+      },
+    );
+    await app.run("/review commit HEAD");
+
+    assert.deepEqual(
+      app.report().details.focusStatus.map(({ model, focus, ok }) => [model, focus, ok]),
+      patterns.flatMap((pattern) => focuses.map((focus) => [pattern, focus, true])),
+    );
+    const signature = JSON.parse(app.report().details.request.signature);
+    assert.deepEqual(signature.models, [...patterns].sort());
+    assert.deepEqual(signature.focuses, focuses);
+    assert.equal(generations.length, 4, "duplicates must not add matrix workers");
+    for (const model of [reviewModel, alternateReviewModel]) {
+      const requests = generations.filter((request) => request.model.provider === model.provider);
+      assert.equal(requests.length, 2);
+      assert.ok(requests.every((request) => request.model.id === model.id));
+      assert.equal(
+        requests.filter((request) => request.args.at(-1)!.includes("specializing in security"))
+          .length,
+        1,
+      );
+    }
+    assert.deepEqual(app.report().details.findings, []);
+    assert.equal(app.mainRequests.length, 0);
+  });
+
+  test("overrides saved settings independently, reloads live edits, and supplies omitted defaults", async () => {
+    const configPath = path.join(agentDir, "review.json");
+    const primary = `${reviewModel.provider}/${reviewModel.id}`;
+    const alternate = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+    const allFocuses = ["general", "security", "reuse", "quality", "testing", "efficiency"];
+    await writeFile(configPath, JSON.stringify({ models: [alternate], focuses: ["security"] }));
+    respond = () => submit([]);
+    app = await openReview(
+      directory,
+      cwd,
+      failures,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      reviewModel,
+      {
+        extensions: [
+          scriptedProvider(alternateReviewModel, () => {
+            throw new Error("Review must not generate in the main session");
+          }),
+        ],
+        tools: [],
+      },
+    );
+    const run = async (options: string, models: string[], focuses: string[]) => {
+      const before = generations.length;
+      await app!.run(`/review commit HEAD ${options}`);
+      const signature = JSON.parse(app!.report().details.request.signature);
+      assert.deepEqual(signature.models, [...models].sort());
+      assert.deepEqual(signature.focuses, [...focuses].sort());
+      const effectiveModels = models.length ? models : [alternate];
+      const labels = models.length ? models : [alternateReviewModel.id];
+      assert.deepEqual(
+        app!.report().details.focusStatus.map(({ model, focus, ok }) => [model, focus, ok]),
+        labels.flatMap((model) => focuses.map((focus) => [model, focus, true])),
+      );
+      assert.equal(generations.length - before, effectiveModels.length * focuses.length);
+      for (const request of generations.slice(before))
+        assert.ok(effectiveModels.includes(`${request.model.provider}/${request.model.id}`));
+      return app!.report().details.request.signature;
+    };
+    const savedSignature = await run("", [alternate], ["security"]);
+    await writeFile(
+      configPath,
+      JSON.stringify({ model: [` ${alternate} `, alternate], focus: [" Security ", "security"] }),
+    );
+    assert.equal(await run("", [alternate], ["security"]), savedSignature);
+    const modelOverride = await run(`models=${primary}`, [primary], ["security"]);
+    assert.equal(await run(`model=${primary}`, [primary], ["security"]), modelOverride);
+    const focusOverride = await run("focuses=general", [alternate], ["general"]);
+    assert.equal(await run("focus=general", [alternate], ["general"]), focusOverride);
+    await run("focuses=all", [alternate], allFocuses);
+
+    await writeFile(configPath, JSON.stringify({ models: [primary], focuses: ["testing"] }));
+    await run("", [primary], ["testing"]);
+
+    await app.session.setModel(alternateReviewModel);
+    for (const config of [undefined, {}, { models: [] }, { model: [] }]) {
+      if (config === undefined) await rm(configPath);
+      else await writeFile(configPath, JSON.stringify(config));
+      await run("", [], allFocuses);
+    }
+    await writeFile(configPath, JSON.stringify({ focuses: ["quality"] }));
+    const focusOnly = await run("", [], ["quality"]);
+    await writeFile(configPath, JSON.stringify({ focus: ["quality"] }));
+    assert.equal(await run("", [], ["quality"]), focusOnly);
+    await writeFile(configPath, JSON.stringify({ models: [primary] }));
+    const modelOnly = await run("", [primary], allFocuses);
+    await writeFile(configPath, JSON.stringify({ model: [primary] }));
+    assert.equal(await run("", [primary], allFocuses), modelOnly);
+    await writeFile(configPath, JSON.stringify({ focuses: [" Security ", " ALL ", "all"] }));
+    await run("", [], allFocuses);
+    assert.equal(app.mainRequests.length, 0);
+  });
+
+  test("reuses bare and context-only fixes but matches explicit fixes against effective defaults", async () => {
+    const configPath = path.join(agentDir, "review.json");
+    const primary = `${reviewModel.provider}/${reviewModel.id}`;
+    const alternate = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+    await writeFile(path.join(cwd, "new-ticket.txt"), "The octopus needs an auto-scoped review.\n");
+    await writeFile(configPath, JSON.stringify({ models: [alternate], focuses: ["general"] }));
+    respond = () => submit([]);
+    app = await openReview(
+      directory,
+      cwd,
+      failures,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      reviewModel,
+      {
+        extensions: [
+          scriptedProvider(alternateReviewModel, () => {
+            throw new Error("Review must not generate in the main session");
+          }),
+        ],
+        tools: [],
+      },
+    );
+    await app.run("/review");
+    const saved = app.report();
+    await writeFile(configPath, JSON.stringify({ models: [primary], focuses: ["security"] }));
+    for (const command of ["/fix", '/fix context="Keep the café open 🐙"']) {
+      await app.session.prompt(command);
+      await app.settle();
+      assert.equal(
+        generations.length,
+        1,
+        "implicit fixes retain the last report despite changed defaults",
+      );
+      assert.deepEqual(app.report(), saved);
+    }
+
+    await app.session.prompt("/fix focus=general");
+    await app.settle();
+    assert.equal(generations.length, 2, "explicit focus compares the effective defaults");
+    const fresh = app.report();
+    assert.deepEqual(JSON.parse(fresh.details.request.signature).models, [primary]);
+    await app.session.prompt('/fix focus=general context="Preserve the garnish"');
+    await app.settle();
+    assert.equal(generations.length, 2, "unchanged defaults match without another paid review");
+    assert.deepEqual(app.report(), fresh);
+
+    await app.session.prompt("/fix auto");
+    await app.settle();
+    assert.equal(generations.length, 3, "explicit target compares the effective focus default");
+    assert.deepEqual(JSON.parse(app.report().details.request.signature).focuses, ["security"]);
+    const security = app.report();
+    await app.session.prompt('/fix auto context="Preserve the garnish"');
+    await app.settle();
+    assert.equal(generations.length, 3, "unchanged saved focuses match without another review");
+    assert.deepEqual(app.report(), security);
+
+    await writeFile(configPath, JSON.stringify({ models: [primary], focuses: ["testing"] }));
+    await app.session.prompt("/fix auto");
+    await app.settle();
+    assert.equal(generations.length, 4, "changing only default focuses refreshes an explicit fix");
+    assert.deepEqual(JSON.parse(app.report().details.request.signature).focuses, ["testing"]);
+
+    await writeFile(configPath, JSON.stringify({ models: [alternate], focuses: ["testing"] }));
+    await app.session.prompt("/fix auto");
+    await app.settle();
+    assert.equal(generations.length, 5, "explicit target also compares effective model defaults");
+    assert.deepEqual(JSON.parse(app.report().details.request.signature).models, [alternate]);
+    await app.session.prompt(`/fix auto models=${primary}`);
+    await app.settle();
+    assert.equal(generations.length, 6, "explicit models still use the saved focus default");
+    const signature = JSON.parse(app.report().details.request.signature);
+    assert.deepEqual(signature.models, [primary]);
+    assert.deepEqual(signature.focuses, ["testing"]);
+    const savedTesting = app.report();
+    await writeFile(configPath, JSON.stringify({ model: [primary], focus: ["testing"] }));
+    for (const command of [
+      "/fix auto",
+      `/fix auto model=${primary} focus=testing`,
+      `/fix auto models=${primary} focuses=testing`,
+    ]) {
+      await app.session.prompt(command);
+      await app.settle();
+      assert.equal(generations.length, 6, "aliases reuse the same effective review request");
+      assert.deepEqual(app.report(), savedTesting);
+    }
+    assert.equal(app.reports().length, 6);
+    assert.equal(app.mainRequests.length, 0, "clean reports never queue a fix generation");
+    assert.ok(app.notifications.some(({ message }) => /Nothing to fix/.test(message)));
+  });
+
+  test("validates the whole config unless both settings are explicit, without affecting help or triage", async () => {
+    const configPath = path.join(agentDir, "review.json");
+    const primary = `${reviewModel.provider}/${reviewModel.id}`;
+    app = await openReview(directory, cwd, failures);
+    const invalid = [
+      "{",
+      "null",
+      "[]",
+      '"octopus"',
+      JSON.stringify({ models: reviewModel.id }),
+      JSON.stringify({ model: reviewModel.id }),
+      JSON.stringify({ focusses: ["general"] }),
+      ...[null, {}, 7, [7], [" \t"], ["reply,octopus"]].flatMap((models) =>
+        ["models", "model"].map((field) => JSON.stringify({ [field]: models })),
+      ),
+      ...[
+        { models: [primary], model: [reviewModel.id] },
+        { models: [primary], model: [primary] },
+        { models: [primary], model: null },
+        { models: null, model: [primary] },
+        { focuses: ["general"], focus: ["security"] },
+        { focuses: ["general"], focus: ["general"] },
+        { focuses: ["general"], focus: null },
+        { focuses: null, focus: ["general"] },
+      ].map((config) => JSON.stringify(config)),
+      ...[
+        [],
+        null,
+        {},
+        "security",
+        7,
+        [7],
+        [" \t"],
+        ["octopus"],
+        ["general", "octopus"],
+        ["all", "octopus"],
+        ["general,security"],
+        ["all,"],
+      ].flatMap((focuses) =>
+        ["focuses", "focus"].map((field) =>
+          JSON.stringify({ models: [primary], [field]: focuses }),
+        ),
+      ),
+    ];
+    for (const config of invalid) {
+      await writeFile(configPath, config);
+      for (const command of [
+        "/review commit HEAD",
+        `/review commit HEAD models=${primary}`,
+        "/fix focus=general",
+      ]) {
+        const before = app.notifications.length;
+        await app.session.prompt(command);
+        await app.settle();
+        const notices = app.notifications.slice(before);
+        assert.equal(notices.length, 1, `${command}: ${config}`);
+        assert.equal(notices[0].type, "error", `${command}: ${config}`);
+        assert.ok(notices[0].message.includes(`Invalid review config at ${configPath}:`), config);
+        assert.equal(children.length, 0, "invalid defaults must not start workers");
+        assert.equal(app.reports().length, 0);
+      }
+    }
+    await app.session.prompt('/review commit HEAD focus=general models=""');
+    await app.settle();
+    assert.equal(
+      app.notifications.at(-1)!.type,
+      "error",
+      "empty CLI models do not bypass defaults",
+    );
+    const errors = app.notifications.filter(({ type }) => type === "error").length;
+    for (const command of ["/review help", "/fix help", "/fix loop help", "/triage help"]) {
+      await app.session.prompt(command);
+      await app.settle();
+      const entry: SessionEntry = app.reports().at(-1)!;
+      assert.equal(entry.type, "custom_message");
+      assert.equal((entry.details as { kind: string }).kind, "help");
+    }
+    assert.equal(children.length, 0);
+    await app.session.prompt("/triage not-an-octopus-pr");
+    await app.settle();
+    assert.match(app.notifications.at(-1)!.message, /Invalid PR reference/);
+    assert.equal(app.notifications.at(-1)!.message.includes(configPath), false);
+
+    respond = () => submit([]);
+    for (const config of [invalid.at(-1)!, "{"]) {
+      await writeFile(configPath, config);
+      const before = generations.length;
+      await app.run(`/review commit HEAD focus=general models=${primary}`);
+      await app.session.prompt(`/fix commit HEAD focus=general models=${primary}`);
+      await app.settle();
+      assert.equal(
+        generations.length - before,
+        1,
+        "both overrides bypass invalid defaults and then match the report",
+      );
+    }
+    assert.equal(app.notifications.filter(({ type }) => type === "error").length, errors + 1);
+    assert.equal(app.mainRequests.length, 0);
   });
 
   test("aggregates partial reviews, retries missing submission in the same session, and durably deduplicates findings", async () => {
@@ -640,6 +1094,205 @@ describe("review", { concurrency: false }, () => {
     });
   }
 
+  test("preserves index bytes when reviewing a file restored to its indexed contents", async () => {
+    respond = () => submit([]);
+    app = await openReview(directory, cwd, failures);
+    const indexBefore = await readFile(path.join(cwd, ".git", "index"));
+    const original = await readFile(path.join(cwd, "café.ts"));
+    await writeFile(path.join(cwd, "café.ts"), "The octopus made a temporary edit.\n");
+    await writeFile(path.join(cwd, "café.ts"), original);
+    await fs.utimes(path.join(cwd, "café.ts"), 0, 0);
+    await writeFile(path.join(cwd, "new-ticket.txt"), "Keep a reviewable untracked file.\n");
+    await app.run("/review uncommitted focus=general");
+    assert.deepEqual(await readFile(path.join(cwd, "café.ts")), original);
+    assert.deepEqual(await readFile(path.join(cwd, ".git", "index")), indexBefore);
+  });
+
+  for (const phase of ["tool", "retry", "assistant-abort"] as const) {
+    test(`stops a fix loop after an edit and ${phase} cancellation, then accepts a fresh fix`, async () => {
+      await writeFile(path.join(cwd, "new-ticket.txt"), "Keep the café open.\n");
+      const toolStarted = deferred<void>();
+      const toolCancelled = deferred<void>();
+      const cleanup = deferred<void>();
+      const retryStarted = deferred<void>();
+      let reviews = 0;
+      let fresh = false;
+      respond = ({ args }) => {
+        if (args.at(-1)!.includes("specializing in security"))
+          return fresh
+            ? submit([])
+            : {
+                ...assistantMessage(""),
+                stopReason: "error",
+                errorMessage: "Fixture security reviewer unavailable",
+              };
+        reviews++;
+        // A clean report bounds the old defective loop without accepting the extra review.
+        return submit(reviews === 1 || (fresh && reviews === 2) ? [finding] : []);
+      };
+      app = await openReview(
+        directory,
+        cwd,
+        failures,
+        [
+          toolCall("edit", {
+            path: "café.ts",
+            edits: [{ oldText: "acceptsExpired = true", newText: "acceptsExpired = false" }],
+          }),
+          phase === "tool"
+            ? toolCall("lifeboat", {})
+            : {
+                ...assistantMessage(""),
+                stopReason: phase === "retry" ? "error" : "aborted",
+                errorMessage: phase === "retry" ? "529 overloaded" : "Fixture generation cancelled",
+              },
+          toolCall("edit", {
+            path: "café.ts",
+            edits: [
+              {
+                oldText: "acceptsExpired = false",
+                newText: "acceptsExpired = false /* checked */",
+              },
+            ],
+          }),
+          assistantMessage("Fresh fix completed."),
+        ],
+        undefined,
+        undefined,
+        undefined,
+        reviewModel,
+        {
+          tools: phase === "tool" ? ["lifeboat"] : [],
+          extensions:
+            phase === "tool"
+              ? [
+                  (pi) => {
+                    pi.registerTool(
+                      defineTool({
+                        name: "lifeboat",
+                        label: "Lifeboat",
+                        description: "Inspect the lifeboat after fixing the gate.",
+                        parameters: Type.Object({}),
+                        execute: async (_id, _args, signal) => {
+                          assert.ok(signal);
+                          const onAbort = () => toolCancelled.resolve();
+                          signal.addEventListener("abort", onAbort, { once: true });
+                          toolStarted.resolve();
+                          try {
+                            await cleanup.promise;
+                            signal.throwIfAborted();
+                            return {
+                              content: [{ type: "text", text: "Lifeboat inspected." }],
+                              details: {},
+                            };
+                          } finally {
+                            signal.removeEventListener("abort", onAbort);
+                          }
+                        },
+                      }),
+                    );
+                  },
+                ]
+              : [],
+        },
+      );
+      app.settingsManager.applyOverrides({
+        retry: { enabled: phase === "retry", maxRetries: 1, baseDelayMs: 60_000 },
+      });
+      const settlements: boolean[] = [];
+      const reasons: string[] = [];
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "auto_retry_start") retryStarted.resolve();
+        if (event.type === "agent_end")
+          reasons.push(
+            event.messages.findLast((message) => message.role === "assistant")!.stopReason,
+          );
+        if (event.type === "agent_settled") settlements.push(event.aborted);
+      });
+      const indexBefore = await readFile(path.join(cwd, ".git", "index"));
+      const draft = "Unsent café garnish notes 🐙";
+      app.ui.setEditorText(draft);
+      let finished = false;
+      const fix = app.session.prompt("/fix loop uncommitted focus=general,security").then(() => {
+        finished = true;
+      });
+      try {
+        if (phase !== "assistant-abort") {
+          await deadline(
+            phase === "tool" ? toolStarted.promise : retryStarted.promise,
+            "fix cancellation readiness",
+          );
+          assert.equal(
+            await readFile(path.join(cwd, "café.ts"), "utf8"),
+            "export const acceptsExpired = false;\n",
+          );
+          if (phase === "retry") assert.equal(app.session.isRetrying, true);
+          const abort = app.session.abort();
+          if (phase === "tool") {
+            await deadline(toolCancelled.promise, "fix tool cancellation");
+            await setImmediate();
+            assert.equal(finished, false, "fix completion joins tool cleanup");
+            assert.deepEqual(settlements, []);
+            assert.equal(reviews, 1);
+            cleanup.resolve();
+          }
+          await deadline(abort, "fix abort completion");
+        }
+        await deadline(fix, "cancelled fix loop");
+        await app.settle();
+        assert.deepEqual(settlements, [phase !== "assistant-abort"]);
+        assert.deepEqual(reasons, [phase === "assistant-abort" ? "aborted" : "error"]);
+        assert.equal(reviews, 1, "an aborted fix must not pay for another review");
+        assert.equal(generations.length, 2);
+        assert.equal(app.reports().length, 1);
+        assert.equal(
+          app.report().details.findings.length,
+          1,
+          "cancellation does not publish a clean report",
+        );
+        assert.equal(app.mainRequests.length, 2);
+        assert.ok(app.notifications.some(({ message }) => /fix pass was aborted/.test(message)));
+        assert.equal(
+          app.notifications.some(({ message }) =>
+            /continuing with a fresh review|Nothing to fix|Fix pass used partial/.test(message),
+          ),
+          false,
+        );
+        assert.equal(
+          await readFile(path.join(cwd, "café.ts"), "utf8"),
+          "export const acceptsExpired = false;\n",
+        );
+        assert.deepEqual(await readFile(path.join(cwd, ".git", "index")), indexBefore);
+        assert.equal(app.ui.getEditorText(), draft);
+        assert.equal(app.session.pendingMessageCount, 0);
+
+        fresh = true;
+        await deadline(
+          app.session.prompt("/fix loop uncommitted focus=general,security"),
+          "fresh fix loop",
+        );
+        await app.settle();
+        assert.deepEqual(settlements, [phase !== "assistant-abort", false]);
+        assert.equal(reviews, 3, "fresh fix can continue to its clean review");
+        assert.equal(generations.length, 6);
+        assert.equal(app.mainRequests.length, 4);
+        assert.deepEqual(app.report().details.findings, []);
+        assert.ok(app.notifications.some(({ message }) => /Nothing to fix/.test(message)));
+        assert.equal(
+          await readFile(path.join(cwd, "café.ts"), "utf8"),
+          "export const acceptsExpired = false /* checked */;\n",
+        );
+        assert.deepEqual(await readFile(path.join(cwd, ".git", "index")), indexBefore);
+        assert.equal(app.ui.getEditorText(), draft);
+      } finally {
+        cleanup.resolve();
+        await app.session.abort();
+        await deadline(fix, "fix cleanup");
+        unsubscribe();
+      }
+    });
+  }
+
   for (const { scope, file, expectedReviews } of [
     { scope: "commit HEAD", file: "café.ts", expectedReviews: 2 },
     { scope: "uncommitted", file: "new-ticket.ts", expectedReviews: 2 },
@@ -653,9 +1306,27 @@ describe("review", { concurrency: false }, () => {
       git(cwd, "add", "REVIEW_GUIDELINES.md");
       const indexBefore = await readFile(path.join(cwd, ".git", "index"));
       const trackedDiffBefore = git(cwd, "diff", "HEAD");
+      const keepsDefaults = scope === "commit HEAD" && file === "café.ts";
+      const savedModel = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+      if (keepsDefaults)
+        await writeFile(
+          path.join(agentDir, "review.json"),
+          JSON.stringify({ models: [savedModel], focuses: ["general"] }),
+        );
       let reviews = 0;
-      respond = async () => {
+      respond = async ({ model }) => {
         assert.ok(++reviews <= 2, "unexpected extra review");
+        if (keepsDefaults) {
+          assert.equal(
+            model.provider,
+            alternateReviewModel.provider,
+            "a fix loop retains its initial defaults",
+          );
+          await writeFile(
+            path.join(agentDir, "review.json"),
+            JSON.stringify({ models: [reviewModel.id], focuses: ["security", "testing"] }),
+          );
+        }
         assert.equal(
           await readFile(path.join(cwd, file), "utf8"),
           `export const acceptsExpired = ${reviews === 1 ? "true" : "false"};\n`,
@@ -663,14 +1334,33 @@ describe("review", { concurrency: false }, () => {
         );
         return submit(reviews === 1 ? [{ ...finding, location: `${file}:1` }] : []);
       };
-      app = await openReview(directory, cwd, failures, [
-        toolCall("edit", {
-          path: file,
-          edits: [{ oldText: "acceptsExpired = true", newText: "acceptsExpired = false" }],
-        }),
-        assistantMessage("Expiry validation restored."),
-      ]);
-      await app.session.prompt(`/fix loop ${scope} focus=general`);
+      app = await openReview(
+        directory,
+        cwd,
+        failures,
+        [
+          toolCall("edit", {
+            path: file,
+            edits: [{ oldText: "acceptsExpired = true", newText: "acceptsExpired = false" }],
+          }),
+          assistantMessage("Expiry validation restored."),
+        ],
+        undefined,
+        undefined,
+        undefined,
+        reviewModel,
+        {
+          extensions: keepsDefaults
+            ? [
+                scriptedProvider(alternateReviewModel, () => {
+                  throw new Error("Review must not generate in the main session");
+                }),
+              ]
+            : [],
+          tools: [],
+        },
+      );
+      await app.session.prompt(`/fix loop ${scope}${keepsDefaults ? "" : " focus=general"}`);
       await app.settle();
 
       assert.equal(app.mainRequests.length, 2, "one native edit and its concluding model turn");
@@ -680,6 +1370,23 @@ describe("review", { concurrency: false }, () => {
         "only scope-relevant changes trigger follow-up review",
       );
       assert.equal(app.reports().length, expectedReviews);
+      if (keepsDefaults) {
+        for (const report of app.reports()) {
+          assert.equal(report.type, "custom_message");
+          const details = report.details as ReviewMessageDetails;
+          const signature = JSON.parse(details.request.signature);
+          assert.deepEqual(signature.models, [savedModel]);
+          assert.deepEqual(signature.focuses, ["general"]);
+          assert.deepEqual(
+            details.focusStatus.map(({ focus }) => focus),
+            ["general"],
+          );
+        }
+        assert.deepEqual(JSON.parse(await readFile(path.join(agentDir, "review.json"), "utf8")), {
+          models: [reviewModel.id],
+          focuses: ["security", "testing"],
+        });
+      }
       assert.equal(app.report().details.staleness, undefined);
       assert.equal(app.report().details.findings.length, expectedReviews === 2 ? 0 : 1);
       assert.equal(
@@ -1203,6 +1910,8 @@ async function openReview(
   refreshModels?: Parameters<typeof scriptedProvider>[2],
   withSubagent?: "before" | "after",
   sessionFile?: string,
+  selectedModel: Model<string> = reviewModel,
+  fixture: { extensions: ExtensionFactory[]; tools: string[] } = { extensions: [], tools: [] },
 ) {
   const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
@@ -1230,8 +1939,9 @@ async function openReview(
     ...(withSubagent === "before" ? [subagent] : []),
     review,
     ...(withSubagent === "after" ? [subagent] : []),
+    ...fixture.extensions,
     scriptedProvider(
-      reviewModel,
+      selectedModel,
       (request) => {
         mainRequests.push(request);
         const reply = mainReplies.shift();
@@ -1279,8 +1989,8 @@ async function openReview(
   const { session } = await createAgentSession({
     ...resources,
     sessionManager: history,
-    model: reviewModel,
-    tools: ["edit", ...(withSubagent ? ["subagent"] : [])],
+    model: selectedModel,
+    tools: ["edit", ...(withSubagent ? ["subagent"] : []), ...fixture.tools],
   });
   const nextEnd = () =>
     ends.length
@@ -1417,6 +2127,7 @@ async function openReview(
         }
       },
       modelRuntime: resources.modelRuntime,
+      settingsManager: resources.settingsManager,
       mainRequests,
       notifications,
       listeners,

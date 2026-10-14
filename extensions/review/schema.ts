@@ -43,6 +43,7 @@ export type ParsedRequest = {
   models: string[];
   focuses: ReviewFocus[];
   targetExplicit: boolean;
+  modelsExplicit: boolean;
   focusExplicit: boolean;
   additionalContext?: string;
 };

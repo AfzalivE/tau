@@ -1,0 +1,2 @@
+# Patch context lines and trailing blank lines are protocol bytes.
+patches/*.patch whitespace=-blank-at-eol,-blank-at-eof

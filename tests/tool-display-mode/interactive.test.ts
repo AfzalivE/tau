@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { createRequire, syncBuiltinESMExports } from "node:module";
-import { Socket } from "node:net";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
@@ -18,14 +16,9 @@ import {
 import { CURSOR_MARKER, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import toolDisplayMode from "../../extensions/tool-display-mode.js";
 import { deadline } from "../helpers/async.js";
+import { captureTerminal, rejectInteractiveExternalWork } from "../helpers/interactive.js";
 import { assistantMessage, createPiResources, fixtureModel, isolatePiHome } from "../helpers/pi.js";
 import { scriptedProvider } from "../helpers/provider.js";
-
-// npm can install a separate public pi-tui instance under Pi. Patch the terminal Pi actually uses.
-const requireFromPi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-const { ProcessTerminal }: typeof import("@earendil-works/pi-tui") = await import(
-  requireFromPi.resolve("@earendil-works/pi-tui")
-);
 
 type ActivityPacket = {
   sessionKey: string;
@@ -51,8 +44,8 @@ describe("tool-display-mode InteractiveMode", { concurrency: false }, () => {
     cwd = path.join(getAgentDir(), "octopus-office");
     await mkdir(cwd, { recursive: true });
     failures = [];
-    rejectExternalWork(failures);
-    terminal = captureTerminal();
+    rejectInteractiveExternalWork(failures);
+    terminal = captureTerminal(100, 40);
     timers = observeAnimationTimers();
     listeners = nativeListeners();
   });
@@ -80,64 +73,66 @@ describe("tool-display-mode InteractiveMode", { concurrency: false }, () => {
     }
   });
 
-  test("matches the native border animation and hands parent work off to background activity", async () => {
-    app = await openInteractive(cwd, failures);
-    terminal.send(draft);
-    assert.equal(app.ctx.ui.getEditorText(), draft);
-    assert.equal(app.ctx.mode, "tui");
-    assert.equal(timers.size, 0);
+  for (const tuiMode of ["regular", "fullscreen"] as const) {
+    test(`matches native border animation and background handoff in ${tuiMode} mode`, async () => {
+      app = await openInteractive(cwd, failures, { tuiMode });
+      terminal.send(draft);
+      assert.equal(app.ctx.ui.getEditorText(), draft);
+      assert.equal(app.ctx.mode, "tui");
+      assert.equal(timers.size, 0);
 
-    await app.startParent();
-    assert.equal(timers.size, 1, "InteractiveMode owns the live parent spinner");
-    // The reference is Pi's actual streaming indicator, instantiated by InteractiveMode.
-    // Give it the same text as the later background indicator. No native renderer is copied.
-    app.ctx.ui.setWorkingMessage(summary);
-    const native = sampleAnimation(app.tui);
-    assert.equal(native[0][0].plainTop.indexOf(summary), 5);
-    assert.equal(native[0][0].plainTop, native[1][0].plainTop, "no animation before 80ms");
-    assert.notEqual(native[1][0].top, native[2][0].top, "the native spinner advances at 80ms");
-    assert.equal(native[0][0].top, native.at(-1)?.[0].top, "sample a complete default cycle");
+      await app.startParent();
+      assert.equal(timers.size, 1, "InteractiveMode owns the live parent spinner");
+      // The reference is Pi's actual streaming indicator, instantiated by InteractiveMode.
+      // Give it the same text as the later background indicator. No native renderer is copied.
+      app.ctx.ui.setWorkingMessage(summary);
+      const native = sampleAnimation(app.tui);
+      assert.equal(native[0][0].plainTop.indexOf(summary), 5);
+      assert.equal(native[0][0].plainTop, native[1][0].plainTop, "no animation before 80ms");
+      assert.notEqual(native[1][0].top, native[2][0].top, "the native spinner advances at 80ms");
+      assert.equal(native[0][0].top, native.at(-1)?.[0].top, "sample a complete default cycle");
 
-    assert.equal(app.activity("subagent", "2 subagents").handled, true);
-    assert.equal(app.activity("review", "review 1/3").handled, true);
-    assertStatus(app.tui, `Working, ${summary}`);
-    assert.equal(timers.size, 1, "activity annotates the native parent, not a second loader");
+      assert.equal(app.activity("subagent", "2 subagents").handled, true);
+      assert.equal(app.activity("review", "review 1/3").handled, true);
+      assertStatus(app.tui, `Working, ${summary}`);
+      assert.equal(timers.size, 1, "activity annotates the native parent, not a second loader");
 
-    app.ctx.ui.setToolsExpanded(true);
-    assertStatus(app.tui, "Working");
-    assert.ok(!editorBorder(app.tui, 100).plainTop.includes("subagents"));
-    assert.equal(timers.size, 1, "expanded tools retain the native parent indicator");
-    app.ctx.ui.setToolsExpanded(false);
-    assertStatus(app.tui, `Working, ${summary}`);
+      app.ctx.ui.setToolsExpanded(true);
+      assertStatus(app.tui, "Working");
+      assert.ok(!editorBorder(app.tui, 100).plainTop.includes("subagents"));
+      assert.equal(timers.size, 1, "expanded tools retain the native parent indicator");
+      app.ctx.ui.setToolsExpanded(false);
+      assertStatus(app.tui, `Working, ${summary}`);
 
-    await app.finishParent();
-    assert.equal(app.ctx.isIdle(), true);
-    assert.equal(timers.size, 1, "settled parent hands off to one extension-owned loader");
-    const background = sampleAnimation(app.tui);
-    assert.deepEqual(
-      background,
-      native,
-      "border bytes, placement, clipping and animation match Pi",
-    );
-    assertStatus(app.tui, summary);
-    assert.ok(!editorBorder(app.tui, 100).plainTop.includes("Working"));
-    assert.equal(app.ctx.ui.getEditorText(), draft);
+      await app.finishParent();
+      assert.equal(app.ctx.isIdle(), true);
+      assert.equal(timers.size, 1, "settled parent hands off to one extension-owned loader");
+      const background = sampleAnimation(app.tui);
+      assert.deepEqual(
+        background,
+        native,
+        "border bytes, placement, clipping and animation match Pi",
+      );
+      assertStatus(app.tui, summary);
+      assert.ok(!editorBorder(app.tui, 100).plainTop.includes("Working"));
+      assert.equal(app.ctx.ui.getEditorText(), draft);
 
-    app.ctx.ui.setToolsExpanded(true);
-    assertStatus(app.tui, undefined);
-    assert.equal(timers.size, 0, "expansion stops the background loader");
-    app.ctx.ui.setToolsExpanded(false);
-    assertStatus(app.tui, summary);
-    assert.equal(timers.size, 1, "collapsing restores still-running activity");
-    app.activity("subagent");
-    assertStatus(app.tui, "review 1/3");
+      app.ctx.ui.setToolsExpanded(true);
+      assertStatus(app.tui, undefined);
+      assert.equal(timers.size, 0, "expansion stops the background loader");
+      app.ctx.ui.setToolsExpanded(false);
+      assertStatus(app.tui, summary);
+      assert.equal(timers.size, 1, "collapsing restores still-running activity");
+      app.activity("subagent");
+      assertStatus(app.tui, "review 1/3");
 
-    // Leave background work active to exercise shutdown, rather than first clearing its packet.
-    await app.dispose();
-    assert.deepEqual(app.shutdown, { reason: "quit", editorRestored: true, draft });
-    assert.equal(timers.size, 0);
-    assert.equal(terminal.started, false);
-  });
+      // Leave background work active to exercise shutdown, rather than first clearing its packet.
+      await app.dispose();
+      assert.deepEqual(app.shutdown, { reason: "quit", editorRestored: true, draft });
+      assert.equal(timers.size, 0);
+      assert.equal(terminal.started, false);
+    });
+  }
 
   test("keeps native retry ahead of child activity until cancellation", async () => {
     let requests = 0;
@@ -254,6 +249,7 @@ async function openInteractive(
   cwd: string,
   failures: unknown[],
   options: {
+    tuiMode?: "regular" | "fullscreen";
     reply?: Parameters<typeof scriptedProvider>[1];
     extensions?: ExtensionFactory[];
   } = {},
@@ -308,7 +304,10 @@ async function openInteractive(
   const runtime = new AgentSessionRuntime(session, services, async () => {
     throw new Error("Unexpected session replacement in activity presentation test");
   });
-  const mode = new InteractiveMode(runtime, { tuiMode: "regular", initialThemeSetting: "dark" });
+  const mode = new InteractiveMode(runtime, {
+    tuiMode: options.tuiMode ?? "regular",
+    initialThemeSetting: "dark",
+  });
   let disposed = false;
   const dispose = async () => {
     if (disposed) return;
@@ -445,60 +444,6 @@ function assertStatus(tui: TUI, text: string | undefined) {
   }
 }
 
-/** Replace ProcessTerminal's physical input/output only. The TUI and all components still run. */
-function captureTerminal() {
-  let input: ((data: string) => void) | undefined;
-  const waiters = new Map<string, ReturnType<typeof deferred>>();
-  const state = {
-    started: false,
-    writes: [] as string[],
-    async waitForText(text: string) {
-      if (state.writes.some((write) => stripVTControlCharacters(write).includes(text))) return;
-      const completion = deferred();
-      waiters.set(text, completion);
-      try {
-        await deadline(completion.promise, `terminal output: ${text}`);
-      } finally {
-        waiters.delete(text);
-      }
-    },
-    send(data: string) {
-      assert.ok(input, "the terminal must be started before sending input");
-      input(data);
-    },
-  };
-  mock.getter(ProcessTerminal.prototype, "columns", () => 100);
-  mock.getter(ProcessTerminal.prototype, "rows", () => 40);
-  mock.method(ProcessTerminal.prototype, "start", (onInput: (data: string) => void) => {
-    state.started = true;
-    input = onInput;
-  });
-  mock.method(ProcessTerminal.prototype, "stop", () => {
-    state.started = false;
-    input = undefined;
-  });
-  mock.method(ProcessTerminal.prototype, "drainInput", async () => {});
-  mock.method(ProcessTerminal.prototype, "write", (data: string) => {
-    state.writes.push(data);
-    const plain = stripVTControlCharacters(data);
-    for (const [text, completion] of waiters) {
-      if (plain.includes(text)) completion.resolve();
-    }
-  });
-  for (const method of [
-    "moveBy",
-    "hideCursor",
-    "showCursor",
-    "clearLine",
-    "clearFromCursor",
-    "clearScreen",
-    "setTitle",
-    "setProgress",
-  ] as const)
-    mock.method(ProcessTerminal.prototype, method, () => {});
-  return state;
-}
-
 /** Controlled clock plus live timer ownership checks, without mocking Loader or its native counterpart. */
 function observeAnimationTimers() {
   mock.timers.enable({ apis: ["setInterval"] });
@@ -533,35 +478,4 @@ function nativeListeners() {
     stdin: process.stdin.rawListeners("data"),
     resize: process.stdout.rawListeners("resize"),
   };
-}
-
-/** Pi's mandatory managed-tool startup probes are substituted, not executed or downloaded. */
-function rejectExternalWork(failures: unknown[]) {
-  const reject = (...args: unknown[]): never => {
-    const error = new Error(`Unexpected external work: ${String(args[0])}`);
-    failures.push(error);
-    throw error;
-  };
-  mock.method(globalThis, "fetch", reject);
-  mock.method(Socket.prototype, "connect", reject);
-  mock.method(childProcess, "spawnSync", (command: string, args: string[], options: unknown) => {
-    if (
-      (command === "fd" || command === "rg") &&
-      JSON.stringify(args) === '["--version"]' &&
-      JSON.stringify(options) === '{"stdio":"pipe"}'
-    ) {
-      return {
-        status: 0,
-        signal: null,
-        pid: 0,
-        output: [],
-        stdout: Buffer.alloc(0),
-        stderr: Buffer.alloc(0),
-      };
-    }
-    return reject(command, args);
-  });
-  for (const method of ["spawn", "exec", "execSync", "execFile", "execFileSync", "fork"] as const)
-    mock.method(childProcess, method, reject);
-  syncBuiltinESMExports();
 }

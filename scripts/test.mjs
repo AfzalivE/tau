@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { chmod, cp, glob, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { cp, glob, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,24 +17,7 @@ const testFiles = (await Array.fromAsync(glob("tests/**/*.test.ts", { cwd: rootD
   )
   .sort();
 
-const legacyFiles = (
-  await Array.fromAsync(
-    glob(["extensions/**/*.test.mjs", "scripts/**/*.test.mjs", "skills/**/*.test.mjs"], {
-      cwd: rootDir,
-    }),
-  )
-)
-  .filter(
-    (file) =>
-      !extension ||
-      file.startsWith(`extensions/${extension}/`) ||
-      file === `extensions/${extension}.test.mjs` ||
-      file === `scripts/${extension}.test.mjs` ||
-      file.startsWith(`skills/${extension}/`),
-  )
-  .sort();
-
-if (testFiles.length === 0 && legacyFiles.length === 0) {
+if (testFiles.length === 0) {
   throw new Error(extension ? `No tests found for extension: ${extension}` : "No tests found");
 }
 
@@ -44,72 +27,46 @@ let scratchDir;
 try {
   scratchDir = await mkdtemp(path.join(os.tmpdir(), "tau-test-"));
   const env = await createTestEnvironment(scratchDir);
-  if (testFiles.length > 0) {
-    const configPath = path.join(buildDir, "tsconfig.json");
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        extends: path.join(rootDir, "tsconfig.json"),
-        compilerOptions: {
-          noEmit: false,
-          noEmitOnError: true,
-          allowJs: true,
-          checkJs: false,
-          sourceMap: true,
-          rootDir,
-          outDir: buildDir,
-        },
-        files: testFiles.map((file) => path.join(rootDir, file)),
-        include: [path.join(rootDir, "extensions", "**", "*")],
-      }),
-    );
+  const configPath = path.join(buildDir, "tsconfig.json");
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      extends: path.join(rootDir, "tsconfig.json"),
+      compilerOptions: {
+        noEmit: false,
+        noEmitOnError: true,
+        allowJs: true,
+        checkJs: false,
+        sourceMap: true,
+        rootDir,
+        outDir: buildDir,
+      },
+      files: testFiles.map((file) => path.join(rootDir, file)),
+      include: [path.join(rootDir, "extensions", "**", "*")],
+    }),
+  );
 
-    process.exitCode = await runNode(
-      [path.join(rootDir, "node_modules", "typescript", "bin", "tsc"), "-p", configPath],
-      rootDir,
-      env,
-    );
-    if (process.exitCode === 0) {
-      for (const directory of ["extensions", "tests"]) {
-        await cp(path.join(rootDir, directory), path.join(buildDir, directory), {
-          recursive: true,
-          // Keep emitted imports rewritten by TypeScript; copy only missing runtime assets.
-          force: false,
-          // Adjacent declarations can prevent TypeScript from emitting JavaScript runtime files.
-          filter: async (source, target) => {
-            if (/\.[cm]?ts$/.test(source)) return false;
-            const info = await stat(source);
-            if (info.isFile() && (info.mode & 0o111) !== 0) {
-              try {
-                await chmod(target, info.mode);
-              } catch (error) {
-                if (error.code !== "ENOENT") throw error;
-              }
-            }
-            return true;
-          },
-        });
-      }
-      process.exitCode = await runNode(
-        [
-          "--enable-source-maps",
-          "--test",
-          "--test-timeout=30000",
-          ...args,
-          ...testFiles.map((file) => path.join(buildDir, file.replace(/\.ts$/, ".js"))),
-        ],
-        scratchDir,
-        env,
-      );
+  process.exitCode = await runNode(
+    [path.join(rootDir, "node_modules", "typescript", "bin", "tsc"), "-p", configPath],
+    rootDir,
+    env,
+  );
+  if (process.exitCode === 0) {
+    for (const directory of ["extensions", "tests", "scripts", "patches", "packages"]) {
+      await cp(path.join(rootDir, directory), path.join(buildDir, directory), {
+        recursive: true,
+        // Adjacent declarations can prevent TypeScript from emitting JavaScript runtime files.
+        filter: (source) => !/\.[cm]?ts$/.test(source),
+      });
     }
-  }
-  if ((process.exitCode ?? 0) === 0 && legacyFiles.length > 0) {
+    await cp(path.join(rootDir, "LICENSE"), path.join(buildDir, "LICENSE"));
     process.exitCode = await runNode(
       [
+        "--enable-source-maps",
         "--test",
         "--test-timeout=30000",
         ...args,
-        ...legacyFiles.map((file) => path.join(rootDir, file)),
+        ...testFiles.map((file) => path.join(buildDir, file.replace(/\.ts$/, ".js"))),
       ],
       scratchDir,
       env,
@@ -149,7 +106,6 @@ async function createTestEnvironment(directory) {
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
     NO_COLOR: "1",
-    ...(process.env.SANDBOX_RUNTIME ? { SANDBOX_RUNTIME: process.env.SANDBOX_RUNTIME } : {}),
   };
   for (const dir of [
     agentDir,

@@ -1,24 +1,16 @@
-import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import {
-  getAgentDir,
-  type ExtensionAPI,
-  type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
-import {
-  createSandboxAuditLog,
-  getSandboxAuditLogPath,
-  subscribeToNewViolations,
-  type SandboxAuditLog,
-} from "./audit-log.js";
-import { findBlockedCommand } from "./command-policy.js";
-import { createSandboxDebugLog, type SandboxDebugLine } from "./debug.js";
-import { JvmProxyAdapter } from "./jvm-proxy-adapter.js";
-import type { JvmProxyEndpoint } from "./jvm-proxy-options.js";
+  SandboxManager,
+  SandboxRuntimeConfigSchema,
+  type SandboxAskCallback,
+} from "@anthropic-ai/sandbox-runtime";
+import type { Usage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   DEFAULT_PROMPT_MODE,
   SandboxConfigLoadError,
   cloneRuntimeConfig,
+  escapeSlashCommandArg,
   getSandboxConfigParseErrors,
   getSkippedUntrustedProjectConfigPaths,
   loadConfig,
@@ -28,14 +20,11 @@ import {
   type PromptMode,
   type SandboxConfig,
   type SandboxConfigPath,
+  type SandboxPolicy,
 } from "./config.js";
-import { createNetworkPermissions } from "./permissions/network.js";
-import {
-  saveGlobalPermission,
-  SandboxPermissionSaveError,
-  type SandboxPermissionChange,
-} from "./permissions/persistence.js";
-import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
+import { createSandboxReviewer, type SandboxReviewRequest } from "./classifier.js";
+import { createPermissionResolver, type PermissionResolution } from "./permissions/dialog.js";
+import type { PermissionProposal } from "./permissions/proposal.js";
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
@@ -49,15 +38,13 @@ type SandboxRunMode = "sandbox" | "user-disabled" | SandboxBypassReason | Sandbo
 
 export type SandboxState =
   | { status: "pending" }
-  | { status: "active"; runtimeConfig: SandboxRuntimeConfig }
+  | { status: "active"; runtimeConfig: SandboxPolicy }
   | { status: "suspended" }
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
 
-type SandboxEventKind = "filesystem" | "network" | "mach-lookup" | "init" | "runtime" | "command";
+type SandboxEventKind = "filesystem" | "network" | "mach-lookup" | "init" | "runtime";
 export type SandboxEventReason =
-  | "blocked-command"
-  | "excluded-command"
   | "explicit-deny-read"
   | "explicit-deny-write"
   | "explicit-deny-domain"
@@ -83,46 +70,50 @@ export interface SandboxEvent {
   suggestedCommand?: string;
 }
 
+export interface SandboxInvocation<C extends ExtensionContext = ExtensionContext> {
+  ctx: C;
+  signal: AbortSignal;
+  prompts: Pick<ExtensionContext["ui"], "select" | "confirm">;
+  usages: Usage[];
+  pending: Set<Promise<boolean>>;
+}
+
 export interface SandboxRuntime {
   readonly state: SandboxState;
   readonly config: SandboxConfig | null;
   readonly promptMode: PromptMode;
-  readonly context: ExtensionContext | null;
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
-  readonly required: boolean;
-  readonly auditLog: string;
-  readonly debugLines: SandboxDebugLine[];
-  describeDebugLogging(): string;
-  setDebugLogging(enabled: boolean): void;
-  getJvmProxyEndpoint(): JvmProxyEndpoint | null;
-  checkCommand(command: string, cwd: string): string | undefined;
-  getRuntimeConfig(): SandboxRuntimeConfig | null;
-  captureContext(ctx: ExtensionContext): void;
-  withBashContext<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T>;
-  withPermissionContext<T>(
+  getRuntimeConfig(): SandboxPolicy | null;
+  runBash<C extends ExtensionContext, T>(
+    ctx: C,
+    signal: AbortSignal,
+    run: (invocation: SandboxInvocation<C>) => Promise<T>,
+  ): Promise<T>;
+  resolvePermission(
+    proposal: PermissionProposal,
+    invocation: SandboxInvocation,
+  ): Promise<PermissionResolution>;
+  classifierSelection(ctx: ExtensionContext): string | false | undefined;
+  configureClassifier(ctx: ExtensionContext): Promise<void>;
+  withPermissionLifetime<T>(
     ctx: ExtensionContext,
     signal: AbortSignal | undefined,
-    run: (ctx: ExtensionContext, signal: AbortSignal) => Promise<T>,
+    run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T>;
-  start(ctx: ExtensionContext, reason?: string): Promise<void>;
-  shutdown(ctx: ExtensionContext, reason?: string): Promise<void>;
+  start(ctx: ExtensionContext): Promise<void>;
+  shutdown(ctx: ExtensionContext): Promise<void>;
   enable(ctx: ExtensionContext): Promise<void>;
   disable(ctx: ExtensionContext): Promise<void>;
   setPromptMode(ctx: ExtensionContext, mode: PromptMode): void;
-  applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxRuntimeConfig): void;
-  savePermission(
-    ctx: ExtensionContext,
-    change: SandboxPermissionChange,
-    signal?: AbortSignal,
-  ): Promise<boolean>;
+  applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxPolicy): void;
   recordEvent(event: SandboxEvent): void;
 }
 
 function setSandboxStatus(
   ctx: ExtensionContext,
   enabled: boolean,
-  runtimeConfig?: SandboxRuntimeConfig,
+  runtimeConfig?: SandboxPolicy,
   promptMode: PromptMode = DEFAULT_PROMPT_MODE,
 ): void {
   if (!ctx.hasUI) return;
@@ -181,7 +172,7 @@ export function getSandboxRunMode(state: SandboxState): SandboxRunMode {
   return state.reason;
 }
 
-function getStateRuntimeConfig(state: SandboxState): SandboxRuntimeConfig | null {
+function getStateRuntimeConfig(state: SandboxState): SandboxPolicy | null {
   return state.status === "active" ? state.runtimeConfig : null;
 }
 
@@ -258,115 +249,74 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let sandboxState: SandboxState = { status: "pending" };
   let sandboxConfig: SandboxConfig | null = null;
   let promptMode: PromptMode = DEFAULT_PROMPT_MODE;
-  let sessionContext: ExtensionContext | null = null;
-  let commandSignal: AbortSignal | undefined;
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
   const warnedSkippedProjectConfigPaths = new Set<string>();
   let permissionLifetime = new AbortController();
   const permissionInvocations = new Set<Promise<unknown>>();
-  const debug = createSandboxDebugLog();
-  let auditLog: SandboxAuditLog | null = null;
-  let auditPath: string | null = null;
-  let auditError: string | null = null;
-  let unsubscribeAudit: (() => void) | undefined;
-  let jvmProxyAdapter: JvmProxyAdapter | null = null;
+  let invocation: SandboxInvocation | undefined;
+  let executionQueue: Promise<void> = Promise.resolve();
+  let reviewerBusy = false;
+  const reviewer = createSandboxReviewer(pi, {
+    getSelection: () => sandboxConfig?.classifier,
+  });
+  pi.on("session_tree", async () => {
+    await cancelPermissionInvocations();
+    permissionLifetime = new AbortController();
+    reviewer.reset();
+  });
 
-  function auditPolicy(config: SandboxRuntimeConfig) {
-    return {
-      network: {
-        allowedDomains: config.network.allowedDomains,
-        deniedDomains: config.network.deniedDomains,
-        allowLocalBinding: config.network.allowLocalBinding,
-        allowAllUnixSockets: config.network.allowAllUnixSockets,
-        allowUnixSockets: config.network.allowUnixSockets,
-        allowMachLookup: config.network.allowMachLookup,
-      },
-      filesystem: config.filesystem,
-    };
+  function classifierEligible(ctx: ExtensionContext): boolean {
+    return ctx.hasUI && ["tui", "rpc"].includes(ctx.mode) && process.env.TAU_SUBAGENT_CHILD !== "1";
   }
 
-  function startAudit(ctx: ExtensionContext, reason: string): void {
-    auditPath = getSandboxAuditLogPath(getAgentDir(), ctx.sessionManager.getSessionId());
-    auditError = null;
-    const onError = (error: unknown) => {
-      if (auditError) return;
-      auditError = error instanceof Error ? error.message : String(error);
-      notify(ctx, `Sandbox audit logging failed (${auditPath}): ${auditError}`, "warning");
-    };
+  async function review(
+    owner: SandboxInvocation,
+    request: SandboxReviewRequest,
+  ): Promise<string | undefined> {
+    if (
+      owner.signal.aborted ||
+      sandboxState.status !== "active" ||
+      !classifierEligible(owner.ctx) ||
+      reviewerBusy
+    )
+      return undefined;
+    reviewerBusy = true;
     try {
-      const log = createSandboxAuditLog({
-        agentDir: getAgentDir(),
-        sessionId: ctx.sessionManager.getSessionId(),
-        cwd: ctx.cwd,
-        onError,
-      });
-      auditLog = log;
-      log.append("session-start", { reason, sessionFile: ctx.sessionManager.getSessionFile() });
-      unsubscribeAudit = subscribeToNewViolations(
-        SandboxManager.getSandboxViolationStore(),
-        (violation) =>
-          log.append(
-            "runtime-violation",
-            {
-              line: violation.line,
-              command: violation.command,
-              violationTimestamp: violation.timestamp.toISOString(),
-            },
-            violation.timestamp,
-          ),
-        (dropped) => log.append("runtime-violation-gap", { dropped }),
-      );
-    } catch (error) {
-      onError(error);
+      const result = await reviewer.review(owner.ctx, request, owner.signal, owner.prompts.select);
+      if (result.usage) owner.usages.push(result.usage);
+      return result.approvedBy;
+    } finally {
+      reviewerBusy = false;
     }
   }
 
-  function stopAudit(reason: string): void {
-    unsubscribeAudit?.();
-    unsubscribeAudit = undefined;
-    auditLog?.append("session-stop", { reason });
-    auditLog?.close();
-    auditLog = null;
-  }
-
-  function checkCommand(command: string, cwd: string): string | undefined {
-    const match = findBlockedCommand(command, sandboxConfig?.commands.blocked ?? []);
-    if (!match) return undefined;
-    const summary = `Sandbox blocked executable \`${match.rawExecutable}\` (matched commands.blocked entry \`${match.blocked}\`).`;
-    recordSandboxEvent({
-      timestamp: Date.now(),
-      kind: "command",
-      outcome: "blocked",
-      reason: "blocked-command",
-      target: match.executable,
-      command,
-      cwd,
-      summary,
+  async function configureClassifier(ctx: ExtensionContext): Promise<void> {
+    if (!classifierEligible(ctx)) return;
+    if (reviewerBusy) {
+      try {
+        notify(
+          ctx,
+          "Sandbox classifier review is busy. Try setup again when it finishes.",
+          "warning",
+        );
+      } catch {
+        // A failed notice must not interfere with the running review.
+      }
+      return;
+    }
+    await withPermissionLifetime(ctx, undefined, async (signal) => {
+      reviewerBusy = true;
+      try {
+        await reviewer.configure(ctx, signal, permissionPrompts(ctx, signal).select);
+      } finally {
+        reviewerBusy = false;
+      }
     });
-    return summary;
-  }
-
-  async function closeJvmProxy(): Promise<void> {
-    await jvmProxyAdapter?.close();
-    jvmProxyAdapter = null;
-  }
-
-  async function configureJvmProxy(config: SandboxConfig): Promise<void> {
-    jvmProxyAdapter?.suspend();
-    if (!config.network.jvmProxy) return;
-    const port = SandboxManager.getProxyPort();
-    const authToken = SandboxManager.getProxyAuthToken();
-    if (!port || !authToken)
-      throw new Error("network.jvmProxy requires SRT's authenticated local HTTP proxy");
-    jvmProxyAdapter ??= new JvmProxyAdapter();
-    await jvmProxyAdapter.start();
-    jvmProxyAdapter.activate({ port, authToken });
   }
 
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
-    auditLog?.append("policy-event", event, event.timestamp);
     if (sandboxEvents.length > SANDBOX_EVENT_LIMIT) {
       sandboxEvents.splice(0, sandboxEvents.length - SANDBOX_EVENT_LIMIT);
     }
@@ -405,88 +355,85 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     );
   }
 
-  function applyRuntimeConfigForSession(
-    ctx: ExtensionContext,
-    runtimeConfig: SandboxRuntimeConfig,
-  ): void {
+  function applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxPolicy): void {
     const nextConfig = cloneRuntimeConfig(runtimeConfig);
-    sandboxState = { status: "active", runtimeConfig: nextConfig };
+    SandboxRuntimeConfigSchema.parse(nextConfig);
     SandboxManager.updateConfig(nextConfig);
-    auditLog?.append("runtime-policy", { reason: "session-update", ...auditPolicy(nextConfig) });
+    sandboxState = { status: "active", runtimeConfig: nextConfig };
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
-  function savePermission(
-    ctx: ExtensionContext,
-    change: SandboxPermissionChange,
-    operationSignal?: AbortSignal,
-  ): Promise<boolean> {
-    const signals = [permissionLifetime.signal, ctx.signal, operationSignal].filter(
-      (signal): signal is AbortSignal => signal !== undefined,
-    );
-    const signal = AbortSignal.any(signals);
-    const operation = (async () => {
-      if (signal.aborted || sandboxState.status !== "active") return false;
-      try {
-        const saved = await saveGlobalPermission(ctx.cwd, change, {
-          projectTrusted: ctx.isProjectTrusted(),
-          overrideConfigPath: getStringFlag(pi, "sandbox-config"),
-          signal,
-        });
-        auditLog?.append("persistent-permission", {
-          ...change,
-          ...saved,
-          cancelled: signal.aborted,
-        });
-        if (signal.aborted) return false;
-        notify(
-          ctx,
-          `${saved.changed ? "Saved sandbox permission globally" : "Sandbox permission is already allowed globally"}: ${saved.path}`,
-        );
-        return sandboxState.status === "active";
-      } catch (error) {
-        const published = error instanceof SandboxPermissionSaveError && error.saved;
-        auditLog?.append("persistent-permission", {
-          ...change,
-          path: error instanceof SandboxPermissionSaveError ? error.path : undefined,
-          saved: published,
-          error: error instanceof Error ? error.message : String(error),
-          cancelled: signal.aborted,
-        });
-        if (!signal.aborted)
-          notify(
-            ctx,
-            `${published ? "Permission is saved globally; retry was cancelled" : "Could not save sandbox permission"}: ${error instanceof Error ? error.message : String(error)}`,
-            published ? "warning" : "error",
-          );
-        return false;
-      }
-    })();
-    permissionInvocations.add(operation);
-    return operation.finally(() => permissionInvocations.delete(operation));
-  }
-
-  const networkPermissions = createNetworkPermissions({
-    getContext: getPermissionContext,
+  const resolvePermission = createPermissionResolver({
     getPromptMode: () => promptMode,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
-    isSuspended: () => sandboxState.status === "suspended",
     applyRuntimeConfigForSession,
-    savePermission,
     recordEvent: recordSandboxEvent,
     notify,
+    review,
   });
+  const askNetworkPermission: SandboxAskCallback = async ({ host, port }) => {
+    const owner = invocation;
+    if (!owner || owner.signal.aborted) return false;
+    if (sandboxState.status === "suspended") return true;
+    const policy = getStateRuntimeConfig(sandboxState);
+    if (!policy) return false;
+    const normalizedHost = host.toLowerCase();
+    if (policy.network.allowedDomains.includes(normalizedHost)) return true;
+    const target = port ? `${normalizedHost}:${port}` : normalizedHost;
+    if (policy.network.deniedDomains.includes(normalizedHost)) {
+      recordSandboxEvent({
+        timestamp: Date.now(),
+        kind: "network",
+        outcome: "blocked",
+        reason: "explicit-deny-domain",
+        target,
+        cwd: owner.ctx.cwd,
+        summary: "network access matched a deny list entry",
+        suggestedCommand: `/sandbox network deny remove ${escapeSlashCommandArg(normalizedHost)}`,
+      });
+      return false;
+    }
+
+    const decision = resolvePermission(
+      {
+        kind: "network",
+        policy,
+        target,
+        cwd: owner.ctx.cwd,
+        operation: "connect",
+        reason: "missing-allowed-domain",
+        alreadyApplied: false,
+        action: { list: "network-allow", op: "add", value: normalizedHost },
+        autoRetryAvailable: false,
+        automatic: {
+          permission: {
+            host: normalizedHost,
+            ...(port === undefined ? {} : { port }),
+            scope: "this pending proxy connection only",
+            commandAttribution:
+              "unknown: the native proxy provides no originating command identity or request payload",
+          },
+        },
+      },
+      owner,
+    ).then((result) => result.kind === "allow-connection");
+    owner.pending.add(decision);
+    try {
+      return await decision;
+    } finally {
+      owner.pending.delete(decision);
+    }
+  };
 
   async function initializeSandboxRuntime(
     ctx: ExtensionContext,
     config: SandboxConfig,
-  ): Promise<SandboxRuntimeConfig | null> {
+  ): Promise<SandboxPolicy | null> {
     promptMode = normalizePromptMode(config.mode);
 
     const dependencyErrors = getSandboxDependencyErrors(config);
     if (dependencyErrors.length > 0) {
       promptMode = DEFAULT_PROMPT_MODE;
-      networkPermissions.clear();
       sandboxState = { status: "blocked", reason: "missing-dependencies" };
       recordRuntimeEvent(
         "init",
@@ -502,35 +449,15 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       return null;
     }
 
-    const runtimeConfig = toRuntimeConfig(config);
-
-    let initialized = false;
     try {
-      if (config.network.jvmProxy) {
-        if (process.platform !== "darwin")
-          throw new Error("network.jvmProxy is supported only on macOS");
-        if (!config.network.allowLocalBinding)
-          throw new Error("network.jvmProxy requires network.allowLocalBinding: true on macOS");
-      }
-      await SandboxManager.initialize(runtimeConfig, networkPermissions.ask, true);
-      initialized = true;
-      await configureJvmProxy(config);
+      const runtimeConfig = toRuntimeConfig(config, ctx.cwd);
+      await SandboxManager.initialize(runtimeConfig, askNetworkPermission, true);
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
-      auditLog?.append("runtime-policy", { reason: "initialize", ...auditPolicy(activeConfig) });
       return activeConfig;
     } catch (error) {
-      jvmProxyAdapter?.suspend();
-      if (initialized) {
-        try {
-          await SandboxManager.reset();
-        } catch {
-          /* Preserve the startup error. */
-        }
-      }
       const errorMessage = error instanceof Error ? error.message : `${error}`;
       promptMode = DEFAULT_PROMPT_MODE;
-      networkPermissions.clear();
       sandboxState = { status: "blocked", reason: "init-failed" };
       recordRuntimeEvent("init", "init-failed", `sandbox initialization failed: ${errorMessage}`);
       setSandboxStatus(ctx, false);
@@ -545,7 +472,6 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     promptMode = DEFAULT_PROMPT_MODE;
     sandboxConfigPaths = [];
     sandboxEvents = [];
-    networkPermissions.clear();
   }
 
   function loadCurrentConfig(
@@ -561,40 +487,18 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
     if (parseErrors.length > 0) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
-      if (pi.getFlag("sandbox-required") === true || loadedConfig.config.required) {
-        requestShutdownWithError(
-          ctx,
-          "Sandbox is required; refusing to run with invalid configuration.",
-        );
-        return null;
-      }
     }
     sandboxConfig = loadedConfig.config;
-    debug.setEnabled(sandboxConfig.debug === true || pi.getFlag("sandbox-debug") === true);
-    auditLog?.append("configuration", {
-      configPaths: sandboxConfigPaths,
-      policy: {
-        ...sandboxConfig,
-        network: {
-          ...auditPolicy(sandboxConfig).network,
-          jvmProxy: sandboxConfig.network.jvmProxy,
-        },
-      },
-    });
     return loadedConfig.config;
   }
 
-  async function start(ctx: ExtensionContext, reason = "startup"): Promise<void> {
+  async function start(ctx: ExtensionContext): Promise<void> {
     await cancelPermissionInvocations();
-    await closeJvmProxy();
-    stopAudit("session-restart");
-    debug.start();
     permissionLifetime = new AbortController();
     setSandboxStatus(ctx, false);
-    sessionContext = ctx;
     resetRuntimeState();
+    reviewer.reset();
     sessionCwd = ctx.cwd;
-    startAudit(ctx, reason);
 
     const noSandbox = pi.getFlag("no-sandbox") as boolean;
     if (noSandbox) {
@@ -630,9 +534,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     announceSandboxState(pi, ctx, true, "Sandbox initialized");
   }
 
-  async function shutdown(ctx: ExtensionContext, reason = "quit"): Promise<void> {
+  async function shutdown(ctx: ExtensionContext): Promise<void> {
     await cancelPermissionInvocations();
-    jvmProxyAdapter?.suspend();
     setSandboxStatus(ctx, false);
     if (getStateRuntimeConfig(sandboxState)) {
       try {
@@ -642,11 +545,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       }
     }
 
-    await closeJvmProxy();
-    stopAudit(reason);
-    debug.stop();
     resetRuntimeState();
-    sessionContext = null;
     sessionCwd = process.cwd();
   }
 
@@ -684,10 +583,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
 
     sandboxState = { status: "suspended" };
-    jvmProxyAdapter?.suspend();
     await cancelPermissionInvocations();
     permissionLifetime = new AbortController();
-    networkPermissions.clear();
     setSandboxStatus(ctx, false);
 
     try {
@@ -715,46 +612,76 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
   }
 
-  function getPermissionContext(): ExtensionContext | null {
-    return sessionContext ? permissionContext(sessionContext, commandSignal) : null;
+  /** Serialize Bash and own all of its permission work until cancellation and joining finish. */
+  function runBash<C extends ExtensionContext, T>(
+    ctx: C,
+    signal: AbortSignal,
+    run: (owner: SandboxInvocation<C>) => Promise<T>,
+  ): Promise<T> {
+    const completion = new AbortController();
+    const combined = AbortSignal.any([signal, completion.signal]);
+    return runSerially(async () => {
+      const owner: SandboxInvocation<C> = {
+        ctx,
+        signal: combined,
+        prompts: permissionPrompts(ctx, combined),
+        usages: [],
+        pending: new Set(),
+      };
+      invocation = owner;
+      try {
+        const result = await run(owner);
+        if (combined.aborted) throw new Error("aborted");
+        return result;
+      } finally {
+        completion.abort();
+        while (owner.pending.size) await Promise.allSettled(owner.pending);
+        invocation = undefined;
+      }
+    }, combined);
   }
 
-  /** Bash runs serially; bind proxy requests to that command rather than a later tool invocation. */
-  async function withBashContext<T>(
-    signal: AbortSignal | undefined,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    const lifetime = new AbortController();
-    const signals = [
-      lifetime.signal,
-      permissionLifetime.signal,
-      sessionContext?.signal,
-      signal,
-    ].filter((value): value is AbortSignal => value !== undefined);
-    const previousSignal = commandSignal;
-    commandSignal = AbortSignal.any(signals);
-    try {
-      return await run();
-    } finally {
-      lifetime.abort();
-      commandSignal = previousSignal;
-    }
+  function runSerially<T>(task: () => Promise<T>, signal: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let pending = true;
+      const cancel = () => {
+        if (!pending) return;
+        pending = false;
+        signal.removeEventListener("abort", cancel);
+        reject(new Error("aborted"));
+      };
+      if (signal.aborted) {
+        cancel();
+        return;
+      }
+      signal.addEventListener("abort", cancel, { once: true });
+      const start = async () => {
+        if (!pending) return;
+        pending = false;
+        signal.removeEventListener("abort", cancel);
+        try {
+          resolve(await task());
+        } catch (error) {
+          reject(error);
+        }
+      };
+      executionQueue = executionQueue.then(start, start);
+    });
   }
 
   /** Own invocation-local permission work until its dialog or command has settled. */
-  function withPermissionContext<T>(
+  function withPermissionLifetime<T>(
     ctx: ExtensionContext,
     signal: AbortSignal | undefined,
-    run: (ctx: ExtensionContext, signal: AbortSignal) => Promise<T>,
+    run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     const signals = [permissionLifetime.signal, ctx.signal, signal].filter(
       (value): value is AbortSignal => value !== undefined,
     );
     const combined = AbortSignal.any(signals);
-    const invocationContext = permissionContext(ctx, combined);
     const invocation = (async () => {
       if (combined.aborted) throw new Error("aborted");
-      return run(invocationContext, combined);
+      return run(combined);
     })();
     permissionInvocations.add(invocation);
     return invocation.finally(() => permissionInvocations.delete(invocation));
@@ -765,16 +692,17 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     await Promise.allSettled(permissionInvocations);
   }
 
-  function permissionContext(ctx: ExtensionContext, contextSignal = ctx.signal): ExtensionContext {
+  function permissionPrompts(
+    ctx: ExtensionContext,
+    contextSignal: AbortSignal,
+  ): SandboxInvocation["prompts"] {
     function queued<T>(
       run: (signal?: AbortSignal) => Promise<T>,
       cancelled: T,
       signal?: AbortSignal,
     ): Promise<T> {
-      const signals = [permissionLifetime.signal, contextSignal, signal].filter(
-        (value): value is AbortSignal => value !== undefined,
-      );
-      const combined = signals.length ? AbortSignal.any(signals) : undefined;
+      const combined = signal ? AbortSignal.any([contextSignal, signal]) : contextSignal;
+      if (combined.aborted) return Promise.resolve(cancelled);
       const guardedRun = async (queuedSignal?: AbortSignal): Promise<T> => {
         if (queuedSignal?.aborted) return cancelled;
         const result = await run(queuedSignal);
@@ -787,18 +715,15 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       };
       pi.events.emit("subagent:permission", request);
       return (request.result ?? guardedRun(combined)).catch((error: unknown) => {
-        if (combined?.aborted || (error instanceof Error && error.name === "AbortError"))
+        if (combined.aborted || (error instanceof Error && error.name === "AbortError"))
           return cancelled;
         throw error;
       });
     }
-    const overrides: Pick<ExtensionContext["ui"], "select" | "confirm" | "custom"> = {
+    return {
       select: (title, options, opts) =>
         queued(
-          (signal) =>
-            isUnsandboxedApproval(options) && ctx.mode === "tui"
-              ? showUnsandboxedApproval(ctx, title, signal)
-              : ctx.ui.select(title, options, { ...opts, signal }),
+          (signal) => ctx.ui.select(title, options, { ...opts, signal }),
           undefined,
           opts?.signal,
         ),
@@ -808,55 +733,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
           false,
           opts?.signal,
         ),
-      custom: (factory, options) => {
-        type Result = Parameters<Parameters<typeof factory>[3]>[0];
-        const invocation = queued(async (signal) => {
-          let cancel: (() => void) | undefined;
-          try {
-            return await ctx.ui.custom<Result>((tui, theme, keybindings, done) => {
-              cancel = () => done(undefined as Result);
-              signal?.addEventListener("abort", cancel, { once: true });
-              if (signal?.aborted) cancel();
-              return factory(tui, theme, keybindings, (result) =>
-                done(signal?.aborted ? (undefined as Result) : result),
-              );
-            }, options);
-          } finally {
-            if (cancel) signal?.removeEventListener("abort", cancel);
-          }
-        }, undefined as Result);
-        permissionInvocations.add(invocation);
-        return invocation.finally(() => permissionInvocations.delete(invocation));
-      },
     };
-    const ui = new Proxy(ctx.ui, {
-      get(_target, key) {
-        const current = ctx.ui;
-        return Reflect.get(overrides, key) ?? Reflect.get(current, key);
-      },
-    });
-    return Object.defineProperties(
-      {},
-      {
-        ...Object.getOwnPropertyDescriptors(ctx),
-        signal: {
-          enumerable: true,
-          configurable: true,
-          get() {
-            const currentSignal = ctx.signal;
-            return contextSignal ?? currentSignal;
-          },
-        },
-        ui: {
-          enumerable: true,
-          configurable: true,
-          get() {
-            void ctx.ui;
-            return ui;
-          },
-        },
-      },
-    ) as ExtensionContext;
   }
 
   return {
@@ -869,44 +746,24 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     get promptMode() {
       return promptMode;
     },
-    get context() {
-      return getPermissionContext();
-    },
     get configPaths() {
       return sandboxConfigPaths;
     },
     get events() {
       return sandboxEvents;
     },
-    get required() {
-      return pi.getFlag("sandbox-required") === true || sandboxConfig?.required === true;
-    },
-    get auditLog() {
-      return auditError ? `failed (${auditPath}): ${auditError}` : (auditPath ?? "not initialized");
-    },
-    get debugLines() {
-      return debug.lines;
-    },
-    describeDebugLogging: debug.describe,
-    setDebugLogging: debug.setEnabled,
-    getJvmProxyEndpoint() {
-      const port = jvmProxyAdapter?.activePort;
-      return port ? { host: "127.0.0.1", port } : null;
-    },
-    checkCommand,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
-    captureContext(ctx) {
-      sessionContext = ctx;
-    },
-    withBashContext,
-    withPermissionContext,
+    runBash,
+    resolvePermission,
+    classifierSelection: reviewer.selection,
+    configureClassifier,
+    withPermissionLifetime,
     start,
     shutdown,
     enable,
     disable,
     setPromptMode,
     applyRuntimeConfigForSession,
-    savePermission,
     recordEvent: recordSandboxEvent,
   };
 }

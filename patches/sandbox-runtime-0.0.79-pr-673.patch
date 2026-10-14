@@ -1,0 +1,120 @@
+diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
+--- a/dist/sandbox/linux-sandbox-utils.js
++++ b/dist/sandbox/linux-sandbox-utils.js
+@@ -403,29 +403,6 @@
+     // above reject the directory this call has just made.
+     fs.chmodSync(emptyMountSourceDir, 0o700);
+     return emptyMountSourceDir;
+ }
+-/**
+- * Is `p` a mount point an earlier sandbox left behind? bwrap makes the mount
+- * point for `--ro-bind /dev/null <absent path>` with ensure_file(dest, 0444):
+- * an empty regular file with no write bits. The set above lives in memory, so
+- * a process that dies without an 'exit' event (SIGKILL, OOM) leaves the file
+- * on the host with nothing left that knows what it is. Files that only look
+- * similar are written by their creators with write bits (a lockfile, an empty
+- * file materialised on purpose: 0666 & ~umask) or have content or a second
+- * link. An empty read-only DIRECTORY left the same way is not recognisable:
+- * it looks like anyone's empty directory.
+- */
+-function isStaleBwrapMountPoint(p) {
+-    try {
+-        const stat = fs.lstatSync(p);
+-        return (stat.isFile() &&
+-            stat.size === 0 &&
+-            (stat.mode & 0o222) === 0 &&
+-            stat.nlink === 1);
+-    }
+-    catch {
+-        return false;
+-    }
+-}
+ export const CAP_SETFCAP = 31;
+ // This process's bounding set unioned with its inheritable set, read once —
+@@ -930,9 +907,7 @@
+  * The oldest bubblewrap on which everything this library does holds. Mount
+  * plans start on 0.4.0 and later, but before 0.5.0 `ensure_file()` takes
+  * only a regular file as a file bind's mount point, so a mask on a fifo,
+- * socket or device node blocks or fails; and it creates one mode 0666 rather
+- * than 0444, so isStaleBwrapMountPoint leaves what an interrupted sandbox
+- * left behind on the host.
++ * socket or device node blocks or fails.
+  */
+ export const OLDEST_FULLY_SUPPORTED_BWRAP_VERSION = '0.5.0';
+ // Keyed by path, so a caller that passes an explicit bwrapPath is not
+@@ -989,9 +964,7 @@
+     return (`bubblewrap ${version} at ${bwrap} is older than ` +
+         `${OLDEST_FULLY_SUPPORTED_BWRAP_VERSION}: a denyRead entry or credential ` +
+         `mask naming a path that is not a regular file (a fifo, socket or device ` +
+-        `node) cannot be applied on it, and a mount point an interrupted sandbox ` +
+-        `left behind is not recognised as one and stays on the host. Everything ` +
+-        `else is unaffected`);
++        `node) cannot be applied on it. Everything else is unaffected`);
+ }
+ /**
+  * Predict, then confirm. The prediction — uid 0 with no CAP_SETFCAP to hand
+@@ -2084,27 +2057,6 @@
+                 logForDebugging(`[Sandbox Linux] Mounted /dev/null at symlink ${symlinkInPath} to prevent symlink replacement attack`);
+                 continue;
+             }
+-            // A mount point an earlier sandbox left on the host (see
+-            // isStaleBwrapMountPoint) is an absent deny path in all but name. Bound
+-            // onto itself as an existing file it would never be tracked, so never
+-            // removed, and on the host its existence can be the whole meaning (a
+-            // lockfile's). Cover it with /dev/null like the absent leaf below and
+-            // track it, so cleanupBwrapMountPoints() takes it away. Same gate as
+-            // that branch. Under a read-only denied directory nothing needs
+-            // covering (the file is already unwritable there), but it is still
+-            // tracked: it is no more the caller's file for being there.
+-            if ((isWithinAnyAllowedWritePath(path.dirname(normalizedPath)) ||
+-                isWithinAnyAllowedWritePath(normalizedPath)) &&
+-                isStaleBwrapMountPoint(normalizedPath)) {
+-                if (!coveredBySafeReadOnlyDenyDir(normalizedPath)) {
+-                    denyWriteArgs.push('--ro-bind', '/dev/null', normalizedPath);
+-                    denyWriteRawDests.set(normalizedPath, rawPath);
+-                }
+-                bwrapMountPoints.add(normalizedPath);
+-                registerExitCleanupHandler();
+-                logForDebugging(`[Sandbox Linux] Re-covering a mount point an earlier sandbox left behind: ${normalizedPath}`);
+-                continue;
+-            }
+             // Handle non-existent paths by mounting /dev/null to block creation.
+             // Without this, a sandboxed process could mkdir+write a denied path that
+             // doesn't exist yet, bypassing the deny rule entirely.
+@@ -2112,6 +2064,10 @@
+             // bwrap creates empty files on the host as mount points for these binds.
+             // We track them in bwrapMountPoints so cleanupBwrapMountPoints() can
+             // remove them after the command exits.
++            //
++            // INVARIANT: only a path found absent here is tracked. An existing file
++            // that looks like such a mount point may be the caller's own, or that of
++            // another process's sandbox still running, whose deny goes with it.
+             if (!fs.existsSync(normalizedPath)) {
+                 // Fix 1 (worktree): If any existing component above the deny path is
+                 // a file (not a directory), skip the deny entirely. You can't mkdir
+diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
+--- a/dist/sandbox/linux-sandbox-utils.d.ts
++++ b/dist/sandbox/linux-sandbox-utils.d.ts
+@@ -235,8 +235,6 @@
+  * The oldest bubblewrap on which everything this library does holds. Mount
+  * plans start on 0.4.0 and later, but before 0.5.0 `ensure_file()` takes
+  * only a regular file as a file bind's mount point, so a mask on a fifo,
+- * socket or device node blocks or fails; and it creates one mode 0666 rather
+- * than 0444, so isStaleBwrapMountPoint leaves what an interrupted sandbox
+- * left behind on the host.
++ * socket or device node blocks or fails.
+  */
+ export declare const OLDEST_FULLY_SUPPORTED_BWRAP_VERSION = "0.5.0";
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -566,3 +566,3 @@
+ 
+-**Supported bubblewrap versions:** 0.4.0 and later, except that two things need 0.5.0 or newer, both of them changes to how bubblewrap prepares the mount point for a file bind: a `denyRead` entry or credential mask naming a path that is not a regular file — a fifo, a socket, a device node — cannot be applied on an older bubblewrap, which creates a file at the destination instead of binding over what is there (that fails on a read-only mount and blocks on a fifo); and a mount point left behind by an interrupted sandbox (see "Write denies on paths that do not exist yet" below) is created with write bits there, so the next wrap does not recognise it as a leftover and leaves it on the host. `checkDependencies()` runs `bwrap --version` (keeping the answer for the life of the process) and returns a warning naming the version it found when bubblewrap is older than 0.5.0; it is a warning, not a refusal. CI runs the whole suite against the bubblewrap Ubuntu ships and against 0.12.0, and the Linux mount-plan suites against 0.4.1 as well.
++**Supported bubblewrap versions:** 0.4.0 and later, except that one thing needs 0.5.0 or newer, a change to how bubblewrap prepares the mount point for a file bind: a `denyRead` entry or credential mask naming a path that is not a regular file — a fifo, a socket, a device node — cannot be applied on an older bubblewrap, which creates a file at the destination instead of binding over what is there (that fails on a read-only mount and blocks on a fifo). `checkDependencies()` runs `bwrap --version` (keeping the answer for the life of the process) and returns a warning naming the version it found when bubblewrap is older than 0.5.0; it is a warning, not a refusal. CI runs the whole suite against the bubblewrap Ubuntu ships and against 0.12.0, and the Linux mount-plan suites against 0.4.1 as well.
+ 
+@@ -751,3 +751,3 @@
+ 
+-**Write denies on paths that do not exist yet (Linux):** bubblewrap can only deny a path by mounting over it, so for a `denyWrite` path that is absent under a writable directory it first creates a mount point there: an empty, read-only file (or an empty directory for a missing intermediate component) that is visible on the host for as long as a sandbox is alive and is removed afterwards. Host tools therefore see such a path as existing while a sandboxed command runs, which matters for paths whose existence is their meaning (a lockfile such as `.git/config.lock` makes `git config` report "could not lock config file"). A process that dies without an exit event (`SIGKILL`, OOM) cannot remove its mount points. An empty regular file with no write bits found at a `denyWrite` path under a writable directory is taken to be such a leftover: it is covered with `/dev/null` like an absent path and removed after the command. A leftover empty directory cannot be told from anyone else's and is left alone.
++**Write denies on paths that do not exist yet (Linux):** bubblewrap can only deny a path by mounting over it, so for a `denyWrite` path that is absent under a writable directory it first creates a mount point there: an empty, read-only file (or an empty directory for a missing intermediate component) that is visible on the host for as long as a sandbox is alive and is removed afterwards. Host tools therefore see such a path as existing while a sandboxed command runs, which matters for paths whose existence is their meaning (a lockfile such as `.git/config.lock` makes `git config` report "could not lock config file"). A process that dies without an exit event (`SIGKILL`, OOM) cannot remove its mount points, and nothing removes them later: they cannot be told from an empty file or directory of your own, or from the mount points of another process's sandbox that is still running. A later command finds a path that exists, binds it read-only like any other, and leaves it on the host until you remove it.
+ 

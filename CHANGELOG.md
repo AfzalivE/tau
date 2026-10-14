@@ -8,40 +8,74 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
-- Added an optional `pi_model` setting to select Dream’s Pi model and thinking level without changing Pi defaults.
-- Added “Always allow and retry” for global sandbox permissions that persist across Pi sessions, while preserving project overrides and one-time unsandboxed approvals.
-- Added per-session sandbox audit logs, an exclusion disable switch, and a strict standalone `sandbox-run` command.
-- Added the `fix-ci` skill for gated CI diagnosis, focused fixes, approved reruns, and post-push verification.
-- Added the `address-pr-comments` skill for gated PR feedback handling with per-change commits and replies.
-- Added a standalone `tau-acp-client` package for the ACP client extension.
-- Added `afzal-tau-non-coding-agent`, a local-model knowledge-work profile for running `/insights` over sessions rooted in non-code sources such as Obsidian vaults.
-- Added an `acp-client` extension to use Claude and Codex agents via the Agent Client Protocol, through an `acp_agent` tool and an `/acp` command.
-- Added a dedicated `/review` security focus.
-- Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
-
-### Changed
-
-- Documented `gh --attach` uploads for issues and PR/issue comments in the `gh` skill, in addition to PR create and edit.
-- Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
-- Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
-- Installed the Claude and Codex ACP adapters with `tau-acp-client` instead of downloading them at runtime through `npx`.
-- Grounded `/review` efficiency findings in locally provable runtime costs.
-- Sharpened `/review` prompts for deslopify-style maintainability issues.
-- Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
-- Restored compact sandbox permission panels for filesystem, network, and macOS service requests.
-- Accepted case-insensitive sandbox debug aliases and included capture timestamps in `/sandbox doctor` diagnostics.
-
-### Security
-
-- Guarded native Pi file tools with the sandbox filesystem policy.
-- Preserved fork command restrictions and JVM proxy configuration in background subagents. Strict sandbox runs reject per-command unsandboxed approval.
+- Configurable Review models, thinking levels, and focuses via `review.json`.
+- Opt-in Sandbox permission review with Pi classifiers or experimental Codex Guardian.
+- Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
 
 ### Fixed
 
-- Avoided false macOS shell-not-found errors with a tracked local sandbox-runtime dependency. ([issue #548](https://github.com/anthropics/sandbox-runtime/issues/548), [PR #567](https://github.com/anthropics/sandbox-runtime/pull/567))
-- Restored `/raw` on Pi 0.87.1 through public renderer APIs, preserving scrollback in regular and fullscreen modes.
-- Allowed native file tools to create permitted files through macOS temporary-directory aliases.
-- Fixed the fork-specific package manifest's `review` extension entry so packaging resolves the extension directory.
+- Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
+- Preserve newer Sandbox policy changes when manually approving macOS service access.
+- Prevent fabricated traversal diagnostics in command output from masking a command failure.
+- Reject invalid Sandbox runtime policies before activation or session updates, including ineffective slash-ended deny globs.
+
+### Removed
+
+- **Breaking:** Sandbox no longer accepts Bash's `requestUnsandboxed` option. Commands cannot request a one-off escape from the sandbox.
+
+## [0.3.1] - 2026-10-11
+
+### Changed
+
+- Adapt Usage charts, quota bars, and text to the active light or dark theme and terminal color capabilities.
+
+### Fixed
+
+- Resolve relative Sandbox filesystem rules and socket paths against the owning session's working directory, including session-only filesystem commands and inherited subagent policy. ([#12](https://github.com/goncalossilva/tau/issues/12))
+- Keep Usage, Answer, BTW, and Insights panels bottom-aligned, including short views and resize hints.
+
+## [0.3.0] - 2026-10-09
+
+### Migration notes
+
+- **Breaking:** Requires Pi 1.1.0 or newer.
+- **Breaking:** Pi renamed the Azure provider from `azure-openai-responses` to `azure`. Update provider references in `auth.json` (or log in again), `models.json`, and `settings.json`, plus provider-qualified keys in Tau's `fast.json` and `openai-verbosity.json`. Merge conflicting preferences deliberately. The `azure-openai-responses` API identifier and `AZURE_OPENAI_*` environment variables are unchanged. Old Azure sessions fall back to another model when resumed and do not reuse their prompt cache.
+
+### Added
+
+- Subagent model and thinking recommendations, with partial overrides, custom tasks, explicit inheritance, and optional disabling of defaults. [See an example.](https://github.com/goncalossilva/.agents/commit/dcccf2ebf547b2fca22486d2888d9ad907952733)
+- Websearch's `pi:openai` route supports ChatGPT subscriptions and API keys from Pi, tried after `pi:openai-codex` by default. ([#19](https://github.com/goncalossilva/tau/issues/19))
+
+### Changed
+
+- Prefer Haiku 5.5 and GPT-6 Luna for Answer extraction, Loop summaries, and Review deduplication.
+- Use GPT-6 Luna and GPT-6.1 Sol as Websearch's Codex fallback models.
+- Apply Tool Display modes to supported tools regardless of which extension provides them, including Sandbox Bash, without changing execution or approvals.
+- Respect Pi's output padding in Websearch calls and results.
+- Use Pi's configurable start/end navigation (Ctrl+Home/Ctrl+End by default) in Answer's question pane and the BTW, Insights, and Usage readers.
+- In supporting terminals, Pi 1.1 reports native activity and approval-dialog titles, which can include commands, paths, and hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
+- Limit waiting-for-input notifications to native selection, confirmation, input, and editor dialogs. Custom screens such as loaders and dashboards stay silent.
+- Handle nested tool calls with independently cancellable Sandbox approvals and Memory operations.
+- Keep llama.cpp models available to isolated Review workers.
+- Use native selection dialogs for Loop presets and Worktree lists. Worktree selection now opens a Switch/Archive menu instead of using the `a` shortcut to archive.
+- Use native dialogs for one-command Sandbox approvals and omit the working-directory line.
+
+### Fixed
+
+- Keep Oracle discovery and generation in the reviewed repository, with matching resource policy and no ambient instruction files. ([#11](https://github.com/goncalossilva/tau/issues/11))
+- Return Branch/Worktree command instructions and worktree listings as structured JSON events, without adding them to model context. ([#15](https://github.com/goncalossilva/tau/issues/15))
+- Preserve Git index metadata during Review's scope and fingerprint checks.
+- Correct Oracle ranking for current Claude and GPT-6 models, including Fable 5.1 and Sol 6.1.
+- Recognize whole-run cancellation during tools and retry waits in Loop, Review, Subagent, and Telegram, preserving partial results and preventing unintended follow-up work.
+- Preserve configured shell settings and inactive tools when customizing tool output. ([#17](https://github.com/goncalossilva/tau/issues/17))
+- Preserve native MCP discovery instructions in Memory sessions and Subagent children.
+- Keep Usage quotas and history reachable in scrollable overlays in both terminal modes.
+- Keep BTW requests and replies fully readable in scrollable overlays, including long requests.
+- Keep Insights reports and metadata readable with working paging controls in both terminal modes.
+- Keep Answer questions and context readable independently of the answer editor, including during resizing.
+- Revoke and join pending Sandbox network approvals when their Bash command ends, preventing stale permission changes and decisions leaking into later commands.
+- Prevent Telegram prompts delayed by startup hooks from running after a reported timeout or cancellation, and honor native input dispositions without waiting for a new run. Unresolved acceptance closes the headless session while preserving saved history.
+- Reject missing user-only conversation history in Branch and Worktree instead of silently opening an empty session.
 
 ## [0.2.0] - 2026-09-27
 
@@ -83,7 +117,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Preserved shell settings in non-interactive sessions.
 - Preserved shared defaults and concurrent sessions' changes when saving `/fast` and `/verbosity` preferences.
 - Broken `ctrl+o` cycling and editor mouse controls, and incorrect Bash line counts in minimal mode.
-- Drafts and results hidden or lost in narrow `/answer`, `/btw`, and Insights layouts. (#13)
+- Drafts and results hidden or lost in narrow `/answer`, `/btw`, and Insights layouts. ([#13](https://github.com/goncalossilva/tau/issues/13))
 - Preserved large pasted answers and reported failed question extraction in `/answer`.
 - Made Insights follow the selected branch and retain final feedback from long conversations.
 - Stopped scanning session history when Insights is cancelled.
@@ -99,10 +133,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Kept worktree conversations on the selected branch and available to resume.
 - `/worktree list` selecting the wrong detached checkout.
 - Honored cache exclusions in `.worktreeinclude`.
-- Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. (#14)
+- Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. ([#14](https://github.com/goncalossilva/tau/issues/14))
 - Failed Gemini searches with Pi credentials and incomplete Codex results accepted as successful.
 - Browser-backed Gemini searches failing on large response headers or returning partial answers without citations.
-- Prevented PR details from showing for the wrong branch. (#16)
+- Prevented PR details from showing for the wrong branch. ([#16](https://github.com/goncalossilva/tau/issues/16))
 - Queued Telegram attachments until their originating session is selected.
 - Telegram file sending becoming unavailable or staying enabled after switching conversation branches.
 - Incorrect `/branch` launch options, conversation handoff, and recovery commands.
@@ -123,9 +157,9 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
-- `/insights` now outputs its report into a temporary file and shows the path after closing. (#4)
-- Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. (#5)
-- Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. (#6)
+- `/insights` now outputs its report into a temporary file and shows the path after closing. ([#4](https://github.com/goncalossilva/tau/issues/4))
+- Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. ([#5](https://github.com/goncalossilva/tau/pull/5))
+- Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. ([#6](https://github.com/goncalossilva/tau/pull/6))
 
 ### Changed
 

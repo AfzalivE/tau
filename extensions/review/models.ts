@@ -3,8 +3,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { REVIEW_TASK_TIMEOUT_MS } from "./runner.js";
 
-const OPENAI_FAST_MODEL_ID = "gpt-5.6-luna";
-const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
+const OPENAI_FAST_MODEL_ID = "gpt-6-luna";
+const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-5-5";
 
 type ModelFamily = "openai" | "anthropic";
 
@@ -308,6 +308,16 @@ function createResolvedReviewModel(options: {
         ? options.providerCandidates
         : [createResolvedReviewProviderCandidate({})],
   };
+}
+
+// --no-extensions also disables the built-in llama.cpp provider.
+export function buildReviewModelArgs(modelArg: string | undefined): string[] {
+  if (!modelArg) return [];
+  return [
+    "--model",
+    modelArg,
+    ...(/^llama\.cpp\//i.test(modelArg) ? ["--extension", "builtin:llama.cpp"] : []),
+  ];
 }
 
 export function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | null {

@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { loadReviewDefaults } from "./config.js";
+import { isReviewFocus, parseReviewFocuses } from "./focus.js";
 import {
   REVIEW_FOCUS_NAMES,
   type ReviewFocus,
@@ -22,13 +24,11 @@ const REVIEW_MODE_HINTS = [
   "custom",
 ] as const;
 
-const REVIEW_FOCUS_ALL_VALUE = "all";
 const REVIEW_FOCUS_OPTION_HINTS = [
-  "focus=testing",
-  `focus=${REVIEW_FOCUS_NAMES.join(",")}`,
-  "focus=all",
+  "focuses=testing",
+  `focuses=${REVIEW_FOCUS_NAMES.join(",")}`,
+  "focuses=all",
 ] as const;
-const VALID_REVIEW_FOCUS_VALUES = [REVIEW_FOCUS_ALL_VALUE, ...REVIEW_FOCUS_NAMES] as const;
 
 function isHelpRequest(args: string | undefined): boolean {
   const tokens = tokenizeArgs(args?.trim() ?? "");
@@ -73,11 +73,11 @@ export function showReviewHelp(pi: ExtensionAPI) {
     details: { kind: "help" satisfies ReviewMessageKind },
     content: `## /review help
 
-Run findings-only code review across up to 6 parallel focuses (general, security, reuse, quality, testing, efficiency). Defaults to all focuses.
+Run findings-only code review across up to 6 parallel focuses (general, security, reuse, quality, testing, efficiency). Defaults to all focuses unless configured.
 
 ### Syntax
-- \`/review [mode] [models=<a,b>] [focus=<focuses>] [context=<text>]\`
-- \`/fix [loop] [mode] [models=<a,b>] [focus=<focuses>] [context=<text>]\`
+- \`/review [mode] [models=<a,b>] [focuses=<a,b>] [context=<text>]\`
+- \`/fix [loop] [mode] [models=<a,b>] [focuses=<a,b>] [context=<text>]\`
 - \`/triage <number|url>\`
 
 ### Modes
@@ -90,29 +90,44 @@ Run findings-only code review across up to 6 parallel focuses (general, security
 - \`custom "<instructions>"\`: custom scoped review instructions.
 
 ### Options
-- \`models=<a,b>\`: run requested review focuses for each listed model.
-- \`focus=<focuses>\`: comma-separated focuses to run: \`general\`, \`security\`, \`reuse\`, \`quality\`, \`testing\`, \`efficiency\`. Use \`focus=all\` for all focuses.
+- \`models=<a,b>\`: run requested review focuses for each listed model, overriding saved defaults. Each model accepts an optional \`:thinking\` suffix.
+- \`focuses=<a,b>\`: comma-separated focuses to run: \`general\`, \`security\`, \`reuse\`, \`quality\`, \`testing\`, \`efficiency\`. Use \`focuses=all\` for all focuses.
 - \`context=<text>\`: add extra guidance.
   - For \`/review\`, guides every requested review focus.
   - For \`/fix\`, guides the fix pass; if \`/fix\` must run a fresh review, it guides review too.
   - For spaces, quote the value, e.g. \`context="security and backpressure"\`.
+
+### Review defaults
+Create \`review.json\` in your Pi agent directory (normally \`~/.pi/agent\`):
+\`\`\`json
+{
+  "models": ["openai-codex/gpt-6.1-sol:high", "anthropic/claude-sonnet-5.5:medium"],
+  "focuses": ["general", "security", "testing"]
+}
+\`\`\`
+- \`models=...\` and \`focuses=...\` independently replace their configured lists. Use \`focuses=all\` to override a saved subset.
+- \`model\` and \`focus\` are aliases for \`models\` and \`focuses\` in both commands and configuration. Config values remain arrays; do not specify both names for one setting.
+- Omitted settings default to the current model and all focuses. \`models: []\` also uses the current model; \`focuses\` must be nonempty when present.
+- Defaults are read on each command, including fresh reviews started by \`/fix\`. A fix loop keeps the defaults it started with.
+- Invalid configuration stops the command. Supplying both models and focuses explicitly bypasses the file.
+- Every selected model runs every selected focus.
 
 ### Examples
 - \`/review\`
 - \`/review help\`
 - \`/review branch main\`
 - \`/review pr 123 models=sonnet,gpt-5\`
-- \`/review folder src/features/foo focus=testing\`
-- \`/review uncommitted focus=testing,quality\`
+- \`/review folder src/features/foo focuses=testing\`
+- \`/review uncommitted focuses=testing,quality\`
 - \`/review uncommitted context="security and error handling"\`
 - \`/triage 123\`
 - \`/triage https://github.com/owner/repo/pull/123\`
 - \`/fix\`
 - \`/fix help\`
 - \`/fix context="do not test mocks"\`
-- \`/fix folder src/features/foo focus=testing context="testing-only cleanup"\`
+- \`/fix folder src/features/foo focuses=testing context="testing-only cleanup"\`
 - \`/fix branch main models=sonnet\`
-- \`/fix loop focus=testing\`
+- \`/fix loop focuses=testing\`
 - \`/fix loop models=sonnet,gpt-5\`
 
 ### /fix behavior
@@ -151,59 +166,6 @@ function parseKeyValueOption(
   return value;
 }
 
-function isReviewFocus(value: string): value is ReviewFocus {
-  return (REVIEW_FOCUS_NAMES as readonly string[]).includes(value);
-}
-
-function formatValidReviewFocusValues(): string {
-  return VALID_REVIEW_FOCUS_VALUES.join(", ");
-}
-
-function parseFocusList(rawFocuses: string[]): { focuses: ReviewFocus[]; explicit: boolean } {
-  if (rawFocuses.length === 0) {
-    return { focuses: [...REVIEW_FOCUS_NAMES], explicit: false };
-  }
-
-  const selected: ReviewFocus[] = [];
-  const seen = new Set<ReviewFocus>();
-  let includeAll = false;
-
-  for (const rawFocus of rawFocuses) {
-    if (!rawFocus) {
-      throw new Error(
-        `focus= requires at least one value. Valid values: ${formatValidReviewFocusValues()}.`,
-      );
-    }
-
-    for (const part of rawFocus.split(",")) {
-      const focus = part.trim().toLowerCase();
-      if (!focus) {
-        throw new Error(
-          `focus= contains an empty focus name. Valid values: ${formatValidReviewFocusValues()}.`,
-        );
-      }
-      if (focus === REVIEW_FOCUS_ALL_VALUE) {
-        includeAll = true;
-        continue;
-      }
-      if (!isReviewFocus(focus)) {
-        throw new Error(
-          `Invalid focus "${part.trim()}". Valid values: ${formatValidReviewFocusValues()}.`,
-        );
-      }
-      if (!seen.has(focus)) {
-        selected.push(focus);
-        seen.add(focus);
-      }
-    }
-  }
-
-  return {
-    focuses: includeAll ? [...REVIEW_FOCUS_NAMES] : selected,
-    explicit: true,
-  };
-}
-
 export function parseRequestArgs(args: string | undefined): ParsedRequest {
   const raw = args?.trim() ?? "";
   if (!raw) {
@@ -213,6 +175,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
       models: [],
       focuses: [...REVIEW_FOCUS_NAMES],
       targetExplicit: false,
+      modelsExplicit: false,
       focusExplicit: false,
     };
   }
@@ -234,7 +197,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
       continue;
     }
 
-    const focusValue = parseKeyValueOption(token, "focus") ?? parseKeyValueOption(token, "focuses");
+    const focusValue = parseKeyValueOption(token, "focuses") ?? parseKeyValueOption(token, "focus");
     if (focusValue !== undefined) {
       rawFocuses.push(focusValue);
       continue;
@@ -250,7 +213,8 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
   }
 
   const models = Array.from(new Set(rawModels));
-  const { focuses, explicit: focusExplicit } = parseFocusList(rawFocuses);
+  const focuses = parseReviewFocuses(rawFocuses);
+  const focusExplicit = rawFocuses.length > 0;
   const additionalContextJoined = rawContext
     .map((c) => c.trim())
     .filter(Boolean)
@@ -281,6 +245,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
     models,
     focuses,
     targetExplicit,
+    modelsExplicit: models.length > 0,
     focusExplicit,
     additionalContext,
   });
@@ -295,7 +260,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
   if (mode === "auto" || mode === "uncommitted") {
     if (rest.length > 0)
       throw new Error(
-        `${mode} mode does not accept positional args. Use models=..., focus=..., and/or context=...`,
+        `${mode} mode does not accept positional args. Use models=..., focuses=..., and/or context=...`,
       );
     return withMeta({ type: mode }, true);
   }
@@ -312,7 +277,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
       const valueLabel =
         mode === "branch" ? "branch name" : mode === "commit" ? "SHA" : "reference";
       throw new Error(
-        `${mode} mode accepts one ${valueLabel}. Use models=..., focus=..., and/or context=... for options.`,
+        `${mode} mode accepts one ${valueLabel}. Use models=..., focuses=..., and/or context=... for options.`,
       );
     }
 
@@ -434,7 +399,7 @@ function buildContextlessStoredRequestSignature(signature: string): string | nul
 }
 
 function isOpenEndedFixRequest(request: ParsedRequest): boolean {
-  return !request.targetExplicit && request.models.length === 0 && !request.focusExplicit;
+  return !request.targetExplicit && !request.modelsExplicit && !request.focusExplicit;
 }
 
 export function reviewMatchesFixRequest(
@@ -466,7 +431,13 @@ export function parseCommandRequest(args: string | undefined): ParseResult<Parse
   }
 
   try {
-    return { ok: true, value: parseRequestArgs(args) };
+    const request = parseRequestArgs(args);
+    if (!request.modelsExplicit || !request.focusExplicit) {
+      const defaults = loadReviewDefaults();
+      if (!request.modelsExplicit) request.models = defaults.models;
+      if (!request.focusExplicit) request.focuses = defaults.focuses;
+    }
+    return { ok: true, value: request };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

@@ -1,13 +1,15 @@
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
   escapeSlashCommandArg,
+  getFilesystemListValues,
   mutateStringList,
+  resolveSandboxPath,
   type ListOp,
   type PromptMode,
   type SandboxConfigPath,
+  type SandboxPolicy,
 } from "./config.js";
 import {
   describeSandboxRuntimeState,
@@ -18,7 +20,6 @@ import {
   type SandboxRuntime,
   type SandboxState,
 } from "./runtime.js";
-import type { FilesystemList } from "./permissions/filesystem.js";
 import { isValidMachLookupRule, mutateMachLookupAllowList } from "./permissions/mach-lookup.js";
 
 const IS_MACOS = process.platform === "darwin";
@@ -34,6 +35,7 @@ function showHelp(ctx: ExtensionContext): void {
     "  /sandbox doctor",
     "  /sandbox debug <on|off>",
     "  /sandbox mode <interactive|non-interactive>",
+    "  /sandbox classifier",
     "  /sandbox network <allow|deny> <add|remove> <domain>",
     ...(IS_MACOS
       ? [
@@ -115,6 +117,7 @@ const SANDBOX_TOP_LEVEL_COMPLETIONS: CommandCompletionOption[] = [
   { value: "doctor", label: "doctor" },
   { value: "debug ", label: "debug" },
   { value: "mode ", label: "mode" },
+  { value: "classifier", label: "classifier" },
   { value: "network ", label: "network" },
   ...(IS_MACOS ? [{ value: "mach-lookup ", label: "mach-lookup" }] : []),
   { value: "filesystem ", label: "filesystem" },
@@ -185,7 +188,7 @@ function getStringValueCompletions(
 function getMachLookupArgumentCompletions(options: {
   tokens: string[];
   endsWithSpace: boolean;
-  runtimeConfig: SandboxRuntimeConfig | null;
+  runtimeConfig: SandboxPolicy | null;
 }): Array<{ value: string; label: string; description?: string }> | null {
   const { tokens, endsWithSpace, runtimeConfig } = options;
 
@@ -215,7 +218,7 @@ function getMachLookupArgumentCompletions(options: {
 
 function getSandboxArgumentCompletions(
   prefix: string,
-  runtimeConfig: SandboxRuntimeConfig | null,
+  runtimeConfig: SandboxPolicy | null,
 ): Array<{ value: string; label: string; description?: string }> | null {
   const endsWithSpace = /\s$/.test(prefix);
   const tokens = parseCommandArgs(prefix);
@@ -292,7 +295,7 @@ function getSandboxArgumentCompletions(
       );
     }
 
-    const list = tokens[1]?.toLowerCase() as FilesystemList | undefined;
+    const list = tokens[1]?.toLowerCase();
     if (list !== "deny-read" && list !== "allow-write" && list !== "deny-write") {
       return null;
     }
@@ -307,12 +310,7 @@ function getSandboxArgumentCompletions(
 
     if (tokens[2]?.toLowerCase() !== "remove") return null;
 
-    const values =
-      list === "deny-read"
-        ? (runtimeConfig?.filesystem.denyRead ?? [])
-        : list === "allow-write"
-          ? (runtimeConfig?.filesystem.allowWrite ?? [])
-          : (runtimeConfig?.filesystem.denyWrite ?? []);
+    const values = runtimeConfig ? getFilesystemListValues(runtimeConfig, list) : [];
     const valueBase = `${listBase}remove `;
     if (tokens.length === 3 && endsWithSpace) {
       return getStringValueCompletions(valueBase, "", values);
@@ -329,7 +327,7 @@ function getSandboxArgumentCompletions(
 function requireRuntimeConfig(
   ctx: ExtensionContext,
   runtime: SandboxRuntime,
-): SandboxRuntimeConfig | null {
+): SandboxPolicy | null {
   const runtimeConfig = runtime.getRuntimeConfig();
   if (!runtimeConfig) {
     notify(ctx, "Sandbox is not initialized", "info");
@@ -409,6 +407,15 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         return;
       }
 
+      if (subcommand === "classifier") {
+        if (tokens.length > 1) {
+          notify(ctx, "Usage: /sandbox classifier", "warning");
+          return;
+        }
+        await runtime.configureClassifier(ctx);
+        return;
+      }
+
       if (subcommand === "doctor") {
         if (tokens.length > 1) {
           notify(ctx, "Usage: /sandbox doctor", "warning");
@@ -476,6 +483,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           "Sandbox Configuration (session):",
           `  State: enabled`,
           `  Mode: ${runtime.promptMode}`,
+          `  Classifier: ${runtime.classifierSelection(ctx) === false ? "manual approvals" : (runtime.classifierSelection(ctx) ?? "offer setup when available")}`,
           `  Runtime state: ${getSandboxRunMode(runtime.state)}`,
           `  Audit log: ${runtime.auditLog}`,
           `  Runtime debug logs: ${runtime.describeDebugLogging()}`,
@@ -612,7 +620,7 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         const runtimeConfig = requireRuntimeConfig(ctx, runtime);
         if (!runtimeConfig) return;
 
-        const list = tokens[1]?.toLowerCase() as FilesystemList | undefined;
+        const list = tokens[1]?.toLowerCase();
         const op = tokens[2]?.toLowerCase() as ListOp | undefined;
         const targetPath = tokens.slice(3).join(" ").trim();
 
@@ -630,13 +638,21 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
         }
 
         const nextConfig = cloneRuntimeConfig(runtimeConfig);
-        const values =
-          list === "deny-read"
-            ? nextConfig.filesystem.denyRead
-            : list === "allow-write"
-              ? nextConfig.filesystem.allowWrite
-              : nextConfig.filesystem.denyWrite;
-        const changed = mutateStringList(values, op, targetPath);
+        const values = getFilesystemListValues(nextConfig, list);
+        // Exact runtime entries are already expanded and may contain literal dollars.
+        const resolvedPath = values.includes(targetPath)
+          ? targetPath
+          : resolveSandboxPath(targetPath, `filesystem ${list}`, ctx.cwd);
+        if (resolvedPath === null) {
+          notify(
+            ctx,
+            "Invalid filesystem path: unset or empty environment variable, or control characters",
+            "warning",
+          );
+          return;
+        }
+
+        const changed = mutateStringList(values, op, resolvedPath);
         if (!changed) {
           notify(
             ctx,

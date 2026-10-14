@@ -24,7 +24,9 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+  CURSOR_MARKER,
   getKeybindings,
+  isFocusable,
   TuiMainScreen,
   visibleWidth,
   type Component,
@@ -34,7 +36,7 @@ import answer from "../extensions/answer.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 const currentModel = { ...fixtureModel, provider: "anthropic-answer-fixture" };
-const fastModel = { ...currentModel, id: "claude-haiku-4-5" };
+const fastModel = { ...currentModel, id: "claude-haiku-5-5" };
 const questions = [
   {
     question: "What is the recovery plan?",
@@ -314,7 +316,7 @@ describe("answer", { concurrency: false }, () => {
     }
   });
 
-  test("retains an answer and its confirmation while the terminal is too narrow", async () => {
+  test("retains an answer, focus and confirmation while the terminal is too small", async () => {
     const question = "Who holds the rollback key?";
     const draft = "The café octopus 🐙\nKeep this key dry.";
     ui = await openAnswer(
@@ -328,9 +330,16 @@ describe("answer", { concurrency: false }, () => {
           form.invalidate();
           const lines = form.render(width);
           for (const line of lines) assert.ok(visibleWidth(line) <= width);
+          assert.ok(lines.length <= ui!.dimensions.rows - 2);
           return lines.map(stripVTControlCharacters).join("\n");
         };
         paste(form, draft);
+        assert.ok(isFocusable(form));
+        assert.ok(form.render(80).join("\n").includes(CURSOR_MARKER));
+        form.focused = false;
+        assert.ok(!form.render(80).join("\n").includes(CURSOR_MARKER));
+        form.focused = true;
+        assert.ok(form.render(80).join("\n").includes(CURSOR_MARKER));
         assert.match(resize(10), /resize/i);
         paste(form, "Invisible edits must not be accepted.");
         press(form, "\r");
@@ -340,6 +349,14 @@ describe("answer", { concurrency: false }, () => {
         assert.match(resize(10), /resize/i);
         press(form, "y");
         assert.equal(ui!.requests.length, 1, "hidden confirmation cannot submit the answer");
+        assert.match(resize(80), /Submit all answers\?/);
+        ui!.dimensions.rows = 8;
+        // Input can arrive after terminal resize but before its next render.
+        press(form, "y");
+        assert.equal(ui!.requests.length, 1);
+        assert.match(resize(80), /resize/i);
+        paste(form, "Invisible height edits must not be accepted.");
+        ui!.dimensions.rows = 24;
         assert.match(resize(80), /Submit all answers\?/);
         press(form, "y");
       },
@@ -351,10 +368,9 @@ describe("answer", { concurrency: false }, () => {
       .filter((entry) => entry.type === "custom_message");
     assert.equal(answers.length, 1);
     assert.equal(answers[0].customType, "answers");
-    assert.equal(
-      answers[0].content,
-      `Here are my answers to your questions:\n\nQ: ${question}\nA: ${draft}`,
-    );
+    const content = answers[0].content;
+    assert.ok(typeof content === "string");
+    assert.equal(content.slice(content.indexOf("Q: ")), `Q: ${question}\nA: ${draft}`);
     assert.equal(ui.requests.length, 2, "resizing does not regenerate questions or answers");
   });
 

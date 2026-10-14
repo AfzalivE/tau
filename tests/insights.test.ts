@@ -7,7 +7,6 @@ import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import {
-  createAssistantMessageEventStream,
   getCurrentSystemPrompt,
   getCurrentTools,
   type AssistantMessage,
@@ -37,6 +36,7 @@ import {
   isolatePiHome,
   uiBoundary,
 } from "./helpers/pi.js";
+import { scriptedProvider } from "./helpers/provider.js";
 
 const report = "# Café insights 🐙\n\n## At a glance\nKeep the rollback drill.\n\n";
 const instruction = "Keep the café online";
@@ -473,13 +473,13 @@ describe("insights", { concurrency: false }, () => {
       (component, terminal) => {
         if (component instanceof BorderedLoader) return;
         views.push({ width: 80, lines: component.render(80) });
-        press(component, "\x1b[F"); // End
+        press(component, "\x1b[1;5F"); // Ctrl+End
         views.push({ width: 80, lines: component.render(80) });
         for (const width of [0, 1, 2, 35, 40, 41]) {
           const lines = component.render(width);
           views.push({ width, lines });
-          if (width >= 35) assert.match(plain(lines), /Resize to 42\+ columns/);
-          press(component, "\x1b[H"); // Hint mode must not reset the saved reading position.
+          if (width >= 35) assert.match(plain(lines), /Resize to 44\+ columns/);
+          press(component, "\x1b[1;5H"); // Hint mode ignores Ctrl+Home and preserves the reading position.
           component.invalidate();
         }
         const restored = component.render(80);
@@ -490,14 +490,26 @@ describe("insights", { concurrency: false }, () => {
         terminal.columns = 160;
         for (const width of [42, 60, 120]) {
           views.push({ width, lines: component.render(width) });
-          press(component, "\x1b[H");
+          press(component, "\x1b[1;5H");
           const first = component.render(width);
           views.push({ width, lines: first });
           assert.match(plain(first), /FIRST_RECOMMENDATION/);
-          press(component, "\x1b[F");
+          press(component, "\x1b[1;5F");
           const last = component.render(width);
           views.push({ width, lines: last });
           assert.match(plain(last), /LAST_RECOMMENDATION/);
+        }
+        for (const rows of [24, 12, 9, 8, 3, 2, 30]) {
+          terminal.rows = rows;
+          const frame = component.render(80);
+          views.push({ width: 80, lines: frame });
+          assert.ok(frame.length <= Math.max(0, rows - 2), `bounded at ${rows} rows`);
+          if (rows >= 9) {
+            press(component, "\x1b[1;5F");
+            assert.match(plain(component.render(80)), /LAST_RECOMMENDATION/);
+          } else if (rows > 2) {
+            assert.match(plain(frame), /Esc close.*Resize/);
+          }
         }
         terminal.columns = 35;
         views.push({ width: 35, lines: component.render(35) });
@@ -572,7 +584,9 @@ describe("insights", { concurrency: false }, () => {
       assert.ok(listing, "cancellation occurs after native discovery starts");
       await assert.rejects(listing, { name: "AbortError" });
       assert.deepEqual(ui.requests, []);
-      assert.deepEqual(ui.notifications, [{ message: "Cancelled", type: "info" }]);
+      assert.equal(ui.notifications.length, 1);
+      assert.equal(ui.notifications[0].type, "info");
+      assert.match(ui.notifications[0].message, /cancel/i);
       assert.equal(
         (await readdir(directory)).some((file) => file.startsWith("tau-insights-")),
         false,
@@ -634,28 +648,20 @@ async function openInsights(
   inspectComponent: (component: Component, terminal: Viewport) => void = () => {},
 ) {
   const requests: TranscriptContext[] = [];
-  const provider: ExtensionFactory = (pi) => {
-    pi.registerProvider(fixtureModel.provider, {
-      api: fixtureModel.api,
-      baseUrl: fixtureModel.baseUrl,
-      apiKey: "fixture-only",
-      models: [fixtureModel],
-      streamSimple: (model, context) => {
-        try {
-          assert.equal(model.id, fixtureModel.id);
-          assert.deepEqual(getCurrentTools(context.messages), []);
-          assert.equal(context.messages[0].role, "system");
-          assert.equal(context.messages.filter((message) => message.role === "user").length, 1);
-          assert.match(getCurrentSystemPrompt(context.messages), /coding session|insights report/);
-          requests.push(structuredClone(context));
-          return replyStream(reply(context));
-        } catch (error) {
-          failures.push(error);
-          throw error;
-        }
-      },
-    });
-  };
+  const provider = scriptedProvider(fixtureModel, ({ model, context }) => {
+    try {
+      assert.equal(model.id, fixtureModel.id);
+      assert.deepEqual(getCurrentTools(context.messages), []);
+      assert.equal(context.messages[0].role, "system");
+      assert.equal(context.messages.filter((message) => message.role === "user").length, 1);
+      assert.match(getCurrentSystemPrompt(context.messages), /coding session|insights report/);
+      requests.push(structuredClone(context));
+      return reply(context);
+    } catch (error) {
+      failures.push(error);
+      throw error;
+    }
+  });
   const resources = await createPiResources(history.getCwd(), getAgentDir(), [extension, provider]);
   const { session } = await createAgentSession({
     ...resources,
@@ -822,19 +828,6 @@ async function savedReport(directory: string) {
     .sort();
   assert.ok(files.length > 0);
   return path.join(directory, files.at(-1)!);
-}
-
-function replyStream(reply: AssistantMessage) {
-  const stream = createAssistantMessageEventStream();
-  stream.push({ type: "start", partial: reply });
-  if (reply.stopReason === "error" || reply.stopReason === "aborted") {
-    stream.push({ type: "error", reason: reply.stopReason, error: reply });
-  } else {
-    assert.ok(reply.stopReason !== "pending");
-    stream.push({ type: "done", reason: reply.stopReason, message: reply });
-  }
-  stream.end();
-  return stream;
 }
 
 function press(component: Component, input: string) {

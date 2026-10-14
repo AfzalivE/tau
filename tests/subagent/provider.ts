@@ -99,8 +99,12 @@ export default function childProvider(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     process.send?.({ type: "trust", trusted: ctx.isProjectTrusted() });
   });
+  let catalogueRevision = 0;
+  pi.on("before_agent_start", (event) => {
+    event.systemPromptOptions.sections.cookie_catalogue = `Cookie catalogue revision ${++catalogueRevision}.`;
+  });
   pi.on("tool_call", (event) => {
-    if (["read", "write", "ask"].includes(event.toolName)) return;
+    if (["read", "write", "ask", "wait"].includes(event.toolName)) return;
     if (
       event.toolName === "bash" &&
       ((event.input.command === shellCommand && shellCommand) ||
@@ -119,6 +123,21 @@ export default function childProvider(pi: ExtensionAPI): void {
         ? await ctx.ui.select(args.name, ["Allow", "Deny"], { signal })
         : await ctx.ui.confirm(args.name, "Allow this child only?", { signal });
       return { content: [{ type: "text", text: JSON.stringify(answer ?? false) }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "wait",
+    label: "Wait",
+    description: "Wait for cancellation",
+    parameters: Type.Object({}),
+    async execute(_id, _args, signal) {
+      assert.ok(signal);
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      signal.throwIfAborted();
+      return { content: [], details: {} };
     },
   });
   let sequence = 0;

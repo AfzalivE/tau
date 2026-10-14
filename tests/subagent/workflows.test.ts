@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { Type } from "typebox";
 import {
   contentText,
   getCurrentSystemPrompt,
@@ -26,14 +27,13 @@ import {
   CustomEditor,
   ToolExecutionComponent,
   getAgentDir,
-  getPackageDir,
   initTheme,
+  type ExtensionAPI,
   type ExtensionUIContext,
   type KeybindingsManager,
   type TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
 import {
-  CURSOR_MARKER,
   TuiMainScreen,
   KeybindingsManager as TuiKeys,
   TUI_KEYBINDINGS,
@@ -48,15 +48,21 @@ import {
 import ghostty from "../../extensions/ghostty.js";
 import subagent from "../../extensions/subagent/index.js";
 import sandbox from "../../extensions/sandbox/index.js";
-import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
+import {
+  assistantMessage,
+  createPiResources,
+  getPiCliPath,
+  isolatePiHome,
+  uiBoundary,
+} from "../helpers/pi.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
 import { openSelector } from "../helpers/dialog.js";
-import { mountCustomUI } from "../helpers/custom-ui.js";
 import { approvalCommand, parentModel, workerModel } from "./provider.js";
 
 const spawn = childProcess.spawn;
+const spawnSync = childProcess.spawnSync;
 type Request = Generation & { child: string; reply: (message: AssistantMessage) => void };
 type Dialog = {
   title: string;
@@ -76,12 +82,19 @@ describe("subagent", { concurrency: false }, () => {
   let foregroundShell: Awaited<ReturnType<typeof holdShellWork>> | undefined;
   let unavailable: boolean;
   let sandboxed: boolean;
-  let legacyApprovalBroker: boolean;
   let holdStartup: boolean;
   let starting: ReturnType<typeof mailbox<void>>;
   let policies: ReturnType<typeof mailbox<SandboxRuntimeConfig>>;
   let trust: ReturnType<typeof mailbox<boolean>>;
   let bashRuns: ReturnType<typeof mailbox<{ child: string; command: string; cwd: string }>>;
+  let childEvents: ReturnType<
+    typeof mailbox<{
+      child: string;
+      type: string;
+      aborted?: boolean;
+      messages?: { role: string; stopReason?: string }[];
+    }>
+  >;
 
   beforeEach(async () => {
     failures = [];
@@ -89,34 +102,39 @@ describe("subagent", { concurrency: false }, () => {
     generations = mailbox<Request>();
     unavailable = false;
     sandboxed = false;
-    legacyApprovalBroker = false;
     holdStartup = false;
     starting = mailbox<void>();
     policies = mailbox<SandboxRuntimeConfig>();
     trust = mailbox<boolean>();
     bashRuns = mailbox<{ child: string; command: string; cwd: string }>();
+    childEvents = mailbox();
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-subagent-test-"));
     cwd = path.join(directory, "cookie workshop");
     await mkdir(cwd);
     await writeFile(path.join(cwd, "toppings.txt"), "Pistachios and lime.\n");
-    const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "0.87.1");
-    const cli = path.join(getPackageDir(), manifest.bin.pi);
+    const cli = await getPiCliPath();
     const reject = (...args: unknown[]): never => {
       const error = new Error(`Unexpected external work: ${String(args[0])}`);
       failures.push(error);
       throw error;
     };
     mock.method(globalThis, "fetch", reject);
-    for (const method of [
-      "spawnSync",
-      "exec",
-      "execSync",
-      "execFile",
-      "execFileSync",
-      "fork",
-    ] as const)
+    for (const method of ["exec", "execSync", "execFile", "execFileSync", "fork"] as const)
       mock.method(childProcess, method, reject);
+    mock.method(
+      childProcess,
+      "spawnSync",
+      (...[command, args, options]: Parameters<typeof spawnSync>) => {
+        if (command !== "git" || options?.cwd !== cwd) return reject(command);
+        assert.deepEqual(args, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-dir",
+          "--git-common-dir",
+        ]);
+        return spawnSync(command, args, options);
+      },
+    );
     mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {
       if (command === "/bin/bash" && foregroundShell) {
         assert.deepEqual(args, ["-c", foregroundShell.command]);
@@ -127,7 +145,6 @@ describe("subagent", { concurrency: false }, () => {
       assert.equal(options.detached, true);
       assert.equal(options.env?.PI_CODING_AGENT_DIR, getAgentDir());
       assert.equal(options.env?.TAU_SUBAGENT_CHILD, "1");
-      assert.equal(options.env?.TAU_SUBAGENT_UNSANDBOXED_APPROVAL, "1");
       assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
       assert.ok(Array.isArray(options.stdio));
       const sessionFile = args[args.indexOf("--session") + 1];
@@ -150,7 +167,6 @@ describe("subagent", { concurrency: false }, () => {
           ...options,
           env: {
             ...options.env,
-            ...(legacyApprovalBroker ? { TAU_SUBAGENT_UNSANDBOXED_APPROVAL: undefined } : {}),
             ...(shell ? { TAU_SUBAGENT_TEST_SHELL: shell.command } : {}),
             ...(sandboxed ? { TAU_SUBAGENT_TEST_SANDBOX: "1" } : {}),
             ...(holdStartup ? { TAU_SUBAGENT_TEST_STARTUP: "1" } : {}),
@@ -166,6 +182,26 @@ describe("subagent", { concurrency: false }, () => {
         }),
       );
       processes.push(tracked);
+      // Observe actual RPC lifecycle records without replacing the child's protocol or event dispatch.
+      let buffer = "";
+      proc.stdout!.setEncoding("utf8");
+      proc.stdout!.on("data", (chunk: string) => {
+        buffer += chunk;
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (
+            ["auto_retry_start", "agent_end", "agent_settled", "tool_execution_start"].includes(
+              event.type,
+            )
+          )
+            childEvents.push({ ...event, child });
+          if (event.type === "extension_error") failures.push(event);
+        }
+      });
       proc.on("message", (data) => {
         const request = data as Generation & { type: string; id: number };
         if (request.type === "bash") {
@@ -270,10 +306,10 @@ describe("subagent", { concurrency: false }, () => {
       for (const name of ["read", "write", "edit", "bash", "ask"])
         assert.ok(tools.includes(name), `child tool ${name} is available`);
       assert.ok(!tools.includes("subagent"), "children cannot recursively delegate");
-      assert.match(
-        getCurrentSystemPrompt(request.context.messages),
-        /Other agents share these files/,
-      );
+      const systemPrompt = getCurrentSystemPrompt(request.context.messages);
+      assert.match(systemPrompt, /Other agents share these files/);
+      assert.match(systemPrompt, /Cookie catalogue revision 1\./);
+      assert.equal(systemPrompt.split("<subagent>").length - 1, 1);
     }
     assert.equal(app.status(), "", "progress must not appear in the footer");
     assert.deepEqual(
@@ -401,6 +437,11 @@ describe("subagent", { concurrency: false }, () => {
     assert.doesNotMatch(app.view(), /beta/);
     const followup = await generations.next();
     assert.equal(followup.child, "alpha");
+    const followupPrompt = getCurrentSystemPrompt(followup.context.messages);
+    assert.match(followupPrompt, /Other agents share these files/);
+    assert.match(followupPrompt, /Cookie catalogue revision 2\./);
+    assert.doesNotMatch(followupPrompt, /Cookie catalogue revision 1\./);
+    assert.equal(followupPrompt.split("<subagent>").length - 1, 1);
     assert.ok(followup.context.messages.some((message) => contentText(message.content) === answer));
     followup.reply(assistantMessage("One zest per batch."));
     assert.match(await app.reports.next(), /One zest per batch/);
@@ -433,31 +474,516 @@ describe("subagent", { concurrency: false }, () => {
     await assert.rejects(access(fullPath), { code: "ENOENT" });
   });
 
+  for (const [action, answer] of [
+    ["status", "There are twelve lime cookies."],
+    ["stop", "There are twelve lime cookies."],
+    ["status", ""],
+  ] as const) {
+    test(`consumes a completed ${answer ? "" : "no-text "}${action} result during a busy parent run without duplicate delivery`, async () => {
+      app = await openParent(cwd, failures);
+      app.press("\x0f");
+      await app.run({ action: "start", goal: "Count cookies", prompt: "Count the tray." });
+      const worker = await generations.next();
+      const parent = app.session.prompt("Wait for the timer.");
+      const waiting = await app.parentGenerations.next();
+      const expected = answer || "Subagent finished without a text answer.";
+      worker.reply(assistantMessage(answer));
+      await app.waitForView((view) => view.includes("✓ alpha"));
+      assert.equal(app.reportCount(), 0, "busy parents retain unread completions");
+
+      const id = randomUUID();
+      waiting(call("subagent", { action, id: "alpha" }, id));
+      const continued = await app.parentGenerations.next();
+      const result = app.result(id);
+      assert.equal(result.isError, false, contentText(result.content));
+      assert.equal(contentText(result.content).split("\n\n").at(-1), expected);
+      if (action === "stop") assert.equal(processes[0].hasClosed, true);
+      const calls = app.parentCalls();
+      continued(assistantMessage("The tray is counted."));
+      await parent;
+      await app.session.waitForIdle();
+      assert.equal(app.reportCount(), 0, "the tool result already delivered this completion");
+      assert.equal(app.reports.size, 0);
+      assert.equal(app.parentCalls(), calls, "consuming a report must suppress its wakeup");
+
+      if (action === "status") {
+        await app.run({ action: "steer", id: "alpha", message: "Count the next identical tray." });
+        const before = app.parentCalls();
+        (await generations.next()).reply(assistantMessage(answer));
+        assert.ok((await app.reports.next()).includes(expected));
+        await app.session.waitForIdle();
+        assert.equal(app.reportCount(), 1, "a later run is eligible even with identical text");
+        assert.equal(app.parentCalls(), before + 1);
+      }
+    });
+  }
+
+  test("reading a late process exit error leaves the completed answer unread for delivery", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Count cookies", prompt: "Count the tray." });
+    const worker = await generations.next();
+    const parent = app.session.prompt("Wait for the timer.");
+    const waiting = await app.parentGenerations.next();
+    worker.reply(assistantMessage("There are twelve lime cookies."));
+    await app.waitForView((view) => view.includes("✓ alpha"));
+    const child = processes[0];
+    assert.equal(child.process.kill("SIGKILL"), true);
+    await deadline(child.closed, "late child process exit");
+
+    const id = randomUUID();
+    waiting(call("subagent", { action: "status", id: "alpha" }, id));
+    const continued = await app.parentGenerations.next();
+    const result = app.result(id);
+    assert.equal(result.isError, false);
+    assert.equal(result.details.state, "error");
+    assert.match(contentText(result.content), /Subagent exited \(SIGKILL\)/);
+    assert.doesNotMatch(contentText(result.content), /There are twelve lime cookies/);
+    assert.equal(app.reportCount(), 0);
+    const calls = app.parentCalls();
+    continued(assistantMessage("The timer rang."));
+    await parent;
+    const report = await app.reports.next();
+    assert.match(report, /alpha · Count cookies · idle/);
+    assert.match(report, /There are twelve lime cookies\./);
+    assert.doesNotMatch(report, /Subagent exited|SIGKILL/);
+    await app.session.waitForIdle();
+    assert.equal(
+      app.reportCount(),
+      1,
+      "reading a different error must not consume the completed snapshot",
+    );
+    assert.equal(app.reports.size, 0);
+    assert.equal(app.parentCalls(), calls + 1);
+  });
+
+  test("listing completed children leaves their answers unread and batches them into one hidden wakeup", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Count cookies", prompt: "Count the tray." });
+    const alpha = await generations.next();
+    await app.run({ action: "start", goal: "Choose icing", prompt: "Choose an icing." });
+    const beta = await generations.next();
+    const parent = app.session.prompt("Wait for the timer.");
+    const waiting = await app.parentGenerations.next();
+    alpha.reply(assistantMessage("There are twelve cookies."));
+    beta.reply(assistantMessage("Use the lime icing."));
+    await app.waitForView((view) => view.includes("✓ alpha") && view.includes("✓ beta"));
+
+    const id = randomUUID();
+    waiting(call("subagent", { action: "status" }, id));
+    const continued = await app.parentGenerations.next();
+    const listed = app.result(id);
+    assert.equal(listed.isError, false);
+    assert.match(contentText(listed.content), /alpha.*idle/);
+    assert.match(contentText(listed.content), /beta.*idle/);
+    assert.doesNotMatch(contentText(listed.content), /twelve cookies|lime icing/);
+    assert.equal(app.reportCount(), 0);
+    const calls = app.parentCalls();
+    continued(assistantMessage("The timer rang."));
+    await parent;
+    const report = await app.reports.next();
+    assert.match(report, /alpha · Count cookies · idle/);
+    assert.match(report, /There are twelve cookies\./);
+    assert.match(report, /beta · Choose icing · idle/);
+    assert.match(report, /Use the lime icing\./);
+    await app.session.waitForIdle();
+    assert.equal(app.reportCount(), 1, "all unread completions share one custom message");
+    assert.equal(app.reports.size, 0);
+    assert.equal(app.parentCalls(), calls + 1, "the batch schedules only one model request");
+    const modelReport = app.parentContexts.at(-1)!.messages.at(-1)!;
+    assert.equal(modelReport.role, "user", "Pi converts hidden custom content for the model");
+    assert.equal(
+      contentText(modelReport.content),
+      report,
+      "the internal wrapper reaches the model",
+    );
+  });
+
+  test("reading a partial status does not consume its completion or an identical follow-up", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Inspect toppings", prompt: "Read toppings.txt." });
+    const worker = await generations.next();
+    const parent = app.session.prompt("Wait for the timer.");
+    const waiting = await app.parentGenerations.next();
+    worker.reply({
+      ...call("read", { path: "toppings.txt" }),
+      content: [
+        { type: "text", text: "The pistachios look promising." },
+        ...call("read", { path: "toppings.txt" }).content,
+      ],
+    });
+    let event;
+    do {
+      event = await childEvents.next();
+    } while (event.child !== worker.child || event.type !== "tool_execution_start");
+    const finishing = await generations.next();
+    const id = randomUUID();
+    waiting(call("subagent", { action: "status", id: "alpha" }, id));
+    const continued = await app.parentGenerations.next();
+    const partial = app.result(id);
+    assert.equal(partial.isError, false);
+    assert.equal(partial.details.state, "running");
+    assert.match(contentText(partial.content), /The pistachios look promising\./);
+    const answer = "Pistachios and lime are ready.";
+    finishing.reply(assistantMessage(answer));
+    await app.waitForView((view) => view.includes("✓ alpha"));
+    continued(assistantMessage("The toppings are inspected."));
+    await parent;
+    assert.match(await app.reports.next(), /Pistachios and lime are ready\./);
+    await app.session.waitForIdle();
+    assert.equal(app.reportCount(), 1);
+
+    await app.run({ action: "steer", id: "alpha", message: "Inspect the next identical batch." });
+    const calls = app.parentCalls();
+    (await generations.next()).reply(assistantMessage(answer));
+    assert.match(await app.reports.next(), /Pistachios and lime are ready\./);
+    await app.session.waitForIdle();
+    assert.equal(app.reportCount(), 2, "delivery does not deduplicate future runs by answer text");
+    assert.equal(app.parentCalls(), calls + 1);
+  });
+
+  for (const readsNewCompletion of [false, true]) {
+    test(`steering an unread child preserves its older completed snapshot ${readsNewCompletion ? "after a newer completion is consumed" : "while new work runs"}`, async () => {
+      app = await openParent(cwd, failures);
+      app.press("\x0f");
+      await app.run({ action: "start", goal: "Count toppings", prompt: "Count the pistachios." });
+      const worker = await generations.next();
+      const parent = app.session.prompt("Wait for the timer.");
+      const waiting = await app.parentGenerations.next();
+      worker.reply(assistantMessage("Six pistachios."));
+      await app.waitForView((view) => view.includes("✓ alpha"));
+      const steerId = randomUUID();
+      waiting(
+        call(
+          "subagent",
+          { action: "steer", id: "alpha", message: "Count the lime slices." },
+          steerId,
+        ),
+      );
+      const steered = await app.parentGenerations.next();
+      assert.equal(app.result(steerId).isError, false);
+      const followUp = await generations.next();
+      const statusId = randomUUID();
+      steered(call("subagent", { action: "status", id: "alpha" }, statusId));
+      let continued = await app.parentGenerations.next();
+      const running = app.result(statusId);
+      assert.equal(running.details.state, "running");
+      assert.doesNotMatch(contentText(running.content), /Six pistachios/);
+      assert.equal(app.reportCount(), 0);
+      if (readsNewCompletion) {
+        followUp.reply(assistantMessage("Eight lime slices."));
+        await app.waitForView((view) => view.includes("✓ alpha"));
+        const completedId = randomUUID();
+        continued(call("subagent", { action: "status", id: "alpha" }, completedId));
+        continued = await app.parentGenerations.next();
+        const completed = app.result(completedId);
+        assert.equal(completed.isError, false);
+        assert.match(contentText(completed.content), /Eight lime slices\./);
+        assert.doesNotMatch(contentText(completed.content), /Six pistachios/);
+      }
+      const calls = app.parentCalls();
+      continued(assistantMessage("The timer rang."));
+      await parent;
+      const report = await app.reports.next();
+      assert.match(report, /alpha · Count toppings · idle/);
+      assert.match(report, /Six pistachios\./);
+      assert.doesNotMatch(report, /Eight lime slices/);
+      await app.session.waitForIdle();
+      assert.equal(
+        app.reportCount(),
+        1,
+        "the unread older run survives steering and reads of newer runs",
+      );
+      assert.equal(app.reports.size, 0);
+      assert.equal(app.parentCalls(), calls + 1);
+      if (!readsNewCompletion) {
+        followUp.reply(assistantMessage("Eight lime slices."));
+        assert.match(await app.reports.next(), /Eight lime slices\./);
+        await app.session.waitForIdle();
+        assert.equal(
+          app.reportCount(),
+          2,
+          "finishing new work remains eligible after the old snapshot was delivered",
+        );
+      }
+    });
+  }
+
+  for (const action of ["status", "stop"] as const) {
+    test(`${action} joins delayed answer persistence before returning and consuming a completed report`, async () => {
+      app = await openParent(cwd, failures);
+      await app.run({
+        action: "start",
+        goal: "Seal the recipe",
+        prompt: "Report the full recipe.",
+      });
+      const worker = await generations.next();
+      const parent = app.session.prompt("Wait for the timer.");
+      const waiting = await app.parentGenerations.next();
+      const saving = mailbox<void>();
+      const release = mailbox<void>();
+      const executing = mailbox<void>();
+      const id = randomUUID();
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "tool_execution_start" && event.toolCallId === id) executing.push();
+      });
+      const originalWrite = fs.writeFile;
+      const writer = mock.method(
+        fs,
+        "writeFile",
+        async (...args: Parameters<typeof fs.writeFile>) => {
+          if (/\/answer-[^/]+\.md$/.test(String(args[0]))) {
+            saving.push();
+            await release.next();
+          }
+          return originalWrite(...args);
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const answer = "Lime zest and pistachios.\n".repeat(1000);
+        worker.reply(assistantMessage(answer));
+        await saving.next();
+        waiting(call("subagent", { action, id: "alpha" }, id));
+        await executing.next();
+        assert.equal(app.reportCount(), 0, "persistence cannot deliver early");
+        release.push();
+        const continued = await app.parentGenerations.next();
+        const result = app.result(id);
+        assert.equal(result.isError, false, contentText(result.content));
+        const fullPath = contentText(result.content).match(/Full answer: (.+)/)?.[1];
+        assert.ok(
+          fullPath,
+          "the tool must wait for the persisted completed snapshot, not return a partial answer",
+        );
+        assert.equal(await readFile(fullPath, "utf8"), answer);
+        if (action === "stop") assert.equal(processes[0].hasClosed, true);
+        const calls = app.parentCalls();
+        continued(assistantMessage("The recipe is sealed."));
+        await parent;
+        await app.session.waitForIdle();
+        assert.equal(
+          app.reportCount(),
+          0,
+          "a completion queued during persistence is consumed by the read",
+        );
+        assert.equal(app.reports.size, 0);
+        assert.equal(app.parentCalls(), calls);
+      } finally {
+        release.push();
+        unsubscribe();
+        writer.mock.restore();
+        syncBuiltinESMExports();
+      }
+    });
+  }
+
   test("delivers completed answers after a busy parent settles, without waking an aborted parent", async () => {
     app = await openParent(cwd, failures);
     app.press("\x0f");
-    for (const abort of [false, true]) {
+    for (const boundary of ["complete", "model", "tool", "retry", "complete"] as const) {
+      const abort = boundary !== "complete";
       const child = await app.run({
         action: "start",
         goal: "Watch the timer",
         prompt: "Report when ready.",
       });
       const worker = await generations.next();
+      let busyChild: (typeof processes)[number] | undefined;
+      if (boundary === "tool" || boundary === "retry") {
+        await app.run({ action: "start", goal: "Keep stirring", prompt: "Wait for instructions." });
+        await generations.next();
+        busyChild = processes.at(-1)!;
+      }
+      const ready = mailbox<void>();
+      const settlements: boolean[] = [];
+      let lastReason: string | undefined;
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "auto_retry_start" || event.type === "tool_execution_start")
+          ready.push();
+        if (event.type === "agent_settled") settlements.push(event.aborted);
+        if (event.type === "agent_end")
+          lastReason = event.messages.findLast(
+            (message) => message.role === "assistant",
+          )?.stopReason;
+      });
+      app.settingsManager.applyOverrides({
+        retry: { enabled: boundary === "retry", baseDelayMs: 60_000, maxRetries: 1 },
+      });
       const parent = app.session.prompt("Wait for the timer.");
       const waiting = await app.parentGenerations.next();
+      if (boundary === "retry")
+        waiting({ ...assistantMessage(""), stopReason: "error", errorMessage: "529 overloaded" });
+      if (boundary === "tool") waiting(call("wait", {}));
+      if (boundary === "retry" || boundary === "tool") await ready.next();
+      if (boundary === "retry") assert.equal(app.session.isRetrying, true);
       worker.reply(assistantMessage("The cookies are ready."));
       await app.waitForView((view) => view.includes(`✓ ${child.details.id}`));
       const before = app.parentCalls();
       const count = app.reportCount();
-      if (abort) app.press("\x1b");
+      if (boundary === "model") app.press("\x1b");
+      else if (abort) await app.session.abort();
       else waiting(assistantMessage("The timer rang."));
       await parent;
+      if (busyChild) {
+        assert.equal(
+          busyChild.hasClosed,
+          true,
+          "whole-run abort joins the working child's process",
+        );
+        assert.equal(
+          lastReason,
+          "error",
+          "the final assistant alone does not identify cancellation",
+        );
+      }
+      assert.equal(settlements[0], abort);
+      unsubscribe();
       assert.match(await app.reports.next(), /The cookies are ready/);
       await app.session.waitForIdle();
       assert.equal(app.reportCount(), count + 1);
       assert.equal(app.parentCalls(), before + (abort ? 0 : 1));
     }
   });
+
+  test("holds reports until its own settlement handler sees cancellation after an earlier extension waits", async () => {
+    const settling = mailbox<void>();
+    const release = mailbox<void>();
+    app = await openParent(cwd, failures, true, false, true, async (aborted) => {
+      if (!aborted) return;
+      settling.push();
+      await release.next();
+    });
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Watch the glaze", prompt: "Report readiness." });
+    const worker = await generations.next();
+    app.settingsManager.applyOverrides({
+      retry: { enabled: true, baseDelayMs: 60_000, maxRetries: 1 },
+    });
+    const retrying = mailbox<void>();
+    const unsubscribe = app.session.subscribe((event) => {
+      if (event.type === "auto_retry_start") retrying.push();
+    });
+    const parent = app.session.prompt("Wait for the timer.");
+    (await app.parentGenerations.next())({
+      ...assistantMessage(""),
+      stopReason: "error",
+      errorMessage: "529 overloaded",
+    });
+    await retrying.next();
+    const abort = app.session.abort();
+    try {
+      await settling.next();
+      assert.equal(
+        app.session.isIdle,
+        true,
+        "Pi becomes idle before all extension settlement handlers finish",
+      );
+      const calls = app.parentCalls();
+      worker.reply(assistantMessage("The glaze is ready."));
+      await app.waitForView((view) => view.includes("✓ alpha"));
+      assert.equal(
+        app.reportCount(),
+        0,
+        "the completed report waits for cancellation classification",
+      );
+      assert.equal(
+        app.parentCalls(),
+        calls,
+        "an earlier settlement dialog must not allow a report to restart the parent",
+      );
+      release.push();
+      await abort;
+      await parent;
+      assert.match(await app.reports.next(), /The glaze is ready/);
+      assert.equal(
+        app.parentCalls(),
+        calls,
+        "the report must not have scheduled a post-cancellation turn",
+      );
+      assert.equal(app.reportCount(), 1);
+      await app.run({ action: "steer", id: "alpha", message: "Watch the next glaze." });
+      const before = app.parentCalls();
+      (await generations.next()).reply(assistantMessage("The next glaze is ready."));
+      assert.match(await app.reports.next(), /The next glaze is ready/);
+      await app.session.waitForIdle();
+      assert.equal(app.parentCalls(), before + 1, "idle background reports resume on a fresh run");
+    } finally {
+      release.push();
+      unsubscribe();
+      await abort;
+      await parent;
+    }
+  });
+
+  for (const boundary of ["tool", "retry"] as const) {
+    test(`keeps independently aborted ${boundary} child runs steerable and preserves their partial answers`, async () => {
+      // Child settings are ordinary isolated Pi configuration, not a manufactured retry event.
+      await mkdir(path.join(cwd, ".pi"));
+      await writeFile(
+        path.join(cwd, ".pi", "settings.json"),
+        JSON.stringify({
+          retry: { enabled: true, baseDelayMs: 60_000, maxRetries: 1 },
+          compaction: { enabled: false },
+        }),
+      );
+      app = await openParent(cwd, failures);
+      app.press("\x0f");
+      await app.run({ action: "start", goal: "Inspect icing", prompt: "Inspect the icing." });
+      const worker = await generations.next();
+      const partial = "The lime icing is bright.\n".repeat(1000);
+      if (boundary === "retry")
+        worker.reply({
+          ...assistantMessage(partial),
+          stopReason: "error",
+          errorMessage: "529 overloaded",
+        });
+      else
+        worker.reply({
+          ...call("wait", {}),
+          content: [{ type: "text", text: partial }, ...call("wait", {}).content],
+        });
+      let event;
+      do {
+        event = await childEvents.next();
+      } while (event.type !== (boundary === "retry" ? "auto_retry_start" : "tool_execution_start"));
+      const child = processes[0];
+      child.process.stdin!.write(`${JSON.stringify({ id: "fixture-abort", type: "abort" })}\n`);
+      do {
+        event = await childEvents.next();
+      } while (event.type !== "agent_settled");
+      assert.equal(event.aborted, true);
+      const report = await app.reports.next();
+      assert.match(report, / · aborted · /);
+      const fullPath = report.match(/Full answer: (.+)/)?.[1];
+      assert.ok(fullPath);
+      const detail = boundary === "retry" ? "529 overloaded" : "This operation was aborted";
+      assert.equal(
+        await readFile(fullPath, "utf8"),
+        `${partial}\n\n${detail}\n\nSubagent run aborted.`,
+      );
+      await app.session.waitForIdle();
+      assert.equal(child.hasClosed, false, "an aborted run is not a closed conversation");
+      assert.equal(generations.size, 0);
+      const status = await app.run({ action: "status", id: "alpha" });
+      assert.equal(status.details.state, "aborted");
+      assert.match(contentText(status.content), /The lime icing is bright/);
+      await app.run({ action: "steer", id: "alpha", message: "Try the vanilla icing." });
+      (await generations.next()).reply(assistantMessage("Vanilla icing is ready."));
+      do {
+        event = await childEvents.next();
+      } while (event.type !== "agent_settled");
+      assert.equal(event.aborted, false);
+      assert.match(await app.reports.next(), / · idle · .*\n\nVanilla icing is ready\./s);
+      assert.equal(app.reportCount(), 2);
+      assert.equal(
+        await readFile(fullPath, "utf8"),
+        `${partial}\n\n${detail}\n\nSubagent run aborted.`,
+      );
+    });
+  }
 
   test("requires confirmation without interrupting work on dismissal and preserves native queued input", async () => {
     app = await openParent(cwd, failures);
@@ -585,7 +1111,7 @@ describe("subagent", { concurrency: false }, () => {
     const alpha = await generations.next();
     const inherited = await policies.next();
     assert.deepEqual(inherited.network.deniedDomains, ["syrup.invalid"]);
-    assert.ok(inherited.filesystem.denyWrite.includes("glaze-secret.txt"));
+    assert.ok(inherited.filesystem.denyWrite.includes(path.join(cwd, "glaze-secret.txt")));
     await app.run({ action: "start", goal: "Choose sprinkles", prompt: "Ask about sprinkles." });
     const beta = await generations.next();
     const unrelated = app.session.prompt("/recipe-notes");
@@ -611,7 +1137,9 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(app.view(), /beta.*approval/);
     assert.ok(app.lines().some((line) => line.includes(app!.theme.fg("warning", "?"))));
     const parent = app.session.prompt("/parent-approval");
-    await app.parentQueued.next();
+    await app.parentQueued.next().catch((error) => {
+      throw new Error("Parent network approval was not queued", { cause: error });
+    });
     const stopped = await app.run({ action: "stop", id: "beta" });
     assert.equal(stopped.details.state, "stopped");
     assert.ok(processes[1].hasClosed);
@@ -641,7 +1169,9 @@ describe("subagent", { concurrency: false }, () => {
     (await generations.next()).reply(call("ask", { name: "Allow garnish?", select: true }));
     await app.waitForView((view) => /gamma.*approval/.test(view));
     const parentOnShutdown = app.session.prompt("/parent-approval");
-    await app.parentQueued.next();
+    await app.parentQueued.next().catch((error) => {
+      throw new Error("Shutdown network approval was not queued", { cause: error });
+    });
     await app.dispose();
     await parentOnShutdown;
     assert.deepEqual(
@@ -682,74 +1212,31 @@ describe("subagent", { concurrency: false }, () => {
       const result = await generations.next();
       assert.equal(contentText(result.context.messages.at(-1)!.content), "iced biscuit\n");
       assert.equal(app.dialogs.size, 0, "disabled sandbox execution must not request approval");
-      assert.equal(app.reviews.size, 0);
       result.reply(assistantMessage("Biscuit iced without sandboxing."));
       await app.reports.next();
     });
   }
 
-  test("forwards one-shot Bash approval to the parent without granting later child commands a bypass", async () => {
+  test("child Bash uses the parent's active sandbox policy", async () => {
     sandboxed = true;
     app = await openParent(cwd, failures, true, true);
     await app.run({
       action: "start",
       goal: "Ice one biscuit",
-      prompt: "Ask before running outside the sandbox.",
+      prompt: "Run the icing command with the inherited sandbox state.",
     });
-    const request = { command: approvalCommand, requestUnsandboxed: true };
-    const childCwd = await fs.realpath(cwd);
-    (await generations.next()).reply(call("bash", request));
-    const approval = await reviewRequest();
-    approval.handleInput!("\x1b[B");
-    approval.render(160);
-    approval.handleInput!("\r");
-    const approved = await generations.next();
-    assert.equal(contentText(approved.context.messages.at(-1)!.content), "iced biscuit\n");
+    (await generations.next()).reply(call("bash", { command: approvalCommand }));
+    const result = await generations.next();
+    assert.equal(contentText(result.context.messages.at(-1)!.content), "sandboxed biscuit\n");
     assert.deepEqual(await bashRuns.next(), {
       child: "alpha",
-      command: approvalCommand,
-      cwd: childCwd,
+      command: "printf 'sandboxed biscuit\\n'",
+      cwd: await fs.realpath(cwd),
     });
-
-    approved.reply(call("bash", request));
-    const fresh = await reviewRequest();
-    assert.equal(bashRuns.size, 0, "the earlier answer must not approve an identical request");
-    fresh.handleInput!("\r");
-    const denied = await generations.next();
-    const denial = denied.context.messages.at(-1)!;
-    assert.equal(denial.role, "toolResult");
-    assert.equal(denial.isError, true);
-    assert.match(contentText(denial.content), /denied/i);
-    assert.equal(bashRuns.size, 0, "denial must not execute the command");
-
-    denied.reply(call("bash", { command: approvalCommand }));
-    const ordinary = await generations.next();
-    assert.equal(contentText(ordinary.context.messages.at(-1)!.content), "sandboxed biscuit\n");
-    assert.equal((await bashRuns.next()).child, "alpha");
-    assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox without a bypass");
-    ordinary.reply(assistantMessage("One biscuit iced. The next stayed sandboxed."));
-    assert.match(await app.reports.next(), /One biscuit iced/);
+    assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox");
+    result.reply(assistantMessage("The biscuit stayed sandboxed."));
+    assert.match(await app.reports.next(), /The biscuit stayed sandboxed/);
     assert.equal(app.editor.getText(), "Unsent cookie recipe");
-
-    /** Inspect the real parent-owned viewer before sending its public keyboard input. */
-    async function reviewRequest(): Promise<Component> {
-      const { component } = await app!.reviews.next();
-      const rendered = component
-        .render(160)
-        .map(stripVTControlCharacters)
-        .join("\n")
-        .replaceAll(CURSOR_MARKER, "");
-      assert.match(rendered, /alpha.*Ice one biscuit/s);
-      assert.match(rendered, /^ +→ Deny *$/m, "every new request starts with denial selected");
-      assert.match(rendered, /Run once outside sandbox/);
-      assert.ok(rendered.includes(`$ ${approvalCommand}`), "show the full command to the parent");
-      assert.ok(rendered.includes(childCwd), "show the child's working directory to the parent");
-      assert.equal(bashRuns.size, 0, "no execution before human approval");
-      assert.equal(generations.size, 0, "approval waits for the user, not another agent turn");
-      assert.equal(app!.dialogs.size, 0, "one-shot review must not use a clipped native selector");
-      assert.ok(component.handleInput);
-      return component;
-    }
   });
 
   test("Escape and session changes join startup, Bash work, and result delivery", async () => {
@@ -926,7 +1413,10 @@ describe("subagent", { concurrency: false }, () => {
     const worker = await generations.next();
     assert.equal(worker.child, "alpha-2");
     worker.reply(assistantMessage("The spare oven is ready."));
-    assert.match(await app.reports.next(), /^alpha-2 · Try the spare oven/);
+    assert.match(
+      await app.reports.next(),
+      /^Internal subagent reports\b[\s\S]*\nalpha-2 · Try the spare oven/,
+    );
     await app.session.waitForIdle();
 
     const target = app.session.sessionManager
@@ -962,31 +1452,46 @@ describe("subagent", { concurrency: false }, () => {
     });
   }
 
-  for (const host of ["headless", "old approval broker"] as const) {
-    test(`denies unsandboxed child execution with ${host} parent`, async () => {
-      sandboxed = true;
-      legacyApprovalBroker = host === "old approval broker";
-      app = await openParent(cwd, failures, host !== "headless", true);
-      await app.run({
-        action: "start",
-        goal: "Keep the biscuit safe",
-        prompt: "Ask before running outside the sandbox.",
-      });
-      (await generations.next()).reply(
-        call("bash", { command: approvalCommand, requestUnsandboxed: true }),
+  test("recommendations stay advisory and children do not load the parent's selection config", async () => {
+    const home = await isolatePiHome();
+    const configPath = path.join(getAgentDir(), "subagent.json");
+    try {
+      await mkdir(getAgentDir(), { recursive: true });
+      await writeFile(
+        configPath,
+        JSON.stringify([{ id: "high", model: "worker-fixture/quick", thinking: "low" }]),
       );
-      const denied = await generations.next();
-      const result = denied.context.messages.at(-1)!;
-      assert.equal(result.role, "toolResult");
-      assert.equal(result.isError, true);
-      assert.match(contentText(result.content), /denied/i);
-      if (legacyApprovalBroker)
-        assert.match(contentText(result.content), /Reload the parent and start a new subagent/);
-      assert.equal(bashRuns.size, 0, "an unsupported parent cannot approve child execution");
-      assert.equal(app.dialogs.size, 0, "never fall back to an old parent's native selector");
-      assert.equal(app.reviews.size, 0);
-    });
-  }
+      app = await openParent(cwd, failures, false);
+      // The parent has loaded its guidance. Children must not read selection configuration.
+      await writeFile(configPath, "not valid JSON");
+      const inherited = await app.run({
+        action: "start",
+        goal: "Inspect the oven",
+        prompt: "Investigate the oven's concurrency controls.",
+      });
+      assert.equal(inherited.isError, false, contentText(inherited.content));
+      assert.equal(inherited.details.model, "test/reply");
+      assert.equal(inherited.details.thinking, "high");
+      await generations.next();
+      const explicit = await app.run({
+        action: "start",
+        goal: "Check the timer",
+        prompt: "Inspect timer.txt only.",
+        model: "worker-fixture/quick",
+        thinking: "low",
+      });
+      assert.equal(explicit.isError, false, contentText(explicit.content));
+      assert.equal(explicit.details.model, "worker-fixture/quick");
+      assert.equal(explicit.details.thinking, "low");
+      await generations.next();
+    } finally {
+      try {
+        await app?.dispose();
+      } finally {
+        await home.dispose();
+      }
+    }
+  });
 
   test("headless startup failures stay failures, and permission requests are denied without waiting", async () => {
     app = await openParent(cwd, failures, false);
@@ -1025,7 +1530,6 @@ describe("subagent", { concurrency: false }, () => {
     assert.ok(answerPath);
     assert.equal(await readFile(answerPath, "utf8"), denial);
     assert.equal(app.dialogs.size, 0);
-    assert.equal(app.reviews.size, 0);
     await app.dispose();
     app = await openParent(cwd, failures, false, "blocked");
     const count = processes.length;
@@ -1048,6 +1552,7 @@ async function openParent(
   interactive = true,
   withSandbox: boolean | "blocked" | "disabled" | "no-sandbox" = false,
   trusted = true,
+  beforeSettled?: (aborted: boolean) => Promise<void>,
 ) {
   let askParent: SandboxAskCallback | undefined;
   if (withSandbox) {
@@ -1063,6 +1568,13 @@ async function openParent(
         askParent = ask;
       },
     );
+    // Exercise parent approvals within a real Bash invocation, replacing only SRT's boundary.
+    mock.method(SandboxManager, "wrapWithSandbox", async (command: string) => {
+      assert.equal(command, "fixture-parent-network");
+      assert.ok(askParent);
+      assert.equal(await askParent({ host: "parent-approval.invalid", port: 443 }), false);
+      throw new Error("Fixture parent network request denied");
+    });
     await writeFile(
       path.join(cwd, "sandbox-fixture.json"),
       JSON.stringify({
@@ -1086,24 +1598,34 @@ async function openParent(
   const planned = new Map<string, JsonObject>();
   const reports = mailbox<string>();
   const dialogs = mailbox<Dialog>();
-  const reviews = mailbox<Awaited<ReturnType<typeof mountCustomUI>>>();
   const views = mailbox<string>();
   const parentQueued = mailbox<void>();
   const parentGenerations = mailbox<(message: AssistantMessage) => void>();
   let parentCalls = 0;
+  let waitingParent = false;
   const parentContexts: Generation["context"][] = [];
   const resources = await createPiResources(cwd, getAgentDir(), [
     ghostty,
     ...(withSandbox ? [sandbox] : []),
+    ...(beforeSettled
+      ? [
+          (pi: ExtensionAPI) => {
+            pi.on("agent_settled", (event) => beforeSettled(event.aborted));
+          },
+        ]
+      : []),
     subagent,
     scriptedProvider(parentModel, ({ context }, signal) => {
       parentCalls++;
       parentContexts.push(context);
       const last = context.messages.at(-1)!;
-      if (last.role === "user" && contentText(last.content) === "Wait for the timer.") {
+      if (last.role === "user") waitingParent = contentText(last.content) === "Wait for the timer.";
+      // Keep this scripted run controllable across real tool batches until its final answer.
+      if (waitingParent) {
         return new Promise<AssistantMessage>((resolve) => {
           const finish = (message: AssistantMessage) => {
             signal?.removeEventListener("abort", cancel);
+            waitingParent = message.stopReason === "toolUse";
             resolve(message);
           };
           const cancel = () => finish({ ...assistantMessage(""), stopReason: "aborted" });
@@ -1141,6 +1663,21 @@ async function openParent(
       pi.events.on("subagent:permission", () => {
         parentQueued.push();
       });
+      pi.registerTool({
+        name: "wait",
+        label: "Wait",
+        description: "Wait for the timer",
+        parameters: Type.Object({}),
+        async execute(_id, _args, signal) {
+          assert.ok(signal);
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          signal.throwIfAborted();
+          return { content: [], details: {} };
+        },
+      });
       pi.registerCommand("recipe-notes", {
         description: "An unrelated native UI prompt",
         async handler(_args, ctx) {
@@ -1154,8 +1691,12 @@ async function openParent(
         description:
           "Deliver a network denial through the parent's actual Sandbox permission callback",
         async handler() {
-          assert.ok(askParent);
-          assert.equal(await askParent({ host: "parent-approval.invalid", port: 443 }), false);
+          const bash = session.agent.state.tools.find((tool) => tool.name === "bash");
+          assert.ok(bash);
+          await assert.rejects(
+            bash.execute("parent-approval-fixture", { command: "fixture-parent-network" }),
+            /Fixture parent network request denied|Command aborted/,
+          );
         },
       });
     },
@@ -1171,12 +1712,11 @@ async function openParent(
     ...resources,
     model: parentModel,
     thinkingLevel: "high",
-    tools: ["subagent"],
+    tools: ["subagent", "wait", ...(withSandbox ? ["bash"] : [])],
   });
   let disposed = false;
   let sequence = 0;
   let activeDialog: Dialog | undefined;
-  let activeReview: Awaited<ReturnType<typeof mountCustomUI>> | undefined;
   let expanded = false;
   let renders = 0;
   let statusWrites = 0;
@@ -1225,6 +1765,13 @@ async function openParent(
   };
   const lines = (width = 160) => [...widgets.values()].flatMap((widget) => widget.render(width));
   const view = (width = 160) => lines(width).map(stripVTControlCharacters).join("\n");
+  const result = (id: string) => {
+    const message = session.messages.find(
+      (message) => message.role === "toolResult" && message.toolCallId === id,
+    );
+    assert.ok(message?.role === "toolResult", `missing result for ${id}`);
+    return message as typeof message & { details: Record<string, unknown> };
+  };
   const redraw = tui.requestRender.bind(tui);
   tui.requestRender = () => {
     renders++;
@@ -1232,8 +1779,7 @@ async function openParent(
     redraw();
   };
   const show = async (title: string, choices: string[] | undefined, signal?: AbortSignal) => {
-    if (activeDialog || activeReview)
-      failures.push(new Error("An approval dialog was overwritten"));
+    if (activeDialog) failures.push(new Error("An approval dialog was overwritten"));
     const selector = openSelector(tui, editor, title, choices ?? ["Yes", "No"], signal, () => {
       expanded = !expanded;
     });
@@ -1294,19 +1840,6 @@ async function openParent(
           listeners.delete(handler);
         };
       },
-      custom: async (factory, options) => {
-        if (activeDialog || activeReview)
-          failures.push(new Error("An approval dialog was overwritten"));
-        const review = await mountCustomUI(factory, theme, undefined, options);
-        activeReview = review;
-        try {
-          reviews.push(review);
-          return await review.result;
-        } finally {
-          review.dispose();
-          activeReview = undefined;
-        }
-      },
       select: async (title, choices, options) =>
         (await show(title, choices, options?.signal)) as string | undefined,
       confirm: async (title, _message, options) =>
@@ -1321,7 +1854,12 @@ async function openParent(
       event.message.customType === "subagent"
     ) {
       assert.equal(event.message.display, false, "internal reports must not appear in chat");
-      reports.push(String(event.message.content));
+      const content = contentText(event.message.content);
+      assert.match(content, /^Internal subagent reports\b/);
+      assert.match(content, /internal evidence/i);
+      assert.match(content, /not (?:a )?user requests?/i);
+      assert.match(content, /Never acknowledge a report as a standalone reply/);
+      reports.push(content);
     }
   });
   const dispose = async () => {
@@ -1354,6 +1892,7 @@ async function openParent(
     });
     return {
       session,
+      settingsManager: resources.settingsManager,
       tui,
       editor,
       reports,
@@ -1366,10 +1905,10 @@ async function openParent(
       },
       title: () => titles.at(-1) ?? "",
       dialogs,
-      reviews,
       parentQueued,
       parentGenerations,
       parentCalls: () => parentCalls,
+      result,
       view,
       lines,
       theme,
@@ -1415,11 +1954,7 @@ async function openParent(
         planned.set(id, args);
         await session.prompt(id, { source: "extension" });
         await session.waitForIdle();
-        const message = session.messages.find(
-          (message) => message.role === "toolResult" && message.toolCallId === id,
-        );
-        assert.ok(message?.role === "toolResult", `missing result for ${id}`);
-        return message as typeof message & { details: Record<string, unknown> };
+        return result(id);
       },
     };
   } catch (error) {

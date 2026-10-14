@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, test } from "node:test";
@@ -13,6 +13,8 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
   const originalCwd = process.cwd();
   let home: Awaited<ReturnType<typeof isolatePiHome>>;
   let config: typeof import("../../extensions/sandbox/config.js");
+  let directory: string;
+  let launcherCwd: string;
   let cwd: string;
   let configPath: string;
 
@@ -25,8 +27,12 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
   after(async () => home.dispose());
 
   beforeEach(async () => {
-    cwd = await mkdtemp(path.join(os.tmpdir(), "tau-sandbox-defaults-"));
-    process.chdir(cwd);
+    directory = await mkdtemp(path.join(os.tmpdir(), "tau-sandbox-defaults-"));
+    launcherCwd = path.join(directory, "shell dock");
+    cwd = path.join(directory, "octopus session");
+    await mkdir(launcherCwd);
+    await mkdir(cwd);
+    process.chdir(launcherCwd);
     await mkdir(getAgentDir(), { recursive: true });
   });
 
@@ -36,12 +42,17 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
     } finally {
       process.chdir(originalCwd);
       await rm(configPath, { force: true });
-      await rm(cwd, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
   test("native watching is a macOS default, while explicit service restrictions still replace defaults", async () => {
     const defaults = config.loadConfig(cwd).config;
+    const runtime = config.toRuntimeConfig(defaults, cwd);
+    assert.ok(runtime.filesystem.allowWrite.includes(cwd));
+    assert.ok(!runtime.filesystem.allowWrite.includes(launcherCwd));
+    assert.ok(runtime.filesystem.denyWrite.includes(path.join(cwd, ".env")));
+    assert.ok(runtime.filesystem.denyWrite.includes(path.join(cwd, ".env.*")));
     assert.equal(
       defaults.network.allowMachLookup?.includes("com.apple.FSEvents"),
       process.platform === "darwin",
@@ -55,64 +66,135 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
     });
   });
 
-  test("the shell wrapper applies JVM options and removes its private endpoint variable", () => {
-    const shell = fileURLToPath(
-      new URL("../../extensions/sandbox/macos-sandbox-shell.mjs", import.meta.url),
-    );
-    const output = execFileSync(
-      shell,
-      ["-c", 'printf "%s\\n%s" "$JAVA_TOOL_OPTIONS" "${TAU_SANDBOX_JVM_PROXY-unset}"'],
-      {
-        cwd,
-        encoding: "utf8",
-        timeout: 5_000,
-        env: {
-          ...process.env,
-          JAVA_TOOL_OPTIONS: "-Xmx64m",
-          TAU_SANDBOX_JVM_PROXY: "127.0.0.1:17891",
+  test("classifier configuration is validated but never passed into OS policy", async () => {
+    for (const [value, expected] of [
+      ["openai-codex/guardian", "openai-codex/guardian"],
+      ["openrouter/vendor/model", "openrouter/vendor/model"],
+      [false, false],
+      [true, false],
+      ["missing-provider", false],
+      ["provider/unsafe\u001bmodel", false],
+    ] as const) {
+      await writeFile(configPath, JSON.stringify({ classifier: value }));
+      const loaded = config.loadConfig(cwd).config;
+      assert.equal(loaded.classifier, expected);
+      assert.equal("classifier" in config.toRuntimeConfig(loaded, cwd), false);
+    }
+  });
+
+  test("native per-execution filesystem exceptions do not change the next launch's policy", async () => {
+    const secret = path.join(cwd, "sealed recipe.txt");
+    const output = path.join(cwd, "approved recipe.txt");
+    const emptyDenied = path.join(cwd, "sealed empty recipe.env");
+    await writeFile(secret, "eight pinches\n");
+    await writeFile(output, "not approved\n");
+    await writeFile(emptyDenied, "");
+    await chmod(emptyDenied, 0o444);
+    const originalEmpty = await fileSnapshot(emptyDenied);
+    assert.equal(originalEmpty.mode, 0o444);
+    assert.equal(originalEmpty.links, 1);
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        network: { allowedDomains: [], allowUnixSockets: [] },
+        filesystem: {
+          denyRead: [secret],
+          allowRead: [],
+          allowWrite: [cwd],
+          denyWrite: [output, emptyDenied],
+          allowTempDirs: false,
         },
-      },
+      }),
     );
-    assert.equal(
-      output,
-      "-Xmx64m -Djava.net.preferIPv4Stack=true -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=17891 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=17891\nunset",
-    );
+    const policy = config.toRuntimeConfig(config.loadConfig(cwd).config, cwd);
+    await SandboxManager.initialize(policy, undefined, false);
+    const temporary = structuredClone(policy);
+    temporary.filesystem.allowRead = [secret];
+    temporary.filesystem.denyWrite = [emptyDenied];
+    const script = `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(output)}, fs.readFileSync(${JSON.stringify(secret)}));`;
+    const command = [process.execPath, "-e", script].map(shellQuote).join(" ");
+    assert.notEqual(await runFilesystemCommand(command, cwd), 0);
+    assert.equal(await readFile(output, "utf8"), "not approved\n");
+    assert.deepEqual(await fileSnapshot(emptyDenied), originalEmpty);
+    assert.equal(await runFilesystemCommand(command, cwd, temporary), 0);
+    assert.equal(await readFile(output, "utf8"), "eight pinches\n");
+    assert.deepEqual(await fileSnapshot(emptyDenied), originalEmpty);
+    assert.deepEqual(SandboxManager.getConfig(), policy);
+    await writeFile(output, "sealed again\n");
+    assert.notEqual(await runFilesystemCommand(command, cwd), 0);
+    assert.equal(await readFile(output, "utf8"), "sealed again\n");
+    assert.deepEqual(await fileSnapshot(emptyDenied), originalEmpty);
+    assert.deepEqual(SandboxManager.getConfig(), policy);
   });
 
   // Native Seatbelt behavior, not the scripted OS boundary in sandbox.test.ts.
   if (process.platform === "darwin") {
     for (const restricted of [false, true]) {
-      test(`recursive watching ${restricted ? "respects an explicit service restriction" : "receives nested file changes"} without opening protected files`, async () => {
+      test(`recursive watching ${restricted ? "respects an explicit service restriction" : "receives nested file changes"} with isolated per-call Mach overrides and protected files`, async () => {
         const settings = {
           network: {
             allowedDomains: [],
             allowUnixSockets: [],
             ...(restricted ? { allowMachLookup: [] } : {}),
           },
+          filesystem: { allowWrite: ["."], allowTempDirs: false, allowGitCommonDir: false },
         };
         await writeFile(configPath, JSON.stringify(settings));
-        const runtime = config.toRuntimeConfig(config.loadConfig(cwd).config);
+        const runtime = config.toRuntimeConfig(config.loadConfig(cwd).config, cwd);
         const watchDirectory = path.join(cwd, "octopus nursery");
         const changedFile = path.join(watchDirectory, "nest", "egg.txt");
         const keyFile = path.join(os.homedir(), ".ssh", "nursery-key");
         const protectedFile = path.join(cwd, ".env");
+        const protectedGlobFile = path.join(cwd, ".env.tide");
+        const launcherFile = path.join(launcherCwd, "dock log.txt");
         await mkdir(path.dirname(changedFile), { recursive: true });
         await mkdir(path.dirname(keyFile), { recursive: true });
         await writeFile(keyFile, "synthetic secret\n");
         await writeFile(protectedFile, "INK=indigo\n");
+        await writeFile(protectedGlobFile, "TIDE=hidden\n");
+        await writeFile(launcherFile, "The launcher stays ashore.\n");
         try {
           // No OS log monitor or external requests; the child exercises actual enforcement.
           await SandboxManager.initialize(runtime, undefined, false);
-          const result = await runWatcher(cwd, watchDirectory, changedFile, keyFile);
-          assert.equal(result.code, restricted ? 1 : 0, result.stderr);
-          assert.ok(result.stdout.includes("PROTECTED\n"), result.stdout);
-          if (restricted) {
-            assert.ok(result.stdout.includes("WATCH_FAILED\n"), result.stdout);
-            assert.ok(!result.stdout.includes("OBSERVED\n"), result.stdout);
-          } else {
-            assert.ok(result.stdout.includes("OBSERVED\n"), result.stdout);
+          const replacement = structuredClone(runtime);
+          replacement.network.allowMachLookup = restricted
+            ? ["com.apple.FSEvents"]
+            : ["com.apple.SecurityServer"];
+          const denied = structuredClone(runtime);
+          denied.network.allowMachLookup = [];
+          for (const launch of [
+            { name: "session policy", policy: undefined, restricted },
+            { name: "replacement list", policy: replacement, restricted: !restricted },
+            { name: "explicit empty list", policy: denied, restricted: true },
+            { name: "subsequent session policy", policy: undefined, restricted },
+          ]) {
+            const result = await runWatcher(
+              cwd,
+              watchDirectory,
+              changedFile,
+              keyFile,
+              launcherFile,
+              launch.policy,
+            );
+            assert.equal(
+              result.code,
+              launch.restricted ? 1 : 0,
+              `${launch.name}: ${result.stderr}`,
+            );
+            assert.ok(result.stdout.includes("BOUND\n"), result.stdout);
+            assert.ok(result.stdout.includes("PROTECTED\n"), result.stdout);
+            if (launch.restricted) {
+              assert.ok(result.stdout.includes("WATCH_FAILED\n"), result.stdout);
+              assert.ok(!result.stdout.includes("OBSERVED\n"), result.stdout);
+            } else {
+              assert.ok(result.stdout.includes("OBSERVED\n"), result.stdout);
+            }
+            assert.deepEqual(SandboxManager.getConfig(), runtime);
+            assert.equal(await readFile(path.join(cwd, "nursery log.txt"), "utf8"), "eight eggs\n");
+            assert.equal(await readFile(launcherFile, "utf8"), "The launcher stays ashore.\n");
+            assert.equal(await readFile(protectedFile, "utf8"), "INK=indigo\n");
+            assert.equal(await readFile(protectedGlobFile, "utf8"), "TIDE=hidden\n");
           }
-          assert.equal(await readFile(protectedFile, "utf8"), "INK=indigo\n");
         } finally {
           await rm(keyFile, { force: true });
         }
@@ -121,16 +203,83 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
   }
 });
 
+async function fileSnapshot(file: string) {
+  const stat = await lstat(file);
+  return {
+    bytes: await readFile(file),
+    mode: stat.mode & 0o777,
+    device: stat.dev,
+    inode: stat.ino,
+    links: stat.nlink,
+  };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** Exercise real per-launch OS policies, with a deadline only for fixture cleanup. */
+async function runFilesystemCommand(
+  command: string,
+  cwd: string,
+  policy?: Parameters<typeof SandboxManager.wrapWithSandboxArgv>[2],
+): Promise<number | null> {
+  const wrapped = await SandboxManager.wrapWithSandboxArgv(
+    command,
+    "/bin/bash",
+    policy,
+    undefined,
+    cwd,
+  );
+  const child = spawn(wrapped.argv[0]!, wrapped.argv.slice(1), {
+    cwd,
+    env: { ...process.env, ...wrapped.env },
+    detached: true,
+    stdio: "ignore",
+  });
+  let error: Error | undefined;
+  child.once("error", (cause) => {
+    error = cause;
+  });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ESRCH") throw cause;
+      }
+    }
+  }, 10_000);
+  try {
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+    if (error) throw error;
+    assert.equal(timedOut, false, "native filesystem fixture timed out");
+    return code;
+  } finally {
+    clearTimeout(timer);
+    SandboxManager.cleanupAfterCommand();
+  }
+}
+
 /** Run a real sandboxed Node watcher; change the nested file only after readiness and join exit. */
-async function runWatcher(cwd: string, directory: string, changedFile: string, keyFile: string) {
+async function runWatcher(
+  cwd: string,
+  directory: string,
+  changedFile: string,
+  keyFile: string,
+  launcherFile: string,
+  policy?: Parameters<typeof SandboxManager.wrapWithSandboxArgv>[2],
+) {
   const fixture = fileURLToPath(new URL("./fixtures/watch.mjs", import.meta.url));
-  const command = [process.execPath, fixture, directory, keyFile]
+  const command = [process.execPath, fixture, directory, keyFile, launcherFile]
     .map((value) => `'${value.replaceAll("'", "'\\''")}'`)
     .join(" ");
   const wrapped = await SandboxManager.wrapWithSandboxArgv(
     command,
     "/bin/bash",
-    undefined,
+    policy,
     undefined,
     cwd,
   );
@@ -182,7 +331,11 @@ async function runWatcher(cwd: string, directory: string, changedFile: string, k
     if (!closed) await writeFile(changedFile, "eight tiny otters\n");
     const code = await completion;
     if (error) throw error;
-    assert.equal(timedOut, false, `Native watcher did not finish: ${stderr}`);
+    assert.equal(
+      timedOut,
+      false,
+      `Native watcher did not finish: ${JSON.stringify({ stdout, stderr })}`,
+    );
     return { code, stdout, stderr };
   } finally {
     clearTimeout(deadline);

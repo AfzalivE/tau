@@ -1,0 +1,170 @@
+diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
+--- a/dist/sandbox/sandbox-manager.js
++++ b/dist/sandbox/sandbox-manager.js
+@@ -1380,18 +1380,20 @@ async function wrapWithSandboxAgain(restarts, command, binShell, customConfig, a
+     }
+     // Check if network config is specified - this determines if we need network restrictions
+     // Network restriction is needed when:
+-    // 1. customConfig has network.allowedDomains defined (even if empty array = block all)
+-    // 2. OR config has network.allowedDomains defined (even if empty array = block all)
+-    // An empty allowedDomains array means "no domains allowed" = block all network access
++    // 1. customConfig has network.allowedDomains defined (even if empty array)
++    // 2. OR config has network.allowedDomains defined (even if empty array)
++    // An empty allowedDomains array still requests network restrictions.
++    // Custom lists do not replace the live proxy's session allow/deny lists.
++    // A custom empty list does not revoke session allowances.
+     const hasNetworkConfig = customConfig?.network?.allowedDomains !== undefined ||
+         config?.network?.allowedDomains !== undefined;
+     // Network RESTRICTION is needed whenever network config is specified
+-    // This includes empty allowedDomains which means "block all network"
++    // This includes empty allowedDomains arrays.
+     const needsNetworkRestriction = hasNetworkConfig;
+     // Network PROXY is needed whenever network config is specified
+     // Even with empty allowedDomains, we route through proxy so that:
+     // 1. updateConfig() can enable network access for already-running processes
+-    // 2. The proxy blocks all requests when allowlist is empty
++    // 2. The proxy enforces session policy and can ask for approval.
+     const needsNetworkProxy = hasNetworkConfig;
+     // Wait for network initialization only if proxy is actually needed
+     if (needsNetworkProxy) {
+@@ -1425,6 +1427,15 @@ async function wrapWithSandboxAgain(restarts, command, binShell, customConfig, a
+         return startOver();
+     // Check custom config to allow pseudo-terminal (can be applied dynamically)
+     const allowPty = customConfig?.allowPty ?? config?.allowPty;
++    const allowUnixSockets = customConfig?.network?.allowUnixSockets ?? getAllowUnixSockets();
++    const allowAllUnixSockets = customConfig?.network?.allowAllUnixSockets ?? getAllowAllUnixSockets();
++    const allowLocalBinding = customConfig?.network?.allowLocalBinding ?? getAllowLocalBinding();
++    const allowMachLookup = customConfig?.network?.allowMachLookup ?? getAllowMachLookup();
++    const allowGitConfig = customConfig?.filesystem?.allowGitConfig ?? getAllowGitConfig();
++    const enableWeakerNestedSandbox = customConfig?.enableWeakerNestedSandbox ?? getEnableWeakerNestedSandbox();
++    const enableWeakerNetworkIsolation = customConfig?.enableWeakerNetworkIsolation ?? getEnableWeakerNetworkIsolation();
++    const allowAppleEvents = customConfig?.allowAppleEvents ?? getAllowAppleEvents();
++    const mandatoryDenySearchDepth = customConfig?.mandatoryDenySearchDepth ?? getMandatoryDenySearchDepth();
+     const gitSafeDirectories = getGitSafeDirectories(customConfig);
+     switch (platform) {
+         case 'macos':
+@@ -1445,16 +1456,16 @@ async function wrapWithSandboxAgain(restarts, command, binShell, customConfig, a
+                 setEnvVars: credentialRestrictions.setEnvVars,
+                 maskedFileBinds: credentialRestrictions.maskedFileBinds,
+                 degradeToDenyPaths: credentialRestrictions.degradeToDenyPaths,
+-                allowUnixSockets: getAllowUnixSockets(),
+-                allowAllUnixSockets: getAllowAllUnixSockets(),
+-                allowLocalBinding: getAllowLocalBinding(),
+-                allowMachLookup: getAllowMachLookup(),
++                allowUnixSockets,
++                allowAllUnixSockets,
++                allowLocalBinding,
++                allowMachLookup,
+                 ignoreViolations: getIgnoreViolations(),
+                 allowPty,
+-                allowGitConfig: getAllowGitConfig(),
++                allowGitConfig,
+                 gitSafeDirectories,
+-                enableWeakerNetworkIsolation: getEnableWeakerNetworkIsolation(),
+-                allowAppleEvents: getAllowAppleEvents(),
++                enableWeakerNetworkIsolation,
++                allowAppleEvents,
+                 binShell,
+             });
+         case 'linux':
+@@ -1484,12 +1495,12 @@ async function wrapWithSandboxAgain(restarts, command, binShell, customConfig, a
+                 setEnvVars: credentialRestrictions.setEnvVars,
+                 maskedFileBinds: credentialRestrictions.maskedFileBinds,
+                 maskedFileStoreDir: credentialRestrictions.maskedFileStoreDir,
+-                enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
+-                allowAllUnixSockets: getAllowAllUnixSockets(),
++                enableWeakerNestedSandbox,
++                allowAllUnixSockets,
+                 binShell,
+                 ripgrepConfig: getRipgrepConfig(),
+-                mandatoryDenySearchDepth: getMandatoryDenySearchDepth(),
+-                allowGitConfig: getAllowGitConfig(),
++                mandatoryDenySearchDepth,
++                allowGitConfig,
+                 gitSafeDirectories,
+                 seccompConfig: getSeccompConfig(),
+                 bwrapPath: config?.bwrapPath,
+diff --git a/dist/sandbox/sandbox-manager.d.ts b/dist/sandbox/sandbox-manager.d.ts
+--- a/dist/sandbox/sandbox-manager.d.ts
++++ b/dist/sandbox/sandbox-manager.d.ts
+@@ -2,7 +2,7 @@ import { SentinelRegistry } from './credential-sentinel.js';
+ import { MaskedFileStore } from './credential-mask-files.js';
+ import { AwsPairRegistry } from './credential-aws-pairs.js';
+ import { type MitmCA } from './mitm-ca.js';
+-import type { SandboxRuntimeConfig } from './sandbox-config.js';
++import type { SandboxCommandConfig, SandboxRuntimeConfig } from './sandbox-config.js';
+ import type { SandboxAskCallback, FsReadRestrictionConfig, FsWriteRestrictionConfig, NetworkRestrictionConfig } from './sandbox-schemas.js';
+ import { type SandboxDependencyCheck } from './linux-sandbox-utils.js';
+ import { type WindowsBinShell } from './windows-sandbox-utils.js';
+@@ -72,8 +72,12 @@ export interface ISandboxManager {
+     getLinuxHttpSocketPath(): string | undefined;
+     getLinuxSocksSocketPath(): string | undefined;
+     waitForNetworkInitialization(): Promise<boolean>;
+-    wrapWithSandbox(command: string, binShell?: string, customConfig?: Partial<SandboxRuntimeConfig>, abortSignal?: AbortSignal, options?: WrapWithSandboxOptions): Promise<string>;
+-    wrapWithSandboxArgv(command: string, binShell?: string | WindowsBinShell, customConfig?: Partial<SandboxRuntimeConfig>, abortSignal?: AbortSignal, cwd?: string, options?: WrapWithSandboxOptions): Promise<{
++    /** Command-policy overrides only, not proxy/infrastructure configuration.
++     * See README's POSIX per-command policy subset, not an exhaustive API list. */
++    wrapWithSandbox(command: string, binShell?: string, customConfig?: SandboxCommandConfig, abortSignal?: AbortSignal, options?: WrapWithSandboxOptions): Promise<string>;
++    /** Command-policy overrides. README's policy table covers a POSIX subset,
++     * not the complete cross-platform per-command API. */
++    wrapWithSandboxArgv(command: string, binShell?: string | WindowsBinShell, customConfig?: SandboxCommandConfig, abortSignal?: AbortSignal, cwd?: string, options?: WrapWithSandboxOptions): Promise<{
+         argv: string[];
+         env: NodeJS.ProcessEnv;
+     }>;
+diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
+--- a/dist/sandbox/sandbox-config.d.ts
++++ b/dist/sandbox/sandbox-config.d.ts
+@@ -1872,5 +1872,16 @@ export type SeccompConfig = z.infer<typeof SeccompConfigSchema>;
+ export type SrtWinConfig = z.infer<typeof SrtWinConfigSchema>;
+ export type WindowsConfig = z.infer<typeof WindowsConfigSchema>;
+ export type SandboxRuntimeConfig = z.infer<typeof SandboxRuntimeConfigSchema>;
++/**
++ * Per-command configuration accepted by the wrapping APIs. Network and
++ * filesystem fields may be omitted independently. Nested values, including
++ * path entries and credentials, retain their complete configuration types.
++ * This is not a general config merge. See README's POSIX per-command policy
++ * subset for field precedence and session-scoped settings.
++ */
++export type SandboxCommandConfig = Partial<Omit<SandboxRuntimeConfig, 'network' | 'filesystem'>> & {
++    network?: Partial<NetworkConfig>;
++    filesystem?: Partial<FilesystemConfig>;
++};
+ export {};
+ //# sourceMappingURL=sandbox-config.d.ts.map
+\ No newline at end of file
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1,7 +1,7 @@
+ export { SandboxManager } from './sandbox/sandbox-manager.js';
+ export type { WrapWithSandboxOptions } from './sandbox/sandbox-manager.js';
+ export { SandboxViolationStore } from './sandbox/sandbox-violation-store.js';
+-export type { SandboxRuntimeConfig, NetworkConfig, FilesystemConfig, FilesystemPathEntry, CredentialsConfig, CredentialFileConfig, CredentialEnvVarConfig, CredentialMode, IgnoreViolationsConfig, } from './sandbox/sandbox-config.js';
++export type { SandboxRuntimeConfig, SandboxCommandConfig, NetworkConfig, FilesystemConfig, FilesystemPathEntry, CredentialsConfig, CredentialFileConfig, CredentialEnvVarConfig, CredentialMode, IgnoreViolationsConfig, } from './sandbox/sandbox-config.js';
+ export { SandboxRuntimeConfigSchema, NetworkConfigSchema, FilesystemConfigSchema, CredentialsConfigSchema, IgnoreViolationsConfigSchema, RipgrepConfigSchema, } from './sandbox/sandbox-config.js';
+ export type { SandboxAskCallback, FsReadRestrictionConfig, FsWriteRestrictionConfig, CredentialRestrictionConfig, NetworkRestrictionConfig, NetworkHostPattern, } from './sandbox/sandbox-schemas.js';
+ export type { FilterRequestCallback, RequestDecision, MutateForwardedHeaders, } from './sandbox/request-filter.js';
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -261,6 +261,20 @@ child.on('exit', async code => {
+ })
+ ```
+ 
++**POSIX per-command policy subset (`customConfig`).** The third argument to `wrapWithSandbox` / `wrapWithSandboxArgv` accepts `SandboxCommandConfig`, whose `network` and `filesystem` sections allow individual fields to be omitted. The table below covers the macOS/Linux policy subset resolved here, not the complete cross-platform per-command API. Existing credential overrides, additive `git.safeDirectories`, and Windows-specific overrides are outside this table. For this subset, omitted fields fall back to session policy, with the `filesystem.disabled` exception below. Explicit `false` overrides `true`, and replacement lists accept `[]` to clear optional grants. Session configuration and zero-argument getters remain unchanged.
++
++| Fields                                                                                      | Platforms    |
++| ------------------------------------------------------------------------------------------- | ------------ |
++| `filesystem.denyRead`, `allowRead`, `allowWrite`, `denyWrite`, `disabled`, `allowGitConfig` | macOS, Linux |
++| `network.allowAllUnixSockets`                                                               | macOS, Linux |
++| `network.allowUnixSockets`, `allowLocalBinding`, `allowMachLookup`                          | macOS        |
++| `allowPty`, `enableWeakerNetworkIsolation`, `allowAppleEvents`                              | macOS        |
++| `enableWeakerNestedSandbox`, `mandatoryDenySearchDepth`                                     | Linux        |
++
++Filesystem lists keep mandatory/default protections. Supplying any `filesystem` override defaults its `disabled` to `false`, even if the session disabled filesystem restrictions. `allowGitConfig` does not unblock Git hooks or other mandatory denials. `git.safeDirectories` remains additive, not replacement.
++
++These are policy overrides, not a general config merge. Proxy and tooling settings remain session-scoped. Custom `network.allowedDomains` and `network.deniedDomains` do not replace the proxy's session lists: `allowedDomains: []` does not revoke session allowances.
++
+ **Violation attribution (`commandId` / `commandText`).** Violations observed while a wrapped command runs (seatbelt log lines, seccomp events, proxy denies) are stored under an attribution key, and `annotateStderrWithSandboxFailures(key, stderr)` / `getViolationsForCommand(key)` look them up by that same key. By default the key is the wrapped string itself. Pass an opaque per-invocation `commandId` (e.g. a tool-use id) to key by that instead — recommended: keys compare on their first 100 characters, so long commands sharing a prefix would otherwise cross-attribute, and a rerun of the same text would inherit the earlier run's events. If the string you _execute_ is not the command the invocation _represents_ (e.g. you wrap an assembled `source <snapshot> && eval '<cmd>'`), also pass `commandText: '<cmd>'`: it is what `ignoreViolations` command patterns match against and what each violation reports as its `command`. A `commandId` you pass to `wrapWithSandbox` must be the same non-empty string you then pass to `annotateStderrWithSandboxFailures` / `getViolationsForCommand`; an empty one is treated as no `commandId` at all, so the key is the command.
+ 
+ Only the key is cut to 100 characters. As of v0.0.76 the reported `command` — and the text `ignoreViolations` command patterns are matched against — is the whole command for an invocation wrapped without a `commandId`, not its first 100 characters; a pattern can therefore only suppress more than it did before, never less. An attribution key no invocation of this process registered (the carriers are writable from inside the sandbox) is reported sanitized and cut to that same key length.

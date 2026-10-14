@@ -75,12 +75,14 @@ First time:
 - `/session new [path]` creates daemon-owned `[headless]` sessions.
 - If `/session new [path]` targets a missing directory, the bot asks you to reply `Yes` to create it; any other reply cancels.
 - Headless sessions are owned by the daemon and are terminated on `/unpair` or daemon shutdown.
+- Headless prompts have a 30-second acceptance timeout. Cancelling before acknowledgement or timing out closes the session without retrying. History is kept, but work may already have started.
 - Switching to a session replays unread replies, not just the latest one.
 - Inactive-session activity notifications are deduped for the same session until you switch sessions, a different session notifies, or the cooldown elapses.
 - The daemon is started on-demand by `/telegram pair`, auto-restarts when a paired window opens, and stays alive while paired so Telegram can create headless sessions even when no windows are connected.
 - Output mirrored to Telegram is the final assistant result after Pi finishes a prompt, including Pi errors after retries are exhausted.
   - For short assistant messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
   - Long messages and errors are sent as plain text chunks.
+  - Whole-run cancellation, including `/esc` during tools or retry backoff, appends one `Run aborted` notice while retaining available partial text and error details. This applies to both window and headless sessions. Pi's retry-only cancellation (`abortRetry()`, including native retry Escape) does not currently report whole-run cancellation.
 - The `telegram_send_file` tool is available while this session is connected to a paired chat.
   - It sends `.jpg`, `.jpeg`, `.png`, and `.webp` images as Telegram photos (up to 10 MB), and other files as documents (up to 50 MB).
   - Use `asDocument=true` when exact image bytes should be preserved instead of Telegram photo display/compression.

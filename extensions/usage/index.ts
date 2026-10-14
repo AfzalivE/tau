@@ -3,14 +3,22 @@ import {
   getAgentDir,
   type ExtensionAPI,
   type ExtensionContext,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+  colorToOkhsl,
   Key,
   matchesKey,
+  mixColors,
+  okhslColor,
+  rgbColor,
+  type Color,
   type Component,
+  type KeybindingsManager,
   type TUI,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
 import { createReadStream, type Dirent } from "node:fs";
@@ -51,37 +59,6 @@ const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = 
   { key: "evening", label: "Evening (17–21)", from: 17, to: 21 },
   { key: "night", label: "Night (22–23)", from: 22, to: 23 },
 ];
-
-const DEFAULT_BG: RGB = { r: 13, g: 17, b: 23 };
-const EMPTY_CELL_BG: RGB = { r: 22, g: 27, b: 34 };
-const ERROR_COLOR: RGB = { r: 244, g: 67, b: 54 };
-const MUTED_COLOR: RGB = { r: 160, g: 160, b: 160 };
-
-const PALETTE: RGB[] = [
-  { r: 54, g: 179, b: 166 },
-  { r: 82, g: 146, b: 247 },
-  { r: 171, g: 123, b: 245 },
-  { r: 232, g: 180, b: 72 },
-  { r: 244, g: 67, b: 54 },
-];
-
-const DOW_PALETTE: RGB[] = [
-  { r: 47, g: 129, b: 247 },
-  { r: 64, g: 196, b: 99 },
-  { r: 163, g: 113, b: 247 },
-  { r: 47, g: 175, b: 200 },
-  { r: 100, g: 200, b: 150 },
-  { r: 255, g: 159, b: 10 },
-  { r: 244, g: 67, b: 54 },
-];
-
-const TOD_PALETTE: Map<TodKey, RGB> = new Map([
-  ["after-midnight", { r: 100, g: 60, b: 180 }],
-  ["morning", { r: 255, g: 200, b: 50 }],
-  ["afternoon", { r: 64, g: 196, b: 99 }],
-  ["evening", { r: 47, g: 129, b: 247 }],
-  ["night", { r: 60, g: 40, b: 140 }],
-]);
 
 type HistoryProviderId = string;
 type ModelKey = string;
@@ -164,13 +141,13 @@ interface RangeAgg {
 
 interface ProviderPalette {
   modelPalette: {
-    modelColors: Map<ModelKey, RGB>;
-    otherColor: RGB;
+    modelColors: Map<ModelKey, Color>;
+    otherColor: Color;
     orderedModels: ModelKey[];
   };
   cwdPalette: {
-    cwdColors: Map<CwdKey, RGB>;
-    otherColor: RGB;
+    cwdColors: Map<CwdKey, Color>;
+    otherColor: Color;
     orderedCwds: CwdKey[];
   };
 }
@@ -188,16 +165,6 @@ interface BreakdownData {
   liveUsage: Map<SupportedProviderId, LiveUsageState>;
   allRanges: Map<number, RangeAgg>;
   providerRangesById: Map<HistoryProviderId, Map<number, RangeAgg>>;
-  allPalette: ProviderPalette;
-  providerPalettes: Map<HistoryProviderId, ProviderPalette>;
-  dowPalette: {
-    dowColors: Map<DowKey, RGB>;
-    orderedDows: DowKey[];
-  };
-  todPalette: {
-    todColors: Map<TodKey, RGB>;
-    orderedTods: TodKey[];
-  };
 }
 
 type BreakdownProgressPhase = "scan" | "parse" | "finalize";
@@ -227,44 +194,23 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function mixRgb(a: RGB, b: RGB, t: number): RGB {
-  return {
-    r: Math.round(lerp(a.r, b.r, t)),
-    g: Math.round(lerp(a.g, b.g, t)),
-    b: Math.round(lerp(a.b, b.b, t)),
-  };
-}
-
-function weightedMix(colors: Array<{ color: RGB; weight: number }>): RGB {
+function weightedMix(colors: Array<{ color: Color; weight: number }>, fallback: Color): Color {
   let total = 0;
-  let r = 0;
-  let g = 0;
-  let b = 0;
+  let mixed: Color | undefined;
   for (const entry of colors) {
     if (!Number.isFinite(entry.weight) || entry.weight <= 0) continue;
     total += entry.weight;
-    r += entry.color.r * entry.weight;
-    g += entry.color.g * entry.weight;
-    b += entry.color.b * entry.weight;
+    mixed = mixed ? mixColors(mixed, entry.color, entry.weight / total, "srgb") : entry.color;
   }
-  if (total <= 0) return EMPTY_CELL_BG;
-  return { r: Math.round(r / total), g: Math.round(g / total), b: Math.round(b / total) };
+  return mixed ?? fallback;
 }
 
-function ansiFg(rgb: RGB, text: string): string {
-  return `\x1b[38;2;${rgb.r};${rgb.g};${rgb.b}m${text}\x1b[0m`;
+function emptyChartColor(theme: Theme): Color {
+  return mixColors(theme.colors.toolPendingBg, theme.colors.muted, 0.25);
 }
 
-function dim(text: string): string {
-  return `\x1b[2m${text}\x1b[0m`;
-}
-
-function bold(text: string): string {
-  return `\x1b[1m${text}\x1b[0m`;
+function truncateUsageLine(theme: Theme, text: string, width: number): string {
+  return truncateToWidth(text, width, theme.style("...", { fg: "text", bg: "toolPendingBg" }));
 }
 
 function formatUsd(value: number): string {
@@ -721,88 +667,29 @@ function metricValuesForKind<K>(
   return { values: options.sessions, total: options.totalSessions };
 }
 
-function normalizeHue(value: number): number {
-  const normalized = value % 360;
-  return normalized < 0 ? normalized + 360 : normalized;
+function providerColor(theme: Theme, color: RGB): Color {
+  const source = colorToOkhsl(rgbColor(color.r, color.g, color.b));
+  const reference = colorToOkhsl(theme.colors.accent);
+  // Keep the provider hue, but match the active theme's brightness and restraint.
+  return okhslColor(source.h, Math.min(source.s, reference.s), reference.l);
 }
 
-function rgbToHsl(color: RGB): { h: number; s: number; l: number } {
-  const r = color.r / 255;
-  const g = color.g / 255;
-  const b = color.b / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const lightness = (max + min) / 2;
-
-  if (max === min) {
-    return { h: 0, s: 0, l: lightness };
-  }
-
-  const delta = max - min;
-  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
-
-  let hue = 0;
-  if (max === r) hue = (g - b) / delta + (g < b ? 6 : 0);
-  else if (max === g) hue = (b - r) / delta + 2;
-  else hue = (r - g) / delta + 4;
-
-  return { h: normalizeHue(hue * 60), s: saturation, l: lightness };
-}
-
-function hslToRgb(hue: number, saturation: number, lightness: number): RGB {
-  const h = normalizeHue(hue) / 360;
-  const s = clamp01(saturation);
-  const l = clamp01(lightness);
-
-  if (s === 0) {
-    const value = Math.round(l * 255);
-    return { r: value, g: value, b: value };
-  }
-
-  const hueToChannel = (p: number, q: number, t: number): number => {
-    let value = t;
-    if (value < 0) value += 1;
-    if (value > 1) value -= 1;
-    if (value < 1 / 6) return p + (q - p) * 6 * value;
-    if (value < 1 / 2) return q;
-    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
-    return p;
-  };
-
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-
-  return {
-    r: Math.round(hueToChannel(p, q, h + 1 / 3) * 255),
-    g: Math.round(hueToChannel(p, q, h) * 255),
-    b: Math.round(hueToChannel(p, q, h - 1 / 3) * 255),
-  };
-}
-
-function adjustColor(
-  color: RGB,
-  adjustments: { hueShift?: number; saturationShift?: number; lightnessShift?: number },
-): RGB {
-  const hsl = rgbToHsl(color);
-  return hslToRgb(
-    hsl.h + (adjustments.hueShift ?? 0),
-    hsl.s + (adjustments.saturationShift ?? 0),
-    hsl.l + (adjustments.lightnessShift ?? 0),
-  );
-}
-
-function buildProviderModelPalette(color: RGB): readonly RGB[] {
+function buildProviderModelPalette(theme: Theme, color: RGB): readonly Color[] {
+  const base = providerColor(theme, color);
+  const { h, s, l } = colorToOkhsl(base);
+  const lightnessRange = (theme.appearance === "dark" ? 1 : 0) - l;
   return [
-    color,
-    adjustColor(color, { hueShift: 16, saturationShift: 0.04, lightnessShift: 0.08 }),
-    adjustColor(color, { hueShift: -12, saturationShift: 0.02, lightnessShift: -0.06 }),
+    base,
+    okhslColor(h + 16, s * 0.85, l + lightnessRange * 0.3),
+    okhslColor(h - 12, s * 0.7, l + lightnessRange * 0.6),
   ];
 }
 
 function chooseModelPalette(
   range30: RangeAgg,
+  paletteColors: readonly Color[],
+  otherColor: Color,
   topN = 4,
-  paletteColors: readonly RGB[] = PALETTE,
 ): ProviderPalette["modelPalette"] {
   const popularity = preferredPopularityMap({
     cost: range30.modelCost,
@@ -816,22 +703,27 @@ function chooseModelPalette(
   const orderedModels = sortMapByValueDesc(popularity)
     .slice(0, topN)
     .map((entry) => entry.key);
-  const modelColors = new Map<ModelKey, RGB>();
+  const modelColors = new Map<ModelKey, Color>();
 
   for (let index = 0; index < orderedModels.length; index += 1) {
     const model = orderedModels[index];
-    const color = paletteColors[index] ?? PALETTE[index % PALETTE.length] ?? MUTED_COLOR;
+    const color = paletteColors[index % paletteColors.length] ?? otherColor;
     if (model) modelColors.set(model, color);
   }
 
   return {
     modelColors,
-    otherColor: MUTED_COLOR,
+    otherColor,
     orderedModels,
   };
 }
 
-function chooseCwdPalette(range30: RangeAgg, topN = 4): ProviderPalette["cwdPalette"] {
+function chooseCwdPalette(
+  range30: RangeAgg,
+  paletteColors: readonly Color[],
+  otherColor: Color,
+  topN = 4,
+): ProviderPalette["cwdPalette"] {
   const popularity = preferredPopularityMap({
     cost: range30.cwdCost,
     tokens: range30.cwdTokens,
@@ -844,47 +736,51 @@ function chooseCwdPalette(range30: RangeAgg, topN = 4): ProviderPalette["cwdPale
   const orderedCwds = sortMapByValueDesc(popularity)
     .slice(0, topN)
     .map((entry) => entry.key);
-  const cwdColors = new Map<CwdKey, RGB>();
+  const cwdColors = new Map<CwdKey, Color>();
   for (let index = 0; index < orderedCwds.length; index += 1) {
     const cwd = orderedCwds[index];
-    if (cwd) cwdColors.set(cwd, PALETTE[index % PALETTE.length]!);
+    if (cwd) cwdColors.set(cwd, paletteColors[index % paletteColors.length] ?? otherColor);
   }
 
   return {
     cwdColors,
-    otherColor: MUTED_COLOR,
+    otherColor,
     orderedCwds,
   };
 }
 
-function buildDowPalette(): BreakdownData["dowPalette"] {
-  const dowColors = new Map<DowKey, RGB>();
-  for (let index = 0; index < DOW_NAMES.length; index += 1) {
-    const dow = DOW_NAMES[index];
-    const color = DOW_PALETTE[index];
-    if (dow && color) dowColors.set(dow, color);
-  }
-  return { dowColors, orderedDows: [...DOW_NAMES] };
+function buildDowPalette(theme: Theme): Map<DowKey, Color> {
+  const colors = theme.colors;
+  const palette = [
+    colors.mdLink,
+    colors.success,
+    colors.accent,
+    colors.syntaxVariable,
+    mixColors(colors.success, colors.syntaxVariable, 0.5),
+    colors.warning,
+    colors.error,
+  ];
+  return new Map(DOW_NAMES.map((day, index) => [day, palette[index]!]));
 }
 
-function buildTodPalette(): BreakdownData["todPalette"] {
-  const todColors = new Map<TodKey, RGB>();
-  const orderedTods: TodKey[] = [];
-  for (const bucket of TOD_BUCKETS) {
-    const color = TOD_PALETTE.get(bucket.key);
-    if (color) todColors.set(bucket.key, color);
-    orderedTods.push(bucket.key);
-  }
-  return { todColors, orderedTods };
+function buildTodPalette(theme: Theme): Map<TodKey, Color> {
+  const colors = theme.colors;
+  return new Map([
+    ["after-midnight", colors.accent],
+    ["morning", colors.warning],
+    ["afternoon", colors.success],
+    ["evening", colors.mdLink],
+    ["night", colors.syntaxString],
+  ]);
 }
 
 function dayMixedColor(
   day: DayAgg,
-  colorMap: Map<string, RGB>,
-  otherColor: RGB,
+  colorMap: Map<string, Color>,
+  otherColor: Color,
   mode: MeasurementMode,
   view: BreakdownView,
-): RGB {
+): Color {
   if (view === "dow") {
     const dowKey = DOW_NAMES[mondayIndex(day.date)] ?? "Mon";
     return colorMap.get(dowKey) ?? otherColor;
@@ -932,7 +828,7 @@ function dayMixedColor(
           : day.sessionsByModel;
   }
 
-  const parts: Array<{ color: RGB; weight: number }> = [];
+  const parts: Array<{ color: Color; weight: number }> = [];
   let otherWeight = 0;
   for (const [key, weight] of weights.entries()) {
     const color = colorMap.get(key);
@@ -941,7 +837,7 @@ function dayMixedColor(
   }
   if (otherWeight > 0) parts.push({ color: otherColor, weight: otherWeight });
 
-  return weightedMix(parts);
+  return weightedMix(parts, otherColor);
 }
 
 interface GraphMetric {
@@ -979,9 +875,10 @@ function weeksForRange(range: RangeAgg): number {
 }
 
 function renderGraphLines(
+  theme: Theme,
   range: RangeAgg,
-  colorMap: Map<string, RGB>,
-  otherColor: RGB,
+  colorMap: Map<string, Color>,
+  otherColor: Color,
   mode: MeasurementMode,
   options?: { cellWidth?: number; gap?: number },
   view: BreakdownView = "model",
@@ -1002,6 +899,8 @@ function renderGraphLines(
   const gap = Math.max(0, Math.floor(options?.gap ?? 1));
   const block = "█".repeat(cellWidth);
   const gapString = " ".repeat(gap);
+  const emptyColor = emptyChartColor(theme);
+  const emptyCell = theme.style(block, { fg: emptyColor });
 
   const metric = graphMetricForRange(range, mode);
   const denom = metric.denom;
@@ -1035,14 +934,14 @@ function renderGraphLines(
             : (day?.sessions ?? 0);
 
       if (!day || value <= 0) {
-        line += ansiFg(EMPTY_CELL_BG, block) + columnGap;
+        line += emptyCell + columnGap;
         continue;
       }
 
       const hue = dayMixedColor(day, colorMap, otherColor, mode, view);
       const intensity = 0.2 + 0.8 * clamp01(denom > 0 ? Math.log1p(value) / denom : 0);
-      const rgb = mixRgb(DEFAULT_BG, hue, intensity);
-      line += ansiFg(rgb, block) + columnGap;
+      const color = intensity === 1 ? hue : mixColors(emptyColor, hue, intensity);
+      line += theme.style(block, { fg: color }) + columnGap;
     }
 
     lines.push(line);
@@ -1052,9 +951,10 @@ function renderGraphLines(
 }
 
 function renderDowDistributionLines(
+  theme: Theme,
   range: RangeAgg,
   mode: MeasurementMode,
-  dowColors: Map<DowKey, RGB>,
+  dowColors: Map<DowKey, Color>,
   width: number,
 ): string[] {
   const metric = graphMetricForRange(range, mode);
@@ -1073,6 +973,7 @@ function renderDowDistributionLines(
   const showValue = width >= dayWidth + 1 + 10 + 1 + pctWidth + 1 + valueWidth;
   const fixedWidth = dayWidth + 1 + 1 + pctWidth + (showValue ? 1 + valueWidth : 0);
   const barWidth = Math.max(1, width - fixedWidth);
+  const emptyColor = emptyChartColor(theme);
 
   const lines: string[] = [];
   for (const dow of DOW_NAMES) {
@@ -1083,14 +984,13 @@ function renderDowDistributionLines(
     filled = Math.min(barWidth, filled);
     const empty = Math.max(0, barWidth - filled);
 
-    const color = dowColors.get(dow) ?? MUTED_COLOR;
-    const filledBar = filled > 0 ? ansiFg(color, "█".repeat(filled)) : "";
-    const emptyBar = empty > 0 ? ansiFg(EMPTY_CELL_BG, "█".repeat(empty)) : "";
+    const color = dowColors.get(dow) ?? theme.colors.muted;
+    const filledBar = filled > 0 ? theme.style("█".repeat(filled), { fg: color }) : "";
+    const emptyBar = empty > 0 ? theme.style("█".repeat(empty), { fg: emptyColor }) : "";
     const pct = padLeft(`${Math.round(share * 100)}%`, pctWidth);
 
-    let line = `${padRight(dow, dayWidth)} ${filledBar}${emptyBar} ${pct}`;
-    if (showValue) line += ` ${padLeft(formatCount(value), valueWidth)}`;
-    lines.push(line);
+    const stats = `${pct}${showValue ? ` ${padLeft(formatCount(value), valueWidth)}` : ""}`;
+    lines.push(`${padRight(dow, dayWidth)} ${filledBar}${emptyBar} ${theme.fg("text", stats)}`);
   }
 
   return lines;
@@ -1103,6 +1003,7 @@ function formatModelLabel(modelKey: string, stripProvider: boolean): string {
 }
 
 function renderModelTable(
+  theme: Theme,
   range: RangeAgg,
   metric: GraphMetric,
   maxRows = 8,
@@ -1142,11 +1043,11 @@ function renderModelTable(
     );
   }
 
-  if (sorted.length === 0) lines.push(dim("(no model data found)"));
+  if (sorted.length === 0) lines.push(theme.fg("muted", "(no model data found)"));
   return lines;
 }
 
-function renderCwdTable(range: RangeAgg, metric: GraphMetric, maxRows = 8): string[] {
+function renderCwdTable(theme: Theme, range: RangeAgg, metric: GraphMetric, maxRows = 8): string[] {
   const { values: perCwd, total } = metricValuesForKind(metric.kind, {
     sessions: range.cwdSessions,
     messages: range.cwdMessages,
@@ -1184,7 +1085,7 @@ function renderCwdTable(range: RangeAgg, metric: GraphMetric, maxRows = 8): stri
     );
   }
 
-  if (sorted.length === 0) lines.push(dim("(no directory data found)"));
+  if (sorted.length === 0) lines.push(theme.fg("muted", "(no directory data found)"));
   return lines;
 }
 
@@ -1539,26 +1440,6 @@ async function computeBreakdown(
   );
   for (const file of files) addParsedFile(file);
 
-  const allPaletteRange = allRanges.get(30)!;
-  const allPalette: ProviderPalette = {
-    modelPalette: chooseModelPalette(allPaletteRange),
-    cwdPalette: chooseCwdPalette(allPaletteRange),
-  };
-
-  const providerPalettes = new Map<HistoryProviderId, ProviderPalette>();
-  for (const [providerId, ranges] of providerRangesById.entries()) {
-    const range30 = ranges.get(30)!;
-    const provider = getSupportedProvider(providerId);
-    providerPalettes.set(providerId, {
-      modelPalette: chooseModelPalette(
-        range30,
-        3,
-        provider ? buildProviderModelPalette(provider.color) : PALETTE,
-      ),
-      cwdPalette: chooseCwdPalette(range30),
-    });
-  }
-
   const liveAvailableProviders = getLiveAvailableProviders(availabilityByProvider);
 
   return {
@@ -1566,14 +1447,11 @@ async function computeBreakdown(
     liveUsage: buildInitialLiveUsage(SUPPORTED_PROVIDERS, availabilityByProvider),
     allRanges,
     providerRangesById,
-    allPalette,
-    providerPalettes,
-    dowPalette: buildDowPalette(),
-    todPalette: buildTodPalette(),
   };
 }
 
 function renderUsageMeterBar(
+  theme: Theme,
   providerId: SupportedProviderId,
   meter: LiveUsageMeter,
   width: number,
@@ -1581,9 +1459,12 @@ function renderUsageMeterBar(
   const barWidth = Math.max(10, Math.min(32, width));
   const filled = Math.min(barWidth, Math.max(0, Math.round((barWidth * meter.usedPercent) / 100)));
   const empty = Math.max(0, barWidth - filled);
-  const color = getSupportedProvider(providerId)?.color ?? MUTED_COLOR;
-  const bar = `${ansiFg(color, "█".repeat(filled))}${ansiFg(EMPTY_CELL_BG, "█".repeat(empty))}`;
-  return truncateToWidth(bar, width);
+  const provider = getSupportedProvider(providerId);
+  const color = provider ? providerColor(theme, provider.color) : theme.colors.muted;
+  const bar =
+    theme.style("█".repeat(filled), { fg: color }) +
+    theme.style("█".repeat(empty), { fg: emptyChartColor(theme) });
+  return truncateUsageLine(theme, bar, width);
 }
 
 function formatUsageHeader(
@@ -1600,14 +1481,14 @@ function formatUsageHeader(
 }
 
 function renderUsageHeader(
+  theme: Theme,
   plan: string | undefined,
   fetchedAt: Date | undefined,
-  width: number,
 ): string {
   const header = formatUsageHeader(plan, fetchedAt);
-  let text = bold(header.title);
-  if (header.fetched) text += `  ${dim(header.fetched)}`;
-  return truncateToWidth(text, width);
+  let text = theme.bold(header.title);
+  if (header.fetched) text += `  ${theme.fg("muted", header.fetched)}`;
+  return text;
 }
 
 type ResolvedLiveUsageState =
@@ -1641,26 +1522,24 @@ function resolveLiveUsageState(
   return { kind: "ok", snapshot: liveState.snapshot };
 }
 
-function formatLiveUsageItemLine(
-  item: LiveUsageItem,
-  options?: { dimReset?: boolean; emphasizeStatValue?: boolean },
-): string {
+function formatLiveUsageItemLine(item: LiveUsageItem, theme?: Theme): string {
   if (item.kind === "meter") {
     const label = item.windowLabel ? `${item.label} (${item.windowLabel})` : item.label;
     let text = `${label}: ${formatUsedPercent(item.usedPercent)}`;
     if (item.detail) text += ` · ${item.detail}`;
     if (item.resetDescription) {
-      const reset = options?.dimReset ? dim(item.resetDescription) : item.resetDescription;
+      const reset = theme ? theme.fg("muted", item.resetDescription) : item.resetDescription;
       text += ` · ${reset}`;
     }
     return text;
   }
 
-  const value = options?.emphasizeStatValue ? bold(item.value) : item.value;
+  const value = theme ? theme.bold(item.value) : item.value;
   return `${item.label}: ${value}${item.detail ? ` · ${item.detail}` : ""}`;
 }
 
 function renderLiveUsageLines(
+  theme: Theme,
   tab: BreakdownTab,
   liveState: LiveUsageState | undefined,
   width: number,
@@ -1669,33 +1548,26 @@ function renderLiveUsageLines(
 
   const resolved = resolveLiveUsageState(tab, liveState);
   if (resolved.kind === "loading") {
-    return [truncateToWidth(`${bold("Usage")} ${dim(resolved.message)}`, width)];
+    return [`${theme.bold("Usage")} ${theme.fg("muted", resolved.message)}`];
   }
 
   const lines: string[] = [
     renderUsageHeader(
+      theme,
       resolved.kind === "ok" ? resolved.snapshot.plan : undefined,
       resolved.kind === "ok" ? resolved.snapshot.fetchedAt : undefined,
-      width,
     ),
   ];
   if (resolved.kind === "message") {
-    const message =
-      resolved.tone === "error" ? ansiFg(ERROR_COLOR, resolved.message) : dim(resolved.message);
-    lines.push(truncateToWidth(message, width));
+    lines.push(theme.fg(resolved.tone, resolved.message));
     return lines;
   }
 
   for (const item of resolved.snapshot.items) {
     lines.push("");
-    lines.push(
-      truncateToWidth(
-        formatLiveUsageItemLine(item, { dimReset: true, emphasizeStatValue: true }),
-        width,
-      ),
-    );
+    lines.push(formatLiveUsageItemLine(item, theme));
     if (item.kind === "meter" && tab.liveProvider) {
-      lines.push(renderUsageMeterBar(tab.liveProvider.id, item, width));
+      lines.push(renderUsageMeterBar(theme, tab.liveProvider.id, item, width));
     }
   }
 
@@ -1752,12 +1624,18 @@ class UsageBreakdownComponent implements Component {
   private rangeIndex = 1;
   private measurement: MeasurementMode = "tokens";
   private view: BreakdownView = "model";
+  private renderWidth?: number;
   private cachedWidth?: number;
   private cachedLines?: string[];
+  private scrollOffset = 0;
+  private viewportHeight = 0;
+  private maxScroll = 0;
 
   constructor(
     data: BreakdownData,
     tui: TUI,
+    private readonly theme: Theme,
+    private readonly keybindings: KeybindingsManager,
     onDone: () => void,
     loadLiveUsage: (
       provider: UsageProviderDefinition,
@@ -1769,6 +1647,153 @@ class UsageBreakdownComponent implements Component {
     this.onDone = onDone;
     this.loadLiveUsage = loadLiveUsage;
     this.ensureLiveUsageLoaded();
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+
+  handleInput(data: string): void {
+    if (this.closing) return;
+    if (
+      matchesKey(data, Key.escape) ||
+      matchesKey(data, Key.ctrl("c")) ||
+      data.toLowerCase() === "q"
+    ) {
+      void this.close();
+      return;
+    }
+
+    const width = Math.min(
+      this.renderWidth ?? this.tui.terminal.columns - 2,
+      this.tui.terminal.columns - 2,
+    );
+    if (width < 24 || this.tui.terminal.rows < 7) return;
+
+    const scrollActions = [
+      ["tui.altScreen.pageUp", -this.viewportHeight],
+      ["tui.altScreen.pageDown", this.viewportHeight],
+      ["tui.altScreen.halfPageUp", -Math.max(1, Math.floor(this.viewportHeight / 2))],
+      ["tui.altScreen.halfPageDown", Math.max(1, Math.floor(this.viewportHeight / 2))],
+      ["tui.altScreen.lineUp", -1],
+      ["tui.altScreen.lineDown", 1],
+      ["tui.altScreen.top", -Infinity],
+      ["tui.altScreen.bottom", Infinity],
+    ] as const;
+    for (const [action, delta] of scrollActions) {
+      if (!this.keybindings.matches(data, action)) continue;
+      this.scrollOffset = Math.max(0, Math.min(this.maxScroll, this.scrollOffset + delta));
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      matchesKey(data, Key.tab) ||
+      matchesKey(data, Key.shift("tab")) ||
+      data.toLowerCase() === "t"
+    ) {
+      const order: MeasurementMode[] = ["sessions", "messages", "tokens"];
+      const index = Math.max(0, order.indexOf(this.measurement));
+      const direction = matchesKey(data, Key.shift("tab")) ? -1 : 1;
+      this.measurement = order[(index + order.length + direction) % order.length] ?? "tokens";
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      matchesKey(data, Key.left) ||
+      matchesKey(data, Key.right) ||
+      data.toLowerCase() === "h" ||
+      data.toLowerCase() === "l"
+    ) {
+      const direction = matchesKey(data, Key.left) || data.toLowerCase() === "h" ? -1 : 1;
+      this.rangeIndex = (this.rangeIndex + RANGE_DAYS.length + direction) % RANGE_DAYS.length;
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (data === "[" || data === "]" || data.toLowerCase() === "p" || data.toLowerCase() === "n") {
+      const direction = data === "[" || data.toLowerCase() === "p" ? -1 : 1;
+      this.tabIndex = (this.tabIndex + this.data.tabs.length + direction) % this.data.tabs.length;
+      this.scrollOffset = 0;
+      this.ensureLiveUsageLoaded();
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      matchesKey(data, Key.up) ||
+      matchesKey(data, Key.down) ||
+      data.toLowerCase() === "j" ||
+      data.toLowerCase() === "k"
+    ) {
+      const views: BreakdownView[] = ["model", "cwd", "dow", "tod"];
+      const index = views.indexOf(this.view);
+      const direction = matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
+      this.view = views[(index + views.length + direction) % views.length] ?? "model";
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    const rangeByKey: Record<string, number> = { "1": 0, "2": 1, "3": 2 };
+    if (Object.hasOwn(rangeByKey, data)) {
+      this.rangeIndex = rangeByKey[data]!;
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+    }
+  }
+
+  render(width: number): string[] {
+    this.renderWidth = width;
+    const styleLine = (line: string) => {
+      const padding = " ".repeat(Math.max(0, width - visibleWidth(line)));
+      return (
+        this.theme.style(line, { fg: "text", bg: "toolPendingBg" }) +
+        this.theme.bg("toolPendingBg", padding)
+      );
+    };
+    const height = Math.max(0, this.tui.terminal.rows - 2);
+    // Four chrome rows plus at least one document row. Margins are supplied by the overlay.
+    if (height < 5 || width < 24) {
+      this.viewportHeight = 0;
+      return ["q close · resize", "Usage needs 26×7"]
+        .slice(0, height)
+        .map((line) => styleLine(truncateUsageLine(this.theme, line, width)));
+    }
+    const document = this.renderDocument(width);
+    const body = document.slice(2);
+    this.viewportHeight = height - 4;
+    this.maxScroll = Math.max(0, body.length - this.viewportHeight);
+    this.scrollOffset = Math.min(this.scrollOffset, this.maxScroll);
+    const visible = body.slice(this.scrollOffset, this.scrollOffset + this.viewportHeight);
+    const keys = (action: "pageUp" | "pageDown") =>
+      this.keybindings.getKeys(`tui.altScreen.${action}`).join("/") || "unbound";
+    return [
+      ...document.slice(0, 2),
+      ...visible,
+      truncateUsageLine(
+        this.theme,
+        this.theme.fg("muted", `${keys("pageUp")}/${keys("pageDown")} scroll`),
+        width,
+      ),
+      truncateUsageLine(
+        this.theme,
+        this.theme.fg(
+          "muted",
+          `q close · ${this.scrollOffset + 1}–${this.scrollOffset + visible.length}/${body.length}`,
+        ),
+        width,
+      ),
+    ].map(styleLine);
   }
 
   private async close(): Promise<void> {
@@ -1820,82 +1845,7 @@ class UsageBreakdownComponent implements Component {
     this.liveUsageRequests.set(provider.id, request);
   }
 
-  invalidate(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
-  }
-
-  handleInput(data: string): void {
-    if (this.closing) return;
-    if (
-      matchesKey(data, Key.escape) ||
-      matchesKey(data, Key.ctrl("c")) ||
-      data.toLowerCase() === "q"
-    ) {
-      void this.close();
-      return;
-    }
-
-    if (
-      matchesKey(data, Key.tab) ||
-      matchesKey(data, Key.shift("tab")) ||
-      data.toLowerCase() === "t"
-    ) {
-      const order: MeasurementMode[] = ["sessions", "messages", "tokens"];
-      const index = Math.max(0, order.indexOf(this.measurement));
-      const direction = matchesKey(data, Key.shift("tab")) ? -1 : 1;
-      this.measurement = order[(index + order.length + direction) % order.length] ?? "tokens";
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    if (
-      matchesKey(data, Key.left) ||
-      matchesKey(data, Key.right) ||
-      data.toLowerCase() === "h" ||
-      data.toLowerCase() === "l"
-    ) {
-      const direction = matchesKey(data, Key.left) || data.toLowerCase() === "h" ? -1 : 1;
-      this.rangeIndex = (this.rangeIndex + RANGE_DAYS.length + direction) % RANGE_DAYS.length;
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    if (data === "[" || data === "]" || data.toLowerCase() === "p" || data.toLowerCase() === "n") {
-      const direction = data === "[" || data.toLowerCase() === "p" ? -1 : 1;
-      this.tabIndex = (this.tabIndex + this.data.tabs.length + direction) % this.data.tabs.length;
-      this.ensureLiveUsageLoaded();
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    if (
-      matchesKey(data, Key.up) ||
-      matchesKey(data, Key.down) ||
-      data.toLowerCase() === "j" ||
-      data.toLowerCase() === "k"
-    ) {
-      const views: BreakdownView[] = ["model", "cwd", "dow", "tod"];
-      const index = views.indexOf(this.view);
-      const direction = matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
-      this.view = views[(index + views.length + direction) % views.length] ?? "model";
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    const rangeByKey: Record<string, number> = { "1": 0, "2": 1, "3": 2 };
-    if (Object.hasOwn(rangeByKey, data)) {
-      this.rangeIndex = rangeByKey[data]!;
-      this.invalidate();
-      this.tui.requestRender();
-    }
-  }
-
-  render(width: number): string[] {
+  private renderDocument(width: number): string[] {
     if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
 
     const tab = this.data.tabs[this.tabIndex]!;
@@ -1905,64 +1855,84 @@ class UsageBreakdownComponent implements Component {
         ? this.data.allRanges.get(selectedDays)!
         : (this.data.providerRangesById.get(tab.id)?.get(selectedDays) ??
           getEmptyRange(selectedDays));
-    const palette =
+    const theme = this.theme;
+    const colors = theme.colors;
+    const paletteColors = [
+      colors.accent,
+      colors.mdLink,
+      colors.success,
+      colors.warning,
+      colors.error,
+    ];
+    const otherColor = colors.muted;
+    const paletteRange =
       tab.mode === "all"
-        ? this.data.allPalette
-        : (this.data.providerPalettes.get(tab.id) ?? {
-            modelPalette: {
-              modelColors: new Map<ModelKey, RGB>(),
-              otherColor: MUTED_COLOR,
-              orderedModels: [],
-            },
-            cwdPalette: {
-              cwdColors: new Map<CwdKey, RGB>(),
-              otherColor: MUTED_COLOR,
-              orderedCwds: [],
-            },
-          });
+        ? this.data.allRanges.get(30)!
+        : (this.data.providerRangesById.get(tab.id)?.get(30) ?? getEmptyRange(30));
+    const palette: ProviderPalette = {
+      modelPalette: chooseModelPalette(
+        paletteRange,
+        tab.liveProvider ? buildProviderModelPalette(theme, tab.liveProvider.color) : paletteColors,
+        otherColor,
+        tab.mode === "all" ? 4 : 3,
+      ),
+      cwdPalette: chooseCwdPalette(paletteRange, paletteColors, otherColor),
+    };
+    const dowColors = buildDowPalette(theme);
+    const todColors = buildTodPalette(theme);
     const liveState = tab.liveProvider ? this.data.liveUsage.get(tab.liveProvider.id) : undefined;
     const metric = graphMetricForRange(range, this.measurement);
 
-    const providerBadge = bold(`[${tab.shortLabel}]`);
+    const providerBadge = theme.bold(`[${tab.shortLabel}]`);
     const rangeTab = (days: number, index: number): string =>
-      index === this.rangeIndex ? bold(`[${days}d]`) : dim(` ${days}d `);
+      index === this.rangeIndex
+        ? theme.style(`[${days}d]`, { fg: "text", bold: true })
+        : theme.fg("muted", ` ${days}d `);
     const metricTab = (mode: MeasurementMode, label: string): string =>
-      mode === this.measurement ? bold(`[${label}]`) : dim(` ${label} `);
+      mode === this.measurement
+        ? theme.style(`[${label}]`, { fg: "text", bold: true })
+        : theme.fg("muted", ` ${label} `);
     const viewTab = (candidate: BreakdownView, label: string): string =>
-      candidate === this.view ? bold(`[${label}]`) : dim(` ${label} `);
+      candidate === this.view
+        ? theme.style(`[${label}]`, { fg: "text", bold: true })
+        : theme.fg("muted", ` ${label} `);
 
     const header =
-      `${bold("Usage")}  ${providerBadge}${dim(` ${this.tabIndex + 1}/${this.data.tabs.length}`)}  ` +
+      `${theme.bold("Usage")}  ${providerBadge}${theme.fg("muted", ` ${this.tabIndex + 1}/${this.data.tabs.length}`)}  ` +
       `${rangeTab(7, 0)}${rangeTab(30, 1)}${rangeTab(90, 2)}  ` +
       `${metricTab("sessions", "sess")}${metricTab("messages", "msg")}${metricTab("tokens", "tok")}  ` +
       `${viewTab("model", "model")}${viewTab("cwd", "cwd")}${viewTab("dow", "dow")}${viewTab("tod", "tod")}`;
 
     const lines: string[] = [];
-    lines.push(truncateToWidth(header, width));
+    const compactHeader = `${theme.bold("Usage")}  ${providerBadge} [${selectedDays}d] [${this.measurement === "sessions" ? "sess" : this.measurement === "messages" ? "msg" : "tok"}] [${this.view}]`;
     lines.push(
-      truncateToWidth(dim("[/] provider · ←/→ range · ↑/↓ view · tab metric · q to close"), width),
+      truncateUsageLine(theme, visibleWidth(header) <= width ? header : compactHeader, width),
     );
-    lines.push(truncateToWidth(`${bold(tab.label)}  ${dim(historySemanticsText(tab))}`, width));
+    const navigation = theme.fg(
+      "muted",
+      "[/] provider · ←/→ range · ↑/↓ view · tab metric · q to close",
+    );
+    lines.push(truncateUsageLine(theme, navigation, width));
+    if (visibleWidth(compactHeader) > width) lines.push(compactHeader);
+    if (visibleWidth(navigation) > width) lines.push(navigation);
+    lines.push(`${theme.bold(tab.label)}  ${theme.fg("muted", historySemanticsText(tab))}`);
     lines.push("");
 
-    const liveLines = renderLiveUsageLines(tab, liveState, width);
+    const liveLines = renderLiveUsageLines(theme, tab, liveState, width);
     if (liveLines.length > 0) {
-      for (const line of liveLines) lines.push(truncateToWidth(line, width));
+      lines.push(...liveLines);
       lines.push("");
     }
 
     const graphDescriptor =
       this.view === "dow" ? `share of ${metric.kind} by weekday` : `${metric.kind}/day`;
     lines.push(
-      truncateToWidth(
-        `${rangeSummary(range, selectedDays, metric.kind)}${dim(`   (graph: ${graphDescriptor})`)}`,
-        width,
-      ),
+      `${rangeSummary(range, selectedDays, metric.kind)}${theme.fg("muted", `   (graph: ${graphDescriptor})`)}`,
     );
     lines.push("");
 
-    let activeColorMap: Map<string, RGB>;
-    let activeOtherColor = MUTED_COLOR;
+    let activeColorMap: Map<string, Color>;
+    let activeOtherColor = otherColor;
     const legendItems: string[] = [];
     const stripProvider = tab.mode === "provider";
 
@@ -1972,39 +1942,46 @@ class UsageBreakdownComponent implements Component {
       for (const model of palette.modelPalette.orderedModels) {
         const color = activeColorMap.get(model);
         if (color)
-          legendItems.push(`${ansiFg(color, "█")} ${formatModelLabel(model, stripProvider)}`);
+          legendItems.push(
+            `${theme.style("█", { fg: color })} ${theme.fg("text", formatModelLabel(model, stripProvider))}`,
+          );
       }
-      legendItems.push(`${ansiFg(activeOtherColor, "█")} other`);
+      legendItems.push(
+        `${theme.style("█", { fg: activeOtherColor })} ${theme.fg("text", "other")}`,
+      );
     } else if (this.view === "cwd") {
       activeColorMap = palette.cwdPalette.cwdColors;
       activeOtherColor = palette.cwdPalette.otherColor;
       for (const cwd of palette.cwdPalette.orderedCwds) {
         const color = activeColorMap.get(cwd);
-        if (color) legendItems.push(`${ansiFg(color, "█")} ${abbreviatePath(cwd, 30)}`);
+        if (color)
+          legendItems.push(
+            `${theme.style("█", { fg: color })} ${theme.fg("text", abbreviatePath(cwd, 30))}`,
+          );
       }
-      legendItems.push(`${ansiFg(activeOtherColor, "█")} other`);
+      legendItems.push(
+        `${theme.style("█", { fg: activeOtherColor })} ${theme.fg("text", "other")}`,
+      );
     } else if (this.view === "dow") {
-      activeColorMap = this.data.dowPalette.dowColors;
-      for (const dow of this.data.dowPalette.orderedDows) {
+      activeColorMap = dowColors;
+      for (const dow of DOW_NAMES) {
         const color = activeColorMap.get(dow);
-        if (color) legendItems.push(`${ansiFg(color, "█")} ${dow}`);
+        if (color) legendItems.push(`${theme.style("█", { fg: color })} ${theme.fg("text", dow)}`);
       }
     } else {
-      activeColorMap = this.data.todPalette.todColors;
-      for (const tod of this.data.todPalette.orderedTods) {
+      activeColorMap = todColors;
+      for (const { key: tod } of TOD_BUCKETS) {
         const color = activeColorMap.get(tod);
-        if (color) legendItems.push(`${ansiFg(color, "█")} ${todBucketLabel(tod)}`);
+        if (color)
+          legendItems.push(
+            `${theme.style("█", { fg: color })} ${theme.fg("text", todBucketLabel(tod))}`,
+          );
       }
     }
 
     let graphLines: string[];
     if (this.view === "dow") {
-      graphLines = renderDowDistributionLines(
-        range,
-        this.measurement,
-        this.data.dowPalette.dowColors,
-        width,
-      );
+      graphLines = renderDowDistributionLines(theme, range, this.measurement, dowColors, width);
     } else {
       const maxScale = selectedDays === 7 ? 4 : selectedDays === 30 ? 3 : 2;
       const weeks = weeksForRange(range);
@@ -2014,6 +1991,7 @@ class UsageBreakdownComponent implements Component {
       const idealCellWidth = Math.floor((graphArea + gap) / Math.max(1, weeks)) - gap;
       const cellWidth = Math.min(maxScale, Math.max(1, idealCellWidth));
       graphLines = renderGraphLines(
+        theme,
         range,
         activeColorMap,
         activeOtherColor,
@@ -2026,15 +2004,15 @@ class UsageBreakdownComponent implements Component {
 
     const tableLines =
       this.view === "model"
-        ? renderModelTable(range, metric, 8, { stripProvider })
+        ? renderModelTable(theme, range, metric, 8, { stripProvider })
         : this.view === "cwd"
-          ? renderCwdTable(range, metric, 8)
+          ? renderCwdTable(theme, range, metric, 8)
           : this.view === "dow"
             ? renderDowTable(range, metric)
             : renderTodTable(range, metric);
 
     if (this.view === "dow") {
-      for (const line of graphLines) lines.push(truncateToWidth(line, width));
+      for (const line of graphLines) lines.push(truncateUsageLine(theme, line, width));
     } else {
       const graphWidth = Math.max(0, ...graphLines.map((line) => visibleWidth(line)));
       const separator = 2;
@@ -2048,12 +2026,15 @@ class UsageBreakdownComponent implements Component {
             : this.view === "cwd"
               ? "Top directories (30d palette):"
               : "Time of day:";
-        const legendBlock = [dim(legendTitle), ...legendItems];
+        const legendBlock = [theme.fg("muted", legendTitle), ...legendItems];
         const maxLegendRows = graphLines.length;
         let legendLines = legendBlock.slice(0, maxLegendRows);
         if (legendBlock.length > maxLegendRows) {
           const remaining = legendBlock.length - (maxLegendRows - 1);
-          legendLines = [...legendBlock.slice(0, maxLegendRows - 1), dim(`+${remaining} more`)];
+          legendLines = [
+            ...legendBlock.slice(0, maxLegendRows - 1),
+            theme.fg("muted", `+${remaining} more`),
+          ];
         }
         while (legendLines.length < graphLines.length) legendLines.push("");
 
@@ -2066,11 +2047,15 @@ class UsageBreakdownComponent implements Component {
 
         for (let index = 0; index < graphLines.length; index += 1) {
           const left = padRightAnsi(graphLines[index] ?? "", graphWidth);
-          const right = truncateToWidth(legendLines[index] ?? "", Math.max(0, legendWidth));
-          lines.push(truncateToWidth(left + " ".repeat(separator) + right, width));
+          const right = truncateUsageLine(
+            theme,
+            legendLines[index] ?? "",
+            Math.max(0, legendWidth),
+          );
+          lines.push(truncateUsageLine(theme, left + " ".repeat(separator) + right, width));
         }
       } else {
-        for (const line of graphLines) lines.push(truncateToWidth(line, width));
+        for (const line of graphLines) lines.push(truncateUsageLine(theme, line, width));
         lines.push("");
         const legendTitle =
           this.view === "model"
@@ -2078,16 +2063,19 @@ class UsageBreakdownComponent implements Component {
             : this.view === "cwd"
               ? "Top directories (30d palette):"
               : "Time of day:";
-        lines.push(truncateToWidth(dim(legendTitle), width));
-        for (const item of legendItems) lines.push(truncateToWidth(item, width));
+        lines.push(theme.fg("muted", legendTitle));
+        lines.push(...legendItems);
       }
     }
 
     lines.push("");
-    for (const line of tableLines) lines.push(truncateToWidth(line, width));
+    lines.push(...tableLines);
 
     this.cachedWidth = width;
-    this.cachedLines = lines;
+    this.cachedLines = [
+      ...lines.slice(0, 2),
+      ...lines.slice(2).flatMap((line) => wrapTextWithAnsi(line, width)),
+    ];
     return this.cachedLines;
   }
 }
@@ -2197,10 +2185,14 @@ export default function usageBreakdownExtension(pi: ExtensionAPI) {
       }
 
       await ctx.ui.custom<void>(
-        (tui, _theme, _kb, done) =>
-          new UsageBreakdownComponent(data, tui, done, (provider, signal) =>
+        (tui, theme, keybindings, done) =>
+          new UsageBreakdownComponent(data, tui, theme, keybindings, done, (provider, signal) =>
             fetchLiveUsageForProvider(provider, liveUsageAvailability, ctx, signal),
           ),
+        {
+          overlay: true,
+          overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 1 },
+        },
       );
     },
   });

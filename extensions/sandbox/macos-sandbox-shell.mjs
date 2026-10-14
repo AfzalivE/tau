@@ -7,8 +7,8 @@
  * its SOCKS5 proxy. This shell preserves normal bash execution while replacing
  * that transport with an authenticated HTTP CONNECT tunnel.
  *
- * Remove once the upstream fix ships:
- * https://github.com/anthropic-experimental/sandbox-runtime/pull/385
+ * Remove once the upstream fix ships (not included in 0.0.79):
+ * https://github.com/anthropics/sandbox-runtime/pull/681
  */
 
 import { spawn } from "node:child_process";

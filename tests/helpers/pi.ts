@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { findPackageJSON } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { InMemoryCredentialStore, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import {
+  InMemoryCredentialStore,
+  type AssistantMessage,
+  type CredentialStore,
+  type Model,
+} from "@earendil-works/pi-ai";
 import {
   convertToLlm,
   DefaultResourceLoader,
+  getPackageDir,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -15,22 +22,22 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 /**
- * Create real, isolated Pi resources with in-memory credentials, settings, and session history.
+ * Create real, isolated Pi resources with in-memory settings/history/catalogs and optional credential storage.
  * Load only the supplied extensions, with model-catalog network access and unrelated resource discovery disabled.
  */
 export async function createPiResources(
   cwd: string,
   agentDir: string,
   extensions: InlineExtension[],
+  credentials: CredentialStore = new InMemoryCredentialStore(),
 ) {
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: false },
     retry: { enabled: false },
   });
   const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
+    credentials,
     modelsPath: null,
-    modelsStorePath: path.join(agentDir, "models-store.json"),
     allowModelNetwork: false,
     refreshOnCreate: false,
   });
@@ -56,6 +63,19 @@ export async function createPiResources(
     resourceLoader,
     sessionManager: SessionManager.inMemory(cwd),
   };
+}
+
+/** Resolve the imported Pi's CLI and verify it matches the workspace dependency pin. */
+export async function getPiCliPath(): Promise<string> {
+  const directory = getPackageDir();
+  const manifest = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8"));
+  const workspace = JSON.parse(await readFile(findPackageJSON(import.meta.url)!, "utf8"));
+  assert.equal(
+    manifest.version,
+    workspace.devDependencies["@earendil-works/pi-coding-agent"],
+    "Pi CLI must match the workspace dependency pin",
+  );
+  return path.join(directory, manifest.bin.pi);
 }
 
 /** Dispatch a completed turn with real history/projection; reject unexpected boundary mutations. */

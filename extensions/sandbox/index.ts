@@ -54,22 +54,16 @@
  */
 
 import { fileURLToPath } from "node:url";
-import {
-  createBashToolDefinition,
-  type ExtensionAPI,
-  type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { Usage } from "@earendil-works/pi-ai";
+import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { createSandboxedBashOps, createUnsandboxedBashOps } from "./bash.js";
+import { createSandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
-import { registerFileToolGuard } from "./file-tools.js";
-import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
-import { createSandboxRuntime, getSandboxRunMode } from "./runtime.js";
+import { createSandboxRuntime, getSandboxRunMode, type SandboxInvocation } from "./runtime.js";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
   pi.registerFlag("no-sandbox", {
-    description: "Disable OS-level bash sandboxing and native file-tool guardrails",
+    description: "Disable OS-level sandboxing for bash commands",
     type: "boolean",
     default: false,
   });
@@ -80,63 +74,15 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     type: "string",
   });
 
-  pi.registerFlag("sandbox-required", {
-    description:
-      "Require sandboxed Bash execution; refuse disabled configs, exclusions, and unsandboxed approval",
-    type: "boolean",
-    default: false,
-  });
-  pi.registerFlag("sandbox-debug", {
-    description: "Enable sandbox-runtime proxy/network debug logs (sets SRT_DEBUG)",
-    type: "boolean",
-    default: false,
-  });
-
   const runtime = createSandboxRuntime(pi);
-  pi.events.on("subagent:unsandboxed-approval", (data) => {
-    const request = data as {
-      ctx?: ExtensionContext;
-      title?: unknown;
-      choices?: unknown;
-      signal?: AbortSignal;
-      result?: Promise<string | undefined>;
-    };
-    if (
-      !request?.ctx ||
-      typeof request.title !== "string" ||
-      !Array.isArray(request.choices) ||
-      !isUnsandboxedApproval(request.choices)
-    ) {
-      return;
-    }
-    const { ctx, title } = request;
-    const choices = [...request.choices];
-    request.result = runtime
-      .withPermissionContext(ctx, request.signal, async (_ctx, signal) => {
-        if (
-          !ctx.hasUI ||
-          runtime.required ||
-          runtime.state.status !== "active" ||
-          runtime.promptMode !== "interactive"
-        ) {
-          return undefined;
-        }
-        // The subagent already owns the parent's permission queue. Use the original UI,
-        // not the invocation wrapper, to avoid recursively entering that queue.
-        const choice =
-          ctx.mode === "tui"
-            ? await showUnsandboxedApproval(ctx, title, signal)
-            : ctx.mode === "rpc"
-              ? await ctx.ui.select(title, choices, { signal })
-              : undefined;
-        return signal.aborted ||
-          runtime.required ||
-          runtime.state.status !== "active" ||
-          runtime.promptMode !== "interactive"
-          ? undefined
-          : choice;
-      })
-      .catch(() => undefined);
+  const failedUsage = new Map<string, Usage>();
+  // Pi converts thrown tool errors to results. Restore already-incurred review usage at
+  // that public boundary without changing native Bash's cancellation/error behavior.
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "bash") return;
+    const usage = failedUsage.get(event.toolCallId);
+    failedUsage.delete(event.toolCallId);
+    if (usage) return { usage: event.usage ? sumUsage([event.usage, usage]) : usage };
   });
   pi.events.on("subagent:sandbox", (data) => {
     const handoff = data as { config?: unknown; extension?: string; error?: string };
@@ -147,10 +93,6 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         ...cloned,
         enabled: true,
         mode: runtime.promptMode,
-        required: runtime.required,
-        debug: runtime.config?.debug,
-        commands: structuredClone(runtime.config?.commands),
-        network: { ...cloned.network, jvmProxy: runtime.config?.network.jvmProxy },
         filesystem: {
           ...cloned.filesystem,
           allowTempDirs: false,
@@ -158,74 +100,20 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         },
       };
     } else if (runtime.state.status === "bypassed" || runtime.state.status === "suspended") {
-      if (runtime.required) handoff.error = "Sandbox is required but is not active.";
-      else handoff.config = { enabled: false, commands: structuredClone(runtime.config?.commands) };
+      handoff.config = { enabled: false };
     } else {
       handoff.error = "Sandbox is not ready. Fix its setup before starting a subagent.";
     }
     handoff.extension = fileURLToPath(import.meta.url);
   });
-  const sandboxedOps = createSandboxedBashOps({
-    getContext: () => runtime.context,
-    getSandboxConfig: () => runtime.config,
-    getRuntimeConfig: () => runtime.getRuntimeConfig(),
-    getPromptMode: () => runtime.promptMode,
-    getJvmProxyEndpoint: runtime.getJvmProxyEndpoint,
-    isRequired: () => runtime.required,
-    checkCommand: runtime.checkCommand,
-    applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
-    savePermission: runtime.savePermission,
-    withBashContext: runtime.withBashContext,
-    recordEvent: runtime.recordEvent,
-  });
-
-  let localBashTool = createBashToolDefinition(process.cwd());
-  let sandboxedBashTool = createBashToolDefinition(process.cwd(), { operations: sandboxedOps });
-
+  const localBashTool = createBashToolDefinition(process.cwd());
   pi.registerTool({
     ...localBashTool,
     label: "bash (sandbox-aware)",
-    description:
-      localBashTool.description +
-      " Set requestUnsandboxed to true to request fresh human approval for this invocation outside the sandbox. Requires an active sandbox, interactive permission mode, and human UI. Never retries or changes sandbox policy.",
-    parameters: Type.Object({
-      ...localBashTool.parameters.properties,
-      requestUnsandboxed: Type.Optional(
-        Type.Boolean({
-          description:
-            "Request human approval to run this command and its descendants once outside Tau's OS sandbox restrictions (default false).",
-        }),
-      ),
-    }),
     async execute(id, params, signal, onUpdate, ctx) {
-      const { command, timeout, requestUnsandboxed } = params;
-      const blocked = runtime.checkCommand(command, ctx.cwd);
-      if (blocked) throw new Error(blocked);
-      if (requestUnsandboxed !== undefined && typeof requestUnsandboxed !== "boolean") {
-        throw new Error("requestUnsandboxed must be a boolean.");
-      }
-      if (requestUnsandboxed === true) {
-        return runtime.withPermissionContext(ctx, signal, (invocationContext, invocationSignal) => {
-          const operations = createUnsandboxedBashOps(
-            runtime,
-            sandboxedOps,
-            invocationContext,
-            invocationSignal,
-          );
-          const tool = createBashToolDefinition(ctx.cwd, { operations });
-          return tool.execute(
-            id,
-            { command, timeout },
-            invocationSignal,
-            onUpdate,
-            invocationContext,
-          );
-        });
-      }
       const state = runtime.state;
       if (state.status !== "active") {
-        const allowsUnsandboxed =
-          !runtime.required && (state.status === "bypassed" || state.status === "suspended");
+        const allowsUnsandboxed = state.status === "bypassed" || state.status === "suspended";
         if (!allowsUnsandboxed) {
           const runMode = getSandboxRunMode(state);
 
@@ -245,50 +133,76 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               "Sandbox session initialization is incomplete. Retry after session startup or run /sandbox enable.";
           }
 
-          if (runtime.required)
-            reason = `Sandbox is required but is not active (${runMode}). Check the configuration and sandbox startup diagnostics.`;
-          runtime.recordEvent({
-            timestamp: Date.now(),
-            kind: "runtime",
-            outcome: "blocked",
-            reason: state.status === "blocked" ? state.reason : "unknown",
-            command,
-            cwd: ctx.cwd,
-            summary: reason,
-          });
           throw new Error(reason);
         }
         return localBashTool.execute(id, params, signal, onUpdate, ctx);
       }
 
-      runtime.captureContext(ctx);
-      return sandboxedBashTool.execute(id, params, signal, onUpdate, ctx);
+      return runtime.withPermissionLifetime(ctx, signal, async (toolSignal) => {
+        let invocation: SandboxInvocation | undefined;
+        const tool = createBashToolDefinition(ctx.cwd, {
+          operations: {
+            exec(command, cwd, options) {
+              // Keep queue rejection and cancellation inside native Bash's output/error handling.
+              return runtime.runBash(ctx, toolSignal, (owner) => {
+                invocation = owner;
+                return createSandboxedBashOps({
+                  ctx: owner.ctx,
+                  getSandboxConfig: () => runtime.config,
+                  getRuntimeConfig: () => runtime.getRuntimeConfig(),
+                  applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
+                  recordEvent: runtime.recordEvent,
+                  resolvePermission: (proposal) => runtime.resolvePermission(proposal, owner),
+                }).exec(command, cwd, { ...options, signal: owner.signal });
+              });
+            },
+          },
+        });
+        try {
+          const result = await tool.execute(id, params, toolSignal, onUpdate, ctx);
+          return invocation?.usages.length
+            ? { ...result, usage: sumUsage(invocation.usages) }
+            : result;
+        } catch (error) {
+          if (invocation?.usages.length) failedUsage.set(id, sumUsage(invocation.usages));
+          throw error;
+        }
+      });
     },
   });
 
-  pi.on("tool_call", (event, ctx) => {
-    if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
-    const reason = runtime.checkCommand(event.input.command, ctx.cwd);
-    return reason ? { block: true, reason } : undefined;
-  });
-  pi.on("user_bash", (event, ctx) => {
-    const reason = runtime.checkCommand(event.command, ctx.cwd);
-    if (reason)
-      return {
-        result: { output: `${reason}\n`, exitCode: 126, cancelled: false, truncated: false },
-      };
+  pi.on("session_start", async (_event, ctx) => {
+    await runtime.start(ctx);
+    failedUsage.clear();
   });
 
-  pi.on("session_start", async (event, ctx) => {
-    localBashTool = createBashToolDefinition(ctx.cwd);
-    sandboxedBashTool = createBashToolDefinition(ctx.cwd, { operations: sandboxedOps });
-    await runtime.start(ctx, event.reason);
+  pi.on("session_shutdown", async (_event, ctx) => {
+    await runtime.shutdown(ctx);
+    failedUsage.clear();
   });
 
-  pi.on("session_shutdown", async (event, ctx) => {
-    await runtime.shutdown(ctx, event.reason);
-  });
-
-  registerFileToolGuard(pi, runtime);
   registerSandboxCommand(pi, runtime);
+}
+
+function sumUsage(usages: Usage[]): Usage {
+  const total: Usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  for (const usage of usages) {
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+      total[key] += usage[key];
+    }
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
+      total.cost[key] += usage.cost[key];
+    }
+    for (const key of ["cacheWrite1h", "reasoning"] as const) {
+      if (usage[key] !== undefined) total[key] = (total[key] ?? 0) + usage[key];
+    }
+  }
+  return total;
 }

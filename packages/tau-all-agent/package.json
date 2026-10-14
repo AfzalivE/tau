@@ -1,6 +1,6 @@
 {
   "name": "tau-all-agent",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Full Tau package for Pi with coding workflows, web search, sandboxing, memory, Telegram, Home Assistant, OpenSCAD, skills, and a theme",
   "keywords": [
@@ -31,7 +31,7 @@
   },
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "file:../../../../Repos/sandbox-runtime",
+    "@anthropic-ai/sandbox-runtime": "0.0.79",
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^29.0.2",
     "proper-lockfile": "4.1.2",
