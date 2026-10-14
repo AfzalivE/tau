@@ -1149,15 +1149,13 @@ describe("subagent", { concurrency: false }, () => {
       "stopping a queued child must not dismiss another child's dialog",
     );
     icing.answer("Allow");
-    const parentDialog = await app.reviews.next();
-    const parentPanel = parentDialog.component.render(160).map(stripVTControlCharacters).join("\n");
-    assert.match(parentPanel, /SANDBOX BLOCKED.*Network connection/);
-    assert.match(parentPanel, /parent-approval.invalid:443/);
+    const parentDialog = await app.dialogs.next();
+    assert.match(parentDialog.title, /Sandbox blocked network access to parent-approval.invalid/);
     const approved = await generations.next();
     assert.equal(approved.child, "alpha");
     assert.equal(contentText(approved.context.messages.at(-1)!.content), '"Allow"');
     approved.reply(assistantMessage("Icing approved."));
-    parentDialog.component.handleInput?.("\x1b");
+    parentDialog.answer("Deny");
     await parent;
     await app.reports.next();
     assert.equal(app.editor.getText(), "Unsent cookie recipe");

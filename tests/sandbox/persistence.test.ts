@@ -234,9 +234,10 @@ describe("global sandbox permission persistence", { concurrency: false }, () => 
       options,
     );
     assert.deepEqual((await saved()).filesystem.allowWrite, [target]);
-    assert.deepEqual(config.toRuntimeConfig(config.loadConfig(cwd).config).filesystem.allowWrite, [
-      target,
-    ]);
+    assert.deepEqual(
+      config.toRuntimeConfig(config.loadConfig(cwd).config, cwd).filesystem.allowWrite,
+      [target],
+    );
   });
 
   test("removes one default deny without persisting expanded temporary write roots", async () => {
@@ -383,12 +384,13 @@ describe("global sandbox permission persistence", { concurrency: false }, () => 
     await assert.rejects(fs.readFile(configPath), { code: "ENOENT" });
   });
 
-  for (const rule of ["INK.INVALID", "*.invalid", "*"]) {
+  // Sandbox-runtime rejects top-level wildcards such as *.invalid as overly broad.
+  for (const rule of ["INK.REEF.INVALID", "*.reef.invalid", "*"]) {
     test(`network deny ${rule} wins over a candidate allow`, async () => {
       const bytes = JSON.stringify({ network: { deniedDomains: [rule] } });
       await fs.writeFile(configPath, bytes);
       await assert.rejects(
-        persistence.saveGlobalPermission(cwd, domain("ink.invalid"), options),
+        persistence.saveGlobalPermission(cwd, domain("ink.reef.invalid"), options),
         /does not allow/,
       );
       assert.equal(await fs.readFile(configPath, "utf8"), bytes);

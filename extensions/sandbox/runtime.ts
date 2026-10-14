@@ -37,6 +37,11 @@ import {
 } from "./config.js";
 import { createSandboxReviewer, type SandboxReviewRequest } from "./classifier.js";
 import { createPermissionResolver, type PermissionResolution } from "./permissions/dialog.js";
+import {
+  saveGlobalPermission,
+  SandboxPermissionSaveError,
+  type SandboxPermissionChange,
+} from "./permissions/persistence.js";
 import type { PermissionProposal } from "./permissions/proposal.js";
 
 const STATUS_KEY = "sandbox";
@@ -128,6 +133,11 @@ export interface SandboxRuntime {
   disable(ctx: ExtensionContext): Promise<void>;
   setPromptMode(ctx: ExtensionContext, mode: PromptMode): void;
   applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxPolicy): void;
+  savePermission(
+    ctx: ExtensionContext,
+    change: SandboxPermissionChange,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   recordEvent(event: SandboxEvent): void;
 }
 
@@ -466,6 +476,56 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
+  function savePermission(
+    ctx: ExtensionContext,
+    change: SandboxPermissionChange,
+    operationSignal?: AbortSignal,
+  ): Promise<boolean> {
+    const signals = [permissionLifetime.signal, ctx.signal, operationSignal].filter(
+      (signal): signal is AbortSignal => signal !== undefined,
+    );
+    const signal = AbortSignal.any(signals);
+    const operation = (async () => {
+      if (signal.aborted || sandboxState.status !== "active") return false;
+      try {
+        const saved = await saveGlobalPermission(ctx.cwd, change, {
+          projectTrusted: ctx.isProjectTrusted(),
+          overrideConfigPath: getStringFlag(pi, "sandbox-config"),
+          signal,
+        });
+        auditLog?.append("persistent-permission", {
+          ...change,
+          ...saved,
+          cancelled: signal.aborted,
+        });
+        if (signal.aborted) return false;
+        notify(
+          ctx,
+          `${saved.changed ? "Saved sandbox permission globally" : "Sandbox permission is already allowed globally"}: ${saved.path}`,
+        );
+        return sandboxState.status === "active";
+      } catch (error) {
+        const published = error instanceof SandboxPermissionSaveError && error.saved;
+        auditLog?.append("persistent-permission", {
+          ...change,
+          path: error instanceof SandboxPermissionSaveError ? error.path : undefined,
+          saved: published,
+          error: error instanceof Error ? error.message : String(error),
+          cancelled: signal.aborted,
+        });
+        if (!signal.aborted)
+          notify(
+            ctx,
+            `${published ? "Permission is saved globally; retry was cancelled" : "Could not save sandbox permission"}: ${error instanceof Error ? error.message : String(error)}`,
+            published ? "warning" : "error",
+          );
+        return false;
+      }
+    })();
+    permissionInvocations.add(operation);
+    return operation.finally(() => permissionInvocations.delete(operation));
+  }
+
   const resolvePermission = createPermissionResolver({
     getPromptMode: () => promptMode,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
@@ -473,6 +533,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     recordEvent: recordSandboxEvent,
     notify,
     review,
+    savePermission,
   });
   const askNetworkPermission: SandboxAskCallback = async ({ host, port }) => {
     const owner = invocation;
@@ -897,6 +958,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     disable,
     setPromptMode,
     applyRuntimeConfigForSession,
+    savePermission,
     recordEvent: recordSandboxEvent,
   };
 }

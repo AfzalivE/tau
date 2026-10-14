@@ -8,11 +8,13 @@ import {
   type PromptMode,
   type SandboxPolicy,
 } from "../config.js";
+import { findFileToolPolicyViolation } from "../file-tool-guard.js";
 import type { SandboxEvent, SandboxInvocation } from "../runtime.js";
 import { mutateMachLookupAllowList } from "./mach-lookup.js";
+import type { SandboxPermissionChange } from "./persistence.js";
 import type { PermissionProposal, TemporaryPermissionGrant } from "./proposal.js";
 
-type PermissionDecision = "allow-retry" | "allow-adapt" | "deny";
+type PermissionDecision = "allow-retry" | "allow-always" | "allow-adapt" | "deny";
 
 export type PermissionResolution =
   | { kind: "allow-connection"; message?: never }
@@ -21,10 +23,15 @@ export type PermissionResolution =
       message: string;
       blockedTarget: string;
       grant?: TemporaryPermissionGrant;
+      /** The user also saved the grant to the global sandbox configuration. */
+      saved?: boolean;
     }
   | { kind: "allow-adapt" | "deny"; message: string };
 
 const ALLOW_RETRY_OPTION = "Allow and retry now";
+const ALWAYS_ALLOW_RETRY_OPTION = "Always allow and retry";
+const ALLOW_CONNECTION_OPTION = "Allow for this session";
+const ALWAYS_ALLOW_CONNECTION_OPTION = "Always allow";
 const ALLOW_ADAPT_OPTION = "Allow but adapt for side-effects";
 const DENY_OPTION = "Deny";
 
@@ -39,6 +46,12 @@ export function createPermissionResolver(options: {
   ) => Promise<string | undefined>;
   recordEvent: (event: SandboxEvent) => void;
   notify: (ctx: ExtensionContext, text: string, level?: "info" | "warning" | "error") => void;
+  /** Persist a manual grant globally. Classifier grants are never saved. */
+  savePermission: (
+    ctx: ExtensionContext,
+    change: SandboxPermissionChange,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
 }): (proposal: PermissionProposal, invocation: SandboxInvocation) => Promise<PermissionResolution> {
   // Only manual grants share a decision: they authorize the host for the session.
   const pendingNetworkApprovals = new Map<string, Promise<PermissionResolution>>();
@@ -119,15 +132,23 @@ export function createPermissionResolver(options: {
     let decision: PermissionDecision = "deny";
     try {
       if (proposal.kind === "network") {
-        if (await prompts.confirm(title, "\nAllow for this session?")) decision = "allow-adapt";
+        const selection = await prompts.select(title, [
+          ALLOW_CONNECTION_OPTION,
+          ALWAYS_ALLOW_CONNECTION_OPTION,
+          DENY_OPTION,
+        ]);
+        if (selection === ALLOW_CONNECTION_OPTION) decision = "allow-adapt";
+        if (selection === ALWAYS_ALLOW_CONNECTION_OPTION) decision = "allow-always";
       } else {
         const choices = proposal.autoRetryAvailable
-          ? [ALLOW_RETRY_OPTION, ALLOW_ADAPT_OPTION, DENY_OPTION]
+          ? [ALLOW_RETRY_OPTION, ALWAYS_ALLOW_RETRY_OPTION, ALLOW_ADAPT_OPTION, DENY_OPTION]
           : [ALLOW_ADAPT_OPTION, DENY_OPTION];
         const selection = await prompts.select(title, choices);
         if (selection === ALLOW_ADAPT_OPTION) decision = "allow-adapt";
         if (selection === ALLOW_RETRY_OPTION && proposal.autoRetryAvailable)
           decision = "allow-retry";
+        if (selection === ALWAYS_ALLOW_RETRY_OPTION && proposal.autoRetryAvailable)
+          decision = "allow-always";
       }
     } catch (error) {
       if (proposal.kind === "network" && !signal.aborted) {
@@ -149,15 +170,58 @@ export function createPermissionResolver(options: {
       return createPermissionResolution("deny", blockedTarget);
     }
 
+    const saved = decision === "allow-always";
+    if (saved) {
+      const proposed = cloneRuntimeConfig(latest);
+      applyAction(proposed, proposal.action);
+      if (stillBlocked(proposal, proposed)) {
+        record(proposal, "blocked");
+        return {
+          kind: "deny",
+          message: `\n${blockedTarget}\n\nCurrent policy still blocks this target. No global approval was saved.`,
+        };
+      }
+      if (!(await options.savePermission(ctx, permissionChange(proposal), signal))) {
+        record(proposal, "blocked");
+        return createPermissionResolution("deny", blockedTarget);
+      }
+    }
+
+    // A save can take time. Apply only the nominated action to the policy current after it.
+    const current = saved ? options.getRuntimeConfig() : latest;
+    if (signal.aborted || !current) {
+      record(proposal, "blocked");
+      return createPermissionResolution("deny", blockedTarget);
+    }
     // Apply only the nominated action to the latest policy. Classifier grants never reach here.
-    const next = cloneRuntimeConfig(latest);
+    const next = cloneRuntimeConfig(current);
     const changed = applyAction(next, proposal.action);
+    if (saved && stillBlocked(proposal, next)) {
+      record(proposal, "blocked");
+      if (proposal.kind === "network") {
+        options.notify(
+          ctx,
+          `Permission saved globally, but current policy still denies ${proposal.action.value}.`,
+          "warning",
+        );
+      }
+      return {
+        kind: "deny",
+        message: `\n${blockedTarget}\n\nPermission saved globally, but current policy still blocks this target. The command was not retried.`,
+      };
+    }
     if (changed) options.applyRuntimeConfigForSession(ctx, next);
-    record(proposal, "allowed");
+    record(
+      proposal,
+      "allowed",
+      saved
+        ? permissionEventSummary(proposal, "allowed").replace(/for this session$/, "globally")
+        : undefined,
+    );
     if (proposal.kind === "network") {
       options.notify(
         ctx,
-        `Allowed network domain for this session: ${proposal.action.value}`,
+        `Allowed network domain ${saved ? "globally" : "for this session"}: ${proposal.action.value}`,
         "info",
       );
       return { kind: "allow-connection" };
@@ -285,10 +349,11 @@ function createPermissionResolution(
       message: `\n${blockedTarget}\n\nAccess remains denied for this session.`,
     };
   }
-  if (decision === "allow-retry") {
+  if (decision === "allow-retry" || decision === "allow-always") {
     return {
       kind: "allow-retry",
       blockedTarget,
+      ...(decision === "allow-always" ? { saved: true } : {}),
       message: `\n${blockedTarget}\n\nGranting access and retrying the command per user request...\n\n`,
     };
   }
@@ -297,5 +362,48 @@ function createPermissionResolution(
     message: changed
       ? `\n${blockedTarget}\n\nAccess granted for this session. Retry the command manually if appropriate.`
       : `\n${blockedTarget}\n\nAccess had already been granted for this session. The remaining failure may be unrelated to sandbox policy.`,
+  };
+}
+
+/** A saved grant must be effective now; remaining denies keep precedence. */
+function stillBlocked(proposal: PermissionProposal, config: SandboxPolicy): boolean {
+  if (proposal.kind === "network") {
+    return config.network.deniedDomains.includes(proposal.action.value);
+  }
+  if (proposal.kind === "mach-lookup") return false;
+  return (
+    findFileToolPolicyViolation(
+      [{ kind: filesystemAccess(proposal), path: proposal.target }],
+      config,
+      proposal.cwd,
+    ) !== null
+  );
+}
+
+function filesystemAccess(proposal: PermissionProposal): "read" | "write" {
+  return proposal.operation === "read" || proposal.action.list === "deny-read" ? "read" : "write";
+}
+
+function permissionChange(proposal: PermissionProposal): SandboxPermissionChange {
+  const { op, value } = proposal.action;
+  if (proposal.kind === "network") {
+    return { section: "network", list: "allowedDomains", op, value, target: value };
+  }
+  if (proposal.kind === "mach-lookup") {
+    return { section: "network", list: "allowMachLookup", op, value, target: value };
+  }
+  const list =
+    proposal.action.list === "deny-read"
+      ? "denyRead"
+      : proposal.action.list === "deny-write"
+        ? "denyWrite"
+        : "allowWrite";
+  return {
+    section: "filesystem",
+    list,
+    op,
+    value,
+    target: proposal.target,
+    access: filesystemAccess(proposal),
   };
 }

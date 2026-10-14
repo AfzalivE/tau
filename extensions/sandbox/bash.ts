@@ -679,14 +679,14 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
           if (processed.exitCode === 0) {
             message = retry.grant
               ? "\n[sandbox] Classifier-approved retry completed. The temporary exception was not saved.\n"
-              : `\n${retry.blockedTarget}\n\nAccess granted for this session and the command was retried successfully.`;
+              : `\n${retry.blockedTarget}\n\nAccess granted ${grantScope(retry)} and the command was retried successfully.`;
           } else if (
             !processed.resolution &&
             processed.runtimeProtectedWriteViolations.length === 0
           ) {
             message = retry.grant
               ? "\n[sandbox] Classifier-approved retry failed. No further automatic retry is allowed.\n"
-              : `\n${retry.blockedTarget}\n\nAccess granted for this session and the command was retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.`;
+              : `\n${retry.blockedTarget}\n\nAccess granted ${grantScope(retry)} and the command was retried per user request, but the command still exited non-zero. The sandbox block was resolved; the remaining failure may be unrelated.`;
           }
           processed.postamble = appendOutputPostamble(
             processed.postamble,
@@ -713,7 +713,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         if (attemptTimeout !== undefined && attemptTimeout <= 0) {
           const message = nextRetry.grant
             ? "\n[sandbox] Classifier-approved retry skipped because the timeout was exhausted.\n"
-            : `\n${nextRetry.blockedTarget}\n\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
+            : `\n${nextRetry.blockedTarget}\n\nAccess granted ${grantScope(nextRetry)}, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.`;
           onData(Buffer.from(message));
           return { exitCode: processed.exitCode };
         }
@@ -721,4 +721,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       }
     },
   };
+}
+
+function grantScope(resolution: Extract<PermissionResolution, { kind: "allow-retry" }>): string {
+  return resolution.saved ? "globally for future sessions" : "for this session";
 }

@@ -5,9 +5,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { containsGlobChars } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 import { lock } from "proper-lockfile";
 import {
-  expandPathConfigEntry,
   hasPathConfigReference,
   loadConfig,
+  resolveSandboxPath,
   toRuntimeConfig,
   type SandboxConfig,
 } from "../config.js";
@@ -196,14 +196,17 @@ function applyGlobalChange(
   const defaults =
     change.section === "network" ? baseline.network[change.list] : baseline.filesystem[change.list];
   const values = (rawList ?? defaults ?? []) as string[];
+  // Compare filesystem rules as the session resolves them, so relative rules match too.
+  const resolve = (value: string): string | null =>
+    change.section === "filesystem"
+      ? resolveSandboxPath(value, `${change.section}.${change.list}`, cwd)
+      : value.trim();
+  const selected = resolve(change.value);
   const matches = (value: string): boolean => {
-    const expanded =
-      change.section === "filesystem"
-        ? expandPathConfigEntry(value, `${change.section}.${change.list}`)
-        : value.trim();
+    const expanded = resolve(value);
     return change.list === "allowedDomains"
-      ? expanded?.toLowerCase() === change.value.toLowerCase()
-      : expanded === change.value;
+      ? expanded?.toLowerCase() === selected?.toLowerCase()
+      : expanded === selected;
   };
   const index = values.findIndex(matches);
   if ((change.op === "add" && index !== -1) || (change.op === "remove" && index === -1)) {
@@ -228,7 +231,7 @@ function assertPermissionEffective(
     throw new Error("Cannot verify permission with malformed sandbox configuration");
   }
   if (!loaded.config.enabled) throw new Error("Sandbox configuration disables the sandbox");
-  const runtime = toRuntimeConfig(loaded.config);
+  const runtime = toRuntimeConfig(loaded.config, cwd);
   const allowed =
     change.section === "filesystem"
       ? !findFileToolPolicyViolation([{ kind: change.access!, path: change.target }], runtime, cwd)
