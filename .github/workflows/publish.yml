@@ -41,6 +41,13 @@ jobs:
           }
           NODE
 
+      - name: Set up sandbox prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap ripgrep socat
+          # Ubuntu restricts the user namespaces needed by bubblewrap and apply-seccomp.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Install dependencies
         run: npm ci
 

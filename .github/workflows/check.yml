@@ -34,6 +34,18 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Set up sandbox prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap ripgrep socat
+          # Ubuntu restricts the user namespaces needed by bubblewrap and apply-seccomp.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install sandbox dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+
       - name: Install dependencies
         run: npm ci
 
