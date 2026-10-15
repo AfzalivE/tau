@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Changed
 
 - **Breaking:** Requires Pi 1.2.0 or newer.
+- Sandbox lets macOS commands handle filesystem denials instead of interrupting them, while retaining OS restrictions and reviewing permissions only after failure.
 
 ### Fixed
 

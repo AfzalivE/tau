@@ -18,6 +18,12 @@ The macOS-only `allowAppleEvents` setting defaults to `false`. To opt in, add it
 
 Automatic project configuration (`.pi/sandbox.json`) cannot change this setting, even for trusted projects. An explicit override file is trusted input: do not select an attacker-controlled or unreviewed file. Invalid non-boolean values in user-selected configuration block sandbox initialization. Reload after editing configuration. Enabled sessions warn at startup and in `/sandbox show`, and include the warning in agent context. Subagents inherit the parent's setting. Permission reviews never enable it.
 
+## Filesystem error handling
+
+Filesystem diagnostics no longer terminate macOS commands. The OS still rejects forbidden access, while programs can handle errors from optional caches, probes, and fallbacks. A zero exit skips permission review and replay, with best-effort filesystem diagnostics retained in the result. Failed commands can still request permissions, but a reported denial does not prove what caused the failure or that additional access is necessary.
+
+Permitted work and side effects may continue after a denied operation. Neither this behavior nor early termination provides rollback, so retries must account for completed effects. Timeout and cancellation still terminate commands and do not trigger permission review or automatic replay. There is no default command timeout; a stuck command without one needs cancellation.
+
 ## Classifier fallback
 
 Commands run under the normal sandbox policy first. At a supported permission block, an optional classifier can approve a temporary exception before the usual manual prompt. It must consider the user's intent, the actual permission change, and any side effects already performed by the failed command. There is no blanket approval of commands or automatic escape from the sandbox.

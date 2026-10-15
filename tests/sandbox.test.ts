@@ -1164,6 +1164,125 @@ describe("sandbox", { concurrency: false }, () => {
       await writeFile(configPath, configBytes);
     });
 
+    test("a successful command continues after live denials without review or replay", async () => {
+      const protectedPath = path.join(cwd, ".bashrc");
+      await writeFile(protectedPath, "The kraken sleeps here.\n");
+      const command = nodeCommand(`
+        const fs = require("node:fs");
+        fs.appendFileSync("effects.txt", "fed the kraken\\n");
+        let continued = false;
+        const watcher = fs.watch(".", (_event, name) => {
+          if (name !== "continue.txt" || continued) return;
+          continued = true;
+          watcher.close();
+          fs.appendFileSync("effects.txt", "served dinner\\n");
+          console.log("recovered");
+        });
+        console.error("optional write refused");
+      `);
+      const denied = `bash(42) deny(1) file-write-data ${target}`;
+      const protectedWrite = `bash(42) deny(1) file-write-data ${protectedPath}`;
+      boundary.attempts(command, [
+        {
+          script: command,
+          // Fill the tail before this protected write, then evict it before post-processing.
+          violation: [
+            ...Array<string>(100).fill(denied),
+            protectedWrite,
+            ...Array<string>(100).fill(denied),
+          ],
+        },
+      ]);
+      const observed = deferred<void>();
+      boundary.onCommandOutput(command, () => observed.resolve());
+      pi = await openClassified();
+      const snapshot = permissionSnapshot();
+      const controller = new AbortController();
+      const execution = pi.bash(command, { signal: controller.signal });
+      try {
+        await waitForStep(
+          observed.promise,
+          execution.then(() => {}),
+        );
+        await writeFile(path.join(cwd, "continue.txt"), "Dinner is ready.\n");
+        const result = await execution;
+        const output = bashOutput(result);
+        assert.match(output, /recovered/);
+        assert.match(output, /exited 0 with filesystem diagnostics/);
+        assert.ok(output.includes(target));
+        if (process.platform === "darwin") {
+          assert.match(output, /runtime-protected write/);
+          assert.ok(output.includes(protectedPath));
+        }
+        assert.ok(
+          SandboxManager.getSandboxViolationStore()
+            .getViolations()
+            .every((item) => item.line !== protectedWrite),
+        );
+        assert.equal(result.usage, undefined);
+        assert.equal(classifier.calls.length, 0);
+        assert.equal(pi.permissionCount(), 0);
+        assert.equal(boundary.spawnedScripts.length, 1);
+        assert.deepEqual(boundary.wrappers[0]?.config, snapshot.invocationPolicy);
+        assert.equal(
+          await readFile(path.join(cwd, "effects.txt"), "utf8"),
+          "fed the kraken\nserved dinner\n",
+        );
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        assert.equal(await readFile(protectedPath, "utf8"), "The kraken sleeps here.\n");
+        await assertPermissionState(snapshot);
+      } finally {
+        controller.abort();
+        await Promise.allSettled([execution]);
+      }
+    });
+
+    for (const ending of ["timeout", "cancellation"] as const) {
+      test(`${ending} still terminates a running command after a live denial`, async (t) => {
+        const command = nodeCommand(`
+          console.error("ready");
+          setTimeout(() => { console.error("fixture safety deadline"); process.exit(99); }, 10_000);
+        `);
+        boundary.attempts(command, [
+          { script: command, violation: `bash(42) deny(1) file-write-data ${target}` },
+        ]);
+        const ready = deferred<void>();
+        boundary.onCommandOutput(command, () => ready.resolve());
+        pi = await openClassified();
+        const snapshot = permissionSnapshot();
+        const controller = new AbortController();
+        // The child's real safety deadline survives the parent's controlled execution clock.
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const execution = pi.bash(command, { signal: controller.signal });
+        const rejected = assert.rejects(execution, (error) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /^ready$/m);
+          assert.match(
+            error.message,
+            ending === "timeout" ? /Command timed out after 5 seconds/ : /Command aborted/,
+          );
+          assert.doesNotMatch(error.message, /fixture safety deadline/);
+          return true;
+        });
+        try {
+          await waitForStep(ready.promise, rejected);
+          if (ending === "timeout") {
+            t.mock.timers.tick(5_000);
+            t.mock.timers.tick(2_000);
+          } else controller.abort();
+          await rejected;
+          assert.equal(boundary.spawnedScripts.length, 1);
+          assert.equal(classifier.calls.length, 0);
+          assert.equal(pi.permissionCount(), 0);
+          await assertPermissionState(snapshot);
+        } finally {
+          controller.abort();
+          await Promise.allSettled([execution, rejected]);
+          t.mock.timers.reset();
+        }
+      });
+    }
+
     for (const { scenario, mode } of [
       { scenario: "file deny", mode: "tui" },
       { scenario: "file deny", mode: "rpc" },
@@ -2991,14 +3110,16 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-type Attempt = { script: string; violation?: string };
+type Attempt = { script: string; violation?: string | string[] };
 
 /** Script only OS setup/wrapping/violation input. SRT policy storage and annotation, Tau orchestration,
  * Pi tools, Git discovery, and bash processes stay real. This does NOT prove OS confinement. */
 function sandboxBoundary(cwd: string, failures: unknown[]) {
   const scripts = new Set<string>();
   const attempts = new Map<string, Attempt[]>();
-  const violations = new Map<string, string>();
+  const violations = new Map<string, string[]>();
+  const commandIds = new Map<string, string>();
+  const outputListeners = new Map<string, () => void>();
   const closeListeners = new Map<string, () => void>();
   const spawnedScripts: string[] = [];
   const wrappers: {
@@ -3044,25 +3165,23 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
         config: structuredClone(_config),
         sessionPolicy: structuredClone(SandboxManager.getConfig()),
       });
-      if (attempt.violation) violations.set(attribution.commandId, attempt.violation);
+      commandIds.set(attempt.script, attribution.commandId);
+      if (attempt.violation)
+        violations.set(
+          attribution.commandId,
+          typeof attempt.violation === "string" ? [attempt.violation] : attempt.violation,
+        );
       return attempt.script;
     },
   );
-  // Deliver the OS log after the child closes, before SRT annotates its output.
-  // Pre-seeding the store would interrupt bash before its first side effect on macOS.
+  // Deliver scripted telemetry on stderr while the child can still run. Attempts without
+  // stderr retain a post-close fallback. This does not exercise the native log monitor.
   const annotate = SandboxManager.annotateStderrWithSandboxFailures;
   mock.method(
     SandboxManager,
     "annotateStderrWithSandboxFailures",
     (commandId: string, output: string) => {
-      const line = violations.get(commandId);
-      if (line)
-        SandboxManager.getSandboxViolationStore().addViolation({
-          line,
-          encodedCommand: Buffer.from(commandId.slice(0, 100)).toString("base64"),
-          timestamp: new Date(),
-        });
-      violations.delete(commandId);
+      deliverViolations(commandId);
       return annotate(commandId, output);
     },
   );
@@ -3078,7 +3197,13 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       return reject(...args);
     const child = spawn(...args);
     spawnedScripts.push(args[1][1]);
-    const onClose = closeListeners.get(args[1][1]);
+    const script = args[1][1];
+    child.stderr?.once("data", () => {
+      const commandId = commandIds.get(script);
+      if (commandId) deliverViolations(commandId);
+      outputListeners.get(script)?.();
+    });
+    const onClose = closeListeners.get(script);
     if (onClose) child.once("close", onClose);
     return child;
   });
@@ -3103,6 +3228,9 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       assert.ok(askNetwork, "the runtime must register its network permission callback");
       return askNetwork(params);
     },
+    onCommandOutput(script: string, listener: () => void) {
+      outputListeners.set(script, listener);
+    },
     onCommandClose(script: string, listener: () => void) {
       closeListeners.set(script, listener);
     },
@@ -3114,6 +3242,24 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       for (const { script } of replies) scripts.add(script);
     },
   });
+
+  function deliverViolations(commandId: string): void {
+    for (const line of violations.get(commandId) ?? []) {
+      SandboxManager.getSandboxViolationStore().addViolation({
+        line,
+        encodedCommand: Buffer.from(commandId.slice(0, 100)).toString("base64"),
+        timestamp: new Date(),
+      });
+    }
+    violations.delete(commandId);
+  }
+}
+
+/** Quote a fixture-only Node program without shell expansion. */
+function nodeCommand(script: string): string {
+  return [process.execPath, "-e", script]
+    .map((value) => `'${value.replaceAll("'", "'\\''")}'`)
+    .join(" ");
 }
 
 /** Substitute only auth and inference. Registration, catalog lookup, request dispatch and tools remain Pi's. */

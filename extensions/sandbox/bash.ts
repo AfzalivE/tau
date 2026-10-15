@@ -119,7 +119,6 @@ interface SandboxedBashOpsOptions {
 interface BashAttemptResult {
   exitCode: number | null;
   combinedOutput: string;
-  interruptedByFilesystemViolation: boolean;
   runtimeProtectedWriteViolations: FilesystemViolation[];
 }
 
@@ -229,52 +228,35 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
 
       const chunks: Buffer[] = [];
       let timedOut = false;
-      let interruptedByFilesystemViolation = false;
       let seenViolationCount = 0;
+      const violationStore = SandboxManager.getSandboxViolationStore();
       const runtimeProtectedWriteViolations = new Map<string, FilesystemViolation>();
       let timeoutHandle: NodeJS.Timeout | undefined;
       let timeoutEscalationHandle: NodeJS.Timeout | undefined;
-      let filesystemStopEscalationHandle: NodeJS.Timeout | undefined;
 
-      const stopForFilesystemViolation = (): void => {
-        if (interruptedByFilesystemViolation) return;
-
-        interruptedByFilesystemViolation = true;
-        killProcessGroup(child, "SIGTERM");
-        filesystemStopEscalationHandle = setTimeout(() => {
-          killProcessGroup(child, "SIGKILL");
-        }, 500);
-      };
-
-      // The Linux monitor now includes mandatory denies within cwd, but its telemetry is
-      // attacker-controlled and session-scoped. Keep live interruption macOS-only.
+      // Retain protected-write observations beyond the runtime's bounded tail without
+      // interrupting recovery. The cumulative count keeps advancing when that tail fills.
       const unsubscribeViolations =
         process.platform !== "darwin"
           ? () => undefined
-          : SandboxManager.getSandboxViolationStore().subscribe(() => {
-              const violations =
-                SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId);
-              if (violations.length <= seenViolationCount) return;
+          : violationStore.subscribe(() => {
+              const total = violationStore.getTotalCount();
+              const added = total - seenViolationCount;
+              seenViolationCount = total;
+              if (added <= 0) return;
 
-              const newViolations = violations.slice(seenViolationCount);
-              seenViolationCount = violations.length;
-
-              for (const violation of newViolations) {
+              for (const violation of violationStore
+                .getViolationsForCommand(commandId)
+                .slice(-added)) {
                 const filesystemViolation = detectFilesystemViolationFromLine(violation.line);
-                if (filesystemViolation) {
-                  if (isTraversalViolation(runtimeConfig, filesystemViolation, cwd)) continue;
-
-                  if (isRuntimeProtectedWriteViolation(runtimeConfig, filesystemViolation, cwd)) {
-                    if (filesystemViolation.path) {
-                      runtimeProtectedWriteViolations.set(
-                        filesystemViolation.path,
-                        filesystemViolation,
-                      );
-                    }
-                    continue;
-                  }
-
-                  stopForFilesystemViolation();
+                if (
+                  filesystemViolation?.path &&
+                  isRuntimeProtectedWriteViolation(runtimeConfig, filesystemViolation, cwd)
+                ) {
+                  runtimeProtectedWriteViolations.set(
+                    filesystemViolation.path,
+                    filesystemViolation,
+                  );
                 }
               }
             });
@@ -305,7 +287,6 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       child.on("error", (err) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
-        if (filesystemStopEscalationHandle) clearTimeout(filesystemStopEscalationHandle);
         unsubscribeViolations();
         signal?.removeEventListener("abort", onAbort);
         killProcessGroup(child, "SIGKILL");
@@ -320,7 +301,6 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       child.on("close", (code) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
-        if (filesystemStopEscalationHandle) clearTimeout(filesystemStopEscalationHandle);
         unsubscribeViolations();
         signal?.removeEventListener("abort", onAbort);
 
@@ -335,9 +315,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         }
 
         resolve({
-          exitCode: interruptedByFilesystemViolation && code === null ? 1 : code,
+          exitCode: code,
           combinedOutput: Buffer.concat(chunks).toString("utf-8"),
-          interruptedByFilesystemViolation,
           runtimeProtectedWriteViolations: Array.from(runtimeProtectedWriteViolations.values()),
         });
       });
@@ -472,10 +451,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     };
 
     if (runtimeProtectedWriteViolations.length > 0) {
-      const notice = formatRuntimeProtectedWriteNotice(
-        runtimeProtectedWriteViolations,
-        !attempt.interruptedByFilesystemViolation,
-      );
+      const notice = formatRuntimeProtectedWriteNotice(runtimeProtectedWriteViolations);
       processed.postamble = appendOutputPostamble(
         processed.postamble,
         notice,
@@ -496,8 +472,28 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       }
     }
 
-    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedByFilesystemViolation;
-    if (commandSucceeded) return processed;
+    if (attempt.exitCode === 0) {
+      const paths = Array.from(
+        new Set(
+          storedFilesystemViolations
+            .filter(
+              (violation) =>
+                !isTraversalViolation(runtimeConfig, violation, cwd) &&
+                !isRuntimeProtectedWriteViolation(runtimeConfig, violation, cwd),
+            )
+            .flatMap((violation) => (violation.path ? [violation.path] : [])),
+        ),
+      );
+      if (paths.length > 0) {
+        const more = paths.length > 3 ? ` (+${paths.length - 3} more)` : "";
+        processed.postamble = appendOutputPostamble(
+          processed.postamble,
+          `[sandbox] Command exited 0 with filesystem diagnostics: ${paths.slice(0, 3).join(", ")}${more}`,
+          attempt.combinedOutput,
+        );
+      }
+      return processed;
+    }
 
     if (
       /\bsandbox-exec:\s+sandbox_apply:\s+Operation not permitted\b/i.test(attempt.combinedOutput)
