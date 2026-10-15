@@ -28,6 +28,8 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import worktree from "../extensions/worktree.js";
+import { deadline } from "./helpers/async.js";
+import { clipboardBoundary } from "./helpers/clipboard.js";
 import {
   assistantMessage,
   createPiResources,
@@ -43,6 +45,7 @@ describe("worktree", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>> | undefined;
   let ui: Awaited<ReturnType<typeof openWorktree>> | undefined;
   let external: ReturnType<typeof processBoundary> | undefined;
+  let clipboard: ReturnType<typeof clipboardBoundary>;
   let failures: unknown[];
 
   beforeEach(async () => {
@@ -58,11 +61,13 @@ describe("worktree", { concurrency: false }, () => {
     git(repo, "add", ".");
     git(repo, "commit", "-m", "Open the underwater café");
     history = conversation(repo, path.join(directory, "session vault"));
-    external = processBoundary(directory, failures);
+    clipboard = clipboardBoundary(failures);
+    external = processBoundary(directory, failures, clipboard);
   });
 
   afterEach(async () => {
     try {
+      clipboard?.release();
       await ui?.dispose();
       assert.deepEqual(
         failures,
@@ -73,6 +78,7 @@ describe("worktree", { concurrency: false }, () => {
       ui = undefined;
       await external?.dispose();
       external = undefined;
+      await clipboard?.dispose();
       mock.restoreAll();
       syncBuiltinESMExports();
       if (directory) await rm(directory, { recursive: true, force: true });
@@ -83,6 +89,7 @@ describe("worktree", { concurrency: false }, () => {
   });
 
   test("moves a checked-out feature into its own worktree with durable, usable stash recovery instructions", async () => {
+    process.env.PI_CLIPBOARD_OSC52 = "1";
     git(repo, "checkout", "-b", "Feature/Otter");
     const staged = "Kelp croissants\n  Espresso for eight. 🐙\n";
     const working = `${staged}One extra kelp shot.\n`;
@@ -104,7 +111,34 @@ describe("worktree", { concurrency: false }, () => {
     const sourceFile = history.getSessionFile()!;
     const context = structuredClone(history.buildSessionContext());
 
-    await ui.prompt("/worktree new refs/heads/Feature/Otter");
+    const paused = clipboard.pause();
+    let completed = false;
+    const creating = ui.prompt("/worktree new refs/heads/Feature/Otter").then(() => {
+      completed = true;
+    });
+    let openCopy: ReturnType<typeof clipboard.pause> | undefined;
+    let reloading: Promise<void> | undefined;
+    try {
+      await deadline(paused.ready, "stash recovery clipboard write");
+      assert.equal(completed, false, "the workflow waits for the asynchronous copy");
+      assert.equal(
+        history
+          .getEntries()
+          .some((entry) => entry.type === "custom" && entry.customType.startsWith("worktree-")),
+        false,
+        "the copy result is not persisted before the writer completes",
+      );
+      openCopy = clipboard.pause();
+      reloading = ui.session.reload();
+      await deadline(ui.shutdownStarted, "reload during stash recovery copy");
+      paused.release();
+      await deadline(openCopy.ready, "manual open clipboard write");
+      assert.equal(completed, false, "the batch also waits for its second clipboard write");
+    } finally {
+      paused.release();
+      openCopy?.release();
+      await Promise.all([creating, reloading]);
+    }
 
     const target = `${repo}-feature-otter`;
     assert.equal(git(target, "branch", "--show-current").trim(), "Feature/Otter");
@@ -128,6 +162,11 @@ describe("worktree", { concurrency: false }, () => {
     );
     const restore = commandEntry(SessionManager.open(sourceFile), "worktree-restore-command");
     const open = commandEntry(SessionManager.open(sourceFile), "worktree-open-command");
+    assert.deepEqual(
+      ui.shutdownEntries,
+      [[restore, open]],
+      "the later shutdown handler sees the entire outgoing batch, including its second copy",
+    );
     assert.deepEqual(interpretCommand(restore.data!.command, directory!), {
       cwd: target,
       program: "git",
@@ -138,8 +177,24 @@ describe("worktree", { concurrency: false }, () => {
       program: "pi",
       args: [],
     });
-    assert.deepEqual(external!.clipboard, [restore.data!.command, open.data!.command]);
-    for (const entry of [restore, open]) assert.ok(ui.render(entry).includes(entry.data!.command));
+    const commands = [restore.data!.command, open.data!.command];
+    assert.deepEqual(
+      clipboard.writes,
+      commands.map((command) => Buffer.from(command)),
+    );
+    assert.deepEqual(
+      Buffer.concat(clipboard.stdout),
+      Buffer.from(
+        commands
+          .map((command) => `\x1b]52;c;${Buffer.from(command).toString("base64")}\x07`)
+          .join(""),
+      ),
+      "remote TUI copies emit the exact UTF-8 commands through OSC 52",
+    );
+    for (const entry of [restore, open]) {
+      assert.equal(entry.data!.copiedToClipboard, true);
+      assert.ok(ui.render(entry).includes(entry.data!.command));
+    }
 
     // A later stash must not redirect the advertised recovery command to unrelated changes.
     await writeFile(path.join(repo, "another order.txt"), "Sea cucumber tea\n");
@@ -147,7 +202,6 @@ describe("worktree", { concurrency: false }, () => {
     git(target, "stash", "apply", stash);
     assert.equal(await readFile(path.join(target, "menu.txt"), "utf8"), working);
     assert.deepEqual(await readFile(path.join(target, "secret recipe.bin")), untracked);
-    await ui.session.reload();
     assert.deepEqual(
       commandEntry(SessionManager.open(sourceFile), "worktree-restore-command"),
       restore,
@@ -157,6 +211,7 @@ describe("worktree", { concurrency: false }, () => {
 
   for (const mode of ["json", "rpc", "print"] as const) {
     test(`exposes manual worktree commands and list results in ${mode} without changing model context or Git bytes`, async () => {
+      process.env.PI_CLIPBOARD_OSC52 = "1";
       const output: string[] = [];
       const diagnostics: string[] = [];
       mock.method(console, "log", (...parts: unknown[]) =>
@@ -204,8 +259,12 @@ describe("worktree", { concurrency: false }, () => {
       assert.equal(ui.session.sessionFile, sourceFile);
       assert.equal(ui.cwd, repo);
       assert.deepEqual(diagnostics, []);
-      assert.equal(external!.clipboard.length, 1);
-      const command = external!.clipboard[0];
+      assert.deepEqual(clipboard.writes, [], "non-TUI commands must not access the clipboard");
+      assert.deepEqual(clipboard.stdout, [], "OSC 52 must not contaminate non-TUI stdout");
+      const command =
+        mode === "print"
+          ? output[1]
+          : commandEntry(SessionManager.open(sourceFile), "worktree-open-command").data!.command;
       assert.deepEqual(interpretCommand(command, directory!), {
         cwd: target,
         program: "pi",
@@ -216,6 +275,7 @@ describe("worktree", { concurrency: false }, () => {
         assert.deepEqual(events, []);
         assert.equal(output.length, 3);
         assert.equal(output[1], command);
+        assert.doesNotMatch(output[0], /copied to clipboard/i);
         assert.match(output[2], /detached@\w+ \*.*locked:Otter asleep inside/);
         assert.ok(output[2].includes(detached));
         assert.deepEqual(ui.notices, []);
@@ -224,7 +284,7 @@ describe("worktree", { concurrency: false }, () => {
         assert.deepEqual(output, []);
         const entry = commandEntry(SessionManager.open(sourceFile), "worktree-open-command");
         assert.equal(entry.data!.command, command);
-        assert.equal(entry.data!.copiedToClipboard, true);
+        assert.equal(entry.data!.copiedToClipboard, false);
         assert.deepEqual(events[0], { type: "entry_appended", entry });
         assert.deepEqual((await readFile(sourceFile)).subarray(0, before.length), before);
         if (mode === "json") {
@@ -282,6 +342,36 @@ describe("worktree", { concurrency: false }, () => {
       }
     });
   }
+
+  test("keeps the manual open command durable and visible when Pi cannot copy it", async () => {
+    clipboard.fail = true;
+    ui = await openWorktree(directory!, history, failures);
+    const context = structuredClone(history.buildSessionContext());
+
+    await ui.prompt("/worktree new stranded-starfish");
+
+    const entry = commandEntry(
+      SessionManager.open(history.getSessionFile()!),
+      "worktree-open-command",
+    );
+    assert.equal(entry.data!.copiedToClipboard, false);
+    assert.ok(ui.render(entry).includes(entry.data!.command));
+    assert.doesNotMatch(ui.render(entry), /copied to clipboard/i);
+    assert.deepEqual(interpretCommand(entry.data!.command, directory!), {
+      cwd: `${repo}-stranded-starfish`,
+      program: "pi",
+      args: [],
+    });
+    assert.ok(clipboard.writes.length > 0);
+    for (const bytes of clipboard.writes) assert.deepEqual(bytes, Buffer.from(entry.data!.command));
+    assert.deepEqual(clipboard.stdout, []);
+    assert.deepEqual(history.buildSessionContext(), context);
+    await ui.session.reload();
+    assert.deepEqual(
+      commandEntry(SessionManager.open(history.getSessionFile()!), "worktree-open-command"),
+      entry,
+    );
+  });
 
   test("copies opted-in cache bytes and symlinks without copying an explicitly excluded private subtree", async () => {
     await writeFile(path.join(repo, ".gitignore"), "cache/\n");
@@ -711,11 +801,33 @@ async function openWorktree(
   const controls = { cancelSwitch: false };
   const notices: { message: string; type?: string }[] = [];
   const statuses = new Map<string, string>();
+  const shutdownEntries: CustomEntry[][] = [];
+  let shuttingDown!: () => void;
+  const shutdownStarted = new Promise<void>((resolve) => {
+    shuttingDown = resolve;
+  });
   const runtime = await createAgentSessionRuntime(
     async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
       const resources = await createPiResources(cwd, agentDir, [
+        (pi) => {
+          pi.on("session_shutdown", () => shuttingDown());
+        },
         worktree,
         (pi) => {
+          // Pi dispatches each extension's shutdown handlers together, in extension load order.
+          const unsubscribe = pi.on("session_shutdown", (_event, ctx) => {
+            unsubscribe();
+            shutdownEntries.push(
+              structuredClone(
+                ctx.sessionManager
+                  .getEntries()
+                  .filter(
+                    (entry): entry is CustomEntry =>
+                      entry.type === "custom" && entry.customType.startsWith("worktree-"),
+                  ),
+              ),
+            );
+          });
           pi.on("session_before_switch", () =>
             controls.cancelSwitch ? { cancel: true } : undefined,
           );
@@ -792,6 +904,8 @@ async function openWorktree(
     await bind();
     return {
       notices,
+      shutdownStarted,
+      shutdownEntries,
       get cancelSwitch() {
         return controls.cancelSwitch;
       },
@@ -857,9 +971,12 @@ function git(cwd: string, ...args: string[]) {
   return result.stdout;
 }
 
-/** Keep Git real, reject other process/network work, and replace native clipboard programs with a harmless stdin sink. */
-function processBoundary(directory: string, failures: unknown[]) {
-  const clipboard: string[] = [];
+/** Keep Git real and fixture-local. All other process/network work needs an explicit harmless boundary. */
+function processBoundary(
+  directory: string,
+  failures: unknown[],
+  clipboard: ReturnType<typeof clipboardBoundary>,
+) {
   const children = new Map<ReturnType<typeof spawn>, Promise<void>>();
   const reject = (...args: unknown[]): never => {
     const error = new Error(`Unexpected external work: ${String(args[0])}`);
@@ -870,6 +987,8 @@ function processBoundary(directory: string, failures: unknown[]) {
   for (const method of ["exec", "execSync", "execFile", "execFileSync", "fork"] as const)
     mock.method(childProcess, method, reject);
   mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
+    const writer = clipboard.spawn(...args);
+    if (writer) return writer;
     if (
       args[0] !== "git" ||
       !Array.isArray(args[1]) ||
@@ -891,15 +1010,9 @@ function processBoundary(directory: string, failures: unknown[]) {
     child.once("error", (error) => failures.push(error));
     return child;
   });
-  mock.method(childProcess, "spawnSync", (...args: Parameters<typeof spawnSync>) => {
-    const programs = process.platform === "darwin" ? ["pbcopy"] : ["wl-copy", "xclip", "xsel"];
-    if (!programs.includes(args[0]) || typeof args[2]?.input !== "string") return reject(args[0]);
-    clipboard.push(args[2].input);
-    return spawnSync(process.execPath, ["-e", "process.stdin.resume()"], args[2]);
-  });
+  mock.method(childProcess, "spawnSync", reject);
   syncBuiltinESMExports();
   return {
-    clipboard,
     async dispose() {
       const pending = [...children.values()];
       for (const child of children.keys()) child.kill("SIGKILL");
