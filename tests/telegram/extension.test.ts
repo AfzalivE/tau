@@ -25,8 +25,6 @@ import { formatTelegramAssistantResultFromMessages } from "../../extensions/tele
 
 const reply = "The otter keeps its report in the parent window.";
 
-const connect = net.connect;
-
 describe("Telegram extension launch and opt-out", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>>;
   let telegram: typeof import("../../extensions/telegram/index.js").default;
@@ -90,14 +88,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     await mkdir(cwd, { recursive: true });
     const launches: Array<{ command: string; args: string[]; options: childProcess.SpawnOptions }> =
       [];
-    mock.method(net, "connect", (socketPath: string) => {
-      if (socketPath !== path.join(agentDir, "run", "telegram.sock")) {
-        const error = new Error(`Unexpected socket: ${socketPath}`);
-        failures.push(error);
-        throw error;
-      }
-      return connect(socketPath);
-    });
+    stoppedDaemonSocket(agentDir);
     // Refuse the detached subprocess after inspecting the real command's launch boundary.
     mock.method(
       childProcess,
@@ -120,7 +111,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     assert.equal(path.basename(args[0]!), "daemon.mjs");
     assert.equal(args.length, 1);
     assert.equal(options.detached, true);
-    assert.equal(options.stdio, "ignore");
+    assert.deepEqual(options.stdio, ["ignore", "ignore", "ignore", "ipc"]);
     assert.equal(options.env?.PI_CODING_AGENT_DIR, agentDir);
     assert.equal(options.env?.TAU_TELEGRAM_PI_ENTRYPOINT, process.argv[1] ?? "");
     assert.equal(options.env?.TAU_TELEGRAM_BOT_TOKEN, process.env.TAU_TELEGRAM_BOT_TOKEN);
@@ -128,13 +119,13 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
       Object.keys(options.env ?? {})
         .filter((key) => key.startsWith("TAU_TELEGRAM_"))
         .sort(),
-      ["TAU_TELEGRAM_BOT_TOKEN", "TAU_TELEGRAM_PI_ENTRYPOINT"],
+      ["TAU_TELEGRAM_BOT_TOKEN", "TAU_TELEGRAM_PI_ENTRYPOINT", "TAU_TELEGRAM_STARTUP"],
     );
   });
 
   for (const tokenSource of ["env", "keychain"] as const) {
     test(
-      `reconnect ticks leave the ${tokenSource} token lookup to the daemon`,
+      `background starts leave the ${tokenSource} token lookup to the daemon`,
       { skip: tokenSource === "keychain" && process.platform !== "darwin" && "macOS Keychain" },
       async () => {
         const agentDir = getAgentDir();
@@ -146,7 +137,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
           JSON.stringify({ pairedChatId: 42 }),
         );
         if (tokenSource === "keychain") delete process.env.TAU_TELEGRAM_BOT_TOKEN;
-        const probes = stoppedDaemonSocket(agentDir);
+        stoppedDaemonSocket(agentDir);
         let keychainReads = 0;
         let launches = 0;
         let launched!: () => void;
@@ -172,18 +163,11 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
         ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
         await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
 
-        // The first attempt probes, then probes again inside the refused startup.
         await launchRefused;
-        await new Promise((resolve) => setImmediate(resolve));
-        for (let tick = 1; tick <= 5; tick++) {
-          mock.timers.tick(3_000);
-          await probes.reach(2 + tick);
-        }
-        await new Promise((resolve) => setImmediate(resolve));
+        await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 
         assert.equal(launches, 1);
         assert.equal(keychainReads, 0);
-        assert.equal(probes.count(), 7, "later ticks only look for a daemon started elsewhere");
       },
     );
   }
@@ -613,27 +597,19 @@ function substituteDaemonTransport(agentDir: string, failures: unknown[]) {
   };
 }
 
-/** Refuse every daemon socket connection and let tests await each probe. */
+/** Refuse daemon connections without allowing any external socket access. */
 function stoppedDaemonSocket(agentDir: string) {
   let count = 0;
-  const waiters: { target: number; resolve: () => void }[] = [];
   mock.method(net, "connect", (socketPath: string) => {
     assert.equal(socketPath, path.join(agentDir, "run", "telegram.sock"));
     count++;
-    for (const waiter of waiters.filter(({ target }) => count >= target)) waiter.resolve();
     const socket = new net.Socket();
     queueMicrotask(() =>
       socket.emit("error", Object.assign(new Error("No otter daemon"), { code: "ENOENT" })),
     );
     return socket;
   });
-  return {
-    count: () => count,
-    reach: (target: number) =>
-      count >= target
-        ? Promise.resolve()
-        : new Promise<void>((resolve) => waiters.push({ target, resolve })),
-  };
+  return { count: () => count };
 }
 
 /** No real daemon, bot, Keychain or model network is allowed. Pi's lifecycle and generation orchestration stay real. */

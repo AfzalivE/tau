@@ -30,7 +30,7 @@ Set `TAU_TELEGRAM_DISABLE=1` to disable this extension for a process. Subagent c
 
 ### Internal launch environment
 
-The extension passes Pi's `PI_CODING_AGENT_DIR` and `TAU_TELEGRAM_PI_ENTRYPOINT` to the daemon. The daemon uses its own Node executable and that entrypoint to start headless sessions with the same Pi installation and agent directory. It sets `TAU_TELEGRAM_DISABLE=1` for those sessions because it mirrors them directly. The entrypoint is launch plumbing, not user configuration.
+The extension passes Pi's `PI_CODING_AGENT_DIR` and `TAU_TELEGRAM_PI_ENTRYPOINT` to the daemon. The daemon uses its own Node executable and that entrypoint to start headless sessions with the same Pi installation and agent directory. It sets `TAU_TELEGRAM_DISABLE=1` for those sessions because it mirrors them directly. `TAU_TELEGRAM_STARTUP=1` requests a private IPC readiness handshake and is removed before launching headless sessions. These launch variables are not user configuration.
 
 ## Usage (in pi)
 
@@ -79,6 +79,8 @@ First time:
 - Switching to a session replays unread replies, not just the latest one.
 - Inactive-session activity notifications are deduped for the same session until you switch sessions, a different session notifies, or the cooldown elapses.
 - The daemon is started on-demand by `/telegram pair`, auto-restarts when a paired window opens, and stays alive while paired so Telegram can create headless sessions even when no windows are connected.
+- Failed automatic starts wait 5 seconds, then 20 seconds, then 60 seconds between attempts, repeating the 60-second cooldown. Windows share startup ownership and cooldown state in the agent directory. Reconnect checks run every 3 seconds, so retries start on the first check after the cooldown. `/telegram pair` bypasses the delay but joins an existing startup instead of launching another daemon.
+- Unpaired windows do not read credentials or probe the daemon in the background. Paired windows reconnect to a running daemon without reading credentials. Only the daemon reads its token during automatic startup; failed or cancelled startup processes are stopped before another attempt can begin.
 - Output mirrored to Telegram is the final assistant result after Pi finishes a prompt, including Pi errors after retries are exhausted.
   - For short assistant messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
   - Long messages and errors are sent as plain text chunks.

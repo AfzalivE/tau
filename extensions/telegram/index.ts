@@ -12,12 +12,18 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fsp from "node:fs/promises";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { Type } from "typebox";
 import {
   formatTelegramAssistantResultFromMessages,
   type TelegramAssistantResultTone,
 } from "./assistant-result.mjs";
+import {
+  canConnectSocket as probeDaemon,
+  ensureDaemonRunning,
+  resetDaemonStartupRetry,
+  withDaemonStartupLock,
+} from "./startup.js";
 
 const AGENT_DIR = getAgentDir();
 const RUN_DIR = path.join(AGENT_DIR, "run");
@@ -105,38 +111,6 @@ type Config = {
 
 type TelegramBotTokenSource = "env" | "keychain" | "config" | "missing";
 
-function sleep(ms: number, signal?: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-
-    const onAbort = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(new Error("Cancelled"));
-    };
-
-    const cleanup = () => {
-      signal?.removeEventListener("abort", onAbort);
-    };
-
-    if (!signal) return;
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function throwIfAborted(signal?: AbortSignal) {
-  if (signal?.aborted) {
-    throw new Error("Cancelled");
-  }
-}
-
 async function runWithLoader<T>(
   ctx: ExtensionContext,
   message: string,
@@ -155,6 +129,7 @@ async function runWithLoader<T>(
     }
   }
 
+  let work: Promise<T> | undefined;
   const result = await ctx.ui.custom<{ cancelled: boolean; value?: T; error?: string }>(
     (tui, theme, _kb, done) => {
       const loader = new BorderedLoader(tui, theme, message);
@@ -167,7 +142,8 @@ async function runWithLoader<T>(
 
       loader.onAbort = () => finish({ cancelled: true });
 
-      task(loader.signal)
+      work = task(loader.signal);
+      work
         .then((value) => finish({ cancelled: false, value }))
         .catch((error) => {
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -178,6 +154,7 @@ async function runWithLoader<T>(
     },
   );
 
+  if (result.cancelled) await work?.catch(() => {});
   return result;
 }
 
@@ -223,15 +200,20 @@ function canUseTelegramKeychain(): boolean {
   return process.platform === "darwin";
 }
 
-async function runTelegramKeychainCommand(args: string[]): Promise<string> {
+async function runTelegramKeychainCommand(args: string[], timeout?: number): Promise<string> {
   return await new Promise((resolve, reject) => {
-    execFile("security", args, { encoding: "utf8" }, (error, stdout) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(stdout.trim());
-    });
+    execFile(
+      "security",
+      args,
+      { encoding: "utf8", timeout, killSignal: "SIGKILL" },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout.trim());
+      },
+    );
   });
 }
 
@@ -240,14 +222,17 @@ async function readTelegramBotTokenFromKeychain(): Promise<string | null> {
 
   try {
     return (
-      (await runTelegramKeychainCommand([
-        "find-generic-password",
-        "-w",
-        "-a",
-        TELEGRAM_KEYCHAIN_ACCOUNT,
-        "-s",
-        TELEGRAM_KEYCHAIN_SERVICE,
-      ])) || null
+      (await runTelegramKeychainCommand(
+        [
+          "find-generic-password",
+          "-w",
+          "-a",
+          TELEGRAM_KEYCHAIN_ACCOUNT,
+          "-s",
+          TELEGRAM_KEYCHAIN_SERVICE,
+        ],
+        5_000,
+      )) || null
     );
   } catch {
     return null;
@@ -384,42 +369,8 @@ function createJsonlReader(socket: net.Socket, onMessage: (msg: DaemonToClientMe
   });
 }
 
-async function canConnectSocket(): Promise<boolean> {
-  return await new Promise((resolve) => {
-    const s = net.connect(SOCKET_PATH);
-    s.once("connect", () => {
-      s.end();
-      resolve(true);
-    });
-    s.once("error", () => resolve(false));
-  });
-}
-
-async function ensureDaemonRunning(daemonPath: string, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  await fsp.mkdir(RUN_DIR, { recursive: true, mode: 0o700 });
-
-  throwIfAborted(signal);
-  if (await canConnectSocket()) return;
-
-  const child = spawn(process.execPath, [daemonPath], {
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      PI_CODING_AGENT_DIR: AGENT_DIR,
-      TAU_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
-    },
-  });
-  child.unref();
-
-  for (let i = 0; i < 40; i++) {
-    throwIfAborted(signal);
-    if (await canConnectSocket()) return;
-    await sleep(100, signal);
-  }
-
-  throw new Error("Failed to start telegram daemon (socket not available)");
+function canConnectSocket(signal?: AbortSignal): Promise<boolean> {
+  return probeDaemon(SOCKET_PATH, signal);
 }
 
 async function sendEphemeral(msg: ClientToDaemonMessage): Promise<void> {
@@ -494,8 +445,10 @@ export default function (pi: ExtensionAPI) {
     compactionReleaseTimer: null as ReturnType<typeof setTimeout> | null,
     lastCtx: null as ExtensionContext | null,
     connectPromise: null as Promise<void> | null,
+    autoConnectPromise: null as Promise<void> | null,
+    unpairPromise: null as Promise<void> | null,
+    connectionController: new AbortController(),
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
-    daemonStartFailed: false,
     paired: false,
     daemonCapabilities: new Set<string>(),
     sendFileToolRegistered: false,
@@ -662,11 +615,15 @@ export default function (pi: ExtensionAPI) {
 
   async function connectPersistent(
     ctx: ExtensionContext,
-    options: { signal?: AbortSignal; ensureDaemon?: boolean } = {},
+    options: { signal?: AbortSignal; ensureDaemon?: boolean; automatic?: boolean } = {},
   ): Promise<void> {
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, state.connectionController.signal])
+      : state.connectionController.signal;
+    signal.throwIfAborted();
     if (isSocketConnected()) return;
 
-    if (state.connectPromise) {
+    while (state.connectPromise) {
       try {
         await state.connectPromise;
       } catch {
@@ -675,12 +632,23 @@ export default function (pi: ExtensionAPI) {
       if (isSocketConnected()) return;
     }
 
-    const { signal, ensureDaemon = true } = options;
+    const { ensureDaemon = true, automatic = false } = options;
 
     const connectPromise = (async () => {
+      signal.throwIfAborted();
       if (ensureDaemon) {
-        await ensureDaemonRunning(daemonPath, signal);
-        throwIfAborted(signal);
+        const ready = await ensureDaemonRunning({
+          agentDir: AGENT_DIR,
+          daemonPath,
+          entrypoint: process.argv[1] ?? "",
+          signal,
+          automatic,
+          shouldStart: automatic
+            ? async () => (await loadConfig()).pairedChatId !== undefined
+            : undefined,
+        });
+        if (!ready) return;
+        signal.throwIfAborted();
       }
 
       const socket = net.connect(SOCKET_PATH);
@@ -718,6 +686,10 @@ export default function (pi: ExtensionAPI) {
         signal.addEventListener("abort", onAbort, { once: true });
       });
 
+      if (signal.aborted) {
+        socket.destroy();
+        signal.throwIfAborted();
+      }
       state.socket = socket;
       createJsonlReader(socket, handleDaemonMessage);
 
@@ -737,15 +709,54 @@ export default function (pi: ExtensionAPI) {
       socket.once("close", onSocketGone);
       socket.once("error", onSocketGone);
 
-      jsonlWrite(socket, {
-        type: "register",
-        windowId: state.windowId,
-        cwd: ctx.cwd,
-        sessionName: pi.getSessionName() ?? undefined,
-        busy: state.busy,
-        compacting: state.compacting,
-        ...getCurrentSessionRef(ctx),
-      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const finish = (error?: Error) => {
+            clearTimeout(timeout);
+            daemonMessageHandlers.delete(registered);
+            socket.off("close", closed);
+            signal.removeEventListener("abort", aborted);
+            if (error) reject(error);
+            else resolve();
+          };
+          const registered = (message: DaemonToClientMessage) => {
+            if (message.type === "registered") finish();
+          };
+          const closed = () =>
+            finish(new Error("Telegram daemon disconnected before registration"));
+          const aborted = () => finish(signal.reason);
+          const timeout = setTimeout(
+            () => finish(new Error("Telegram daemon registration timed out")),
+            5_000,
+          );
+          daemonMessageHandlers.add(registered);
+          socket.once("close", closed);
+          signal.addEventListener("abort", aborted, { once: true });
+          try {
+            signal.throwIfAborted();
+            jsonlWrite(socket, {
+              type: "register",
+              windowId: state.windowId,
+              cwd: ctx.cwd,
+              sessionName: pi.getSessionName() ?? undefined,
+              busy: state.busy,
+              compacting: state.compacting,
+              ...getCurrentSessionRef(ctx),
+            });
+          } catch (error) {
+            finish(error as Error);
+          }
+        });
+      } catch (error) {
+        if (state.socket === socket) disconnect();
+        else socket.destroy();
+        throw error;
+      }
+      await resetDaemonStartupRetry(
+        AGENT_DIR,
+        () => state.socket === socket && !socket.destroyed && state.sessionNo !== null,
+        signal,
+      );
     })();
 
     state.connectPromise = connectPromise;
@@ -758,29 +769,50 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function tryAutoConnect(): Promise<void> {
+  function tryAutoConnect(): Promise<void> {
     const ctx = state.lastCtx;
-    if (!ctx) return;
-    if (isSocketConnected()) return;
-    if (state.connectPromise) return;
+    const signal = state.connectionController.signal;
+    if (
+      !ctx ||
+      signal.aborted ||
+      isSocketConnected() ||
+      state.connectPromise ||
+      state.unpairPromise
+    )
+      return Promise.resolve();
+    if (state.autoConnectPromise) return state.autoConnectPromise;
 
-    const cfg = await loadConfig();
-    if (cfg.pairedChatId === undefined) return;
+    const attempt = Promise.resolve().then(async () => {
+      try {
+        const cfg = await loadConfig();
+        signal.throwIfAborted();
+        if (cfg.pairedChatId === undefined) return;
+        const daemonUp = await canConnectSocket(signal);
+        await connectPersistent(ctx, { signal, ensureDaemon: !daemonUp, automatic: true });
+        if (!signal.aborted) updateMeta(ctx);
+      } catch {
+        // Other windows share the startup cooldown; socket probes continue on later ticks.
+      }
+    });
+    state.autoConnectPromise = attempt;
+    return attempt.finally(() => {
+      if (state.autoConnectPromise === attempt) state.autoConnectPromise = null;
+    });
+  }
 
-    const daemonUp = await canConnectSocket();
-    if (!daemonUp && state.daemonStartFailed) return;
-
-    try {
-      await connectPersistent(ctx, { ensureDaemon: !daemonUp });
-      updateMeta(ctx);
-    } catch {
-      // Later ticks only join a daemon started elsewhere until a connection succeeds.
-      if (!daemonUp) state.daemonStartFailed = true;
-    }
+  async function stopConnectionWork(exclude?: Promise<void>) {
+    stopAutoConnectLoop();
+    state.connectionController.abort();
+    await Promise.allSettled(
+      [state.autoConnectPromise, state.connectPromise, state.unpairPromise].filter(
+        (work) => work !== exclude,
+      ),
+    );
   }
 
   function startAutoConnectLoop() {
-    if (state.autoConnectTimer) return;
+    if (!state.lastCtx || state.connectionController.signal.aborted || state.autoConnectTimer)
+      return;
     state.autoConnectTimer = setInterval(() => {
       void tryAutoConnect();
     }, AUTO_CONNECT_INTERVAL_MS);
@@ -1033,7 +1065,6 @@ export default function (pi: ExtensionAPI) {
       state.sessionNo = msg.sessionNo;
       state.paired = msg.paired;
       state.daemonCapabilities = new Set(msg.capabilities);
-      state.daemonStartFailed = false;
       updateTelegramSendFileToolAvailability();
       stopAutoConnectLoop();
       if (state.lastCtx?.hasUI) {
@@ -1075,6 +1106,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     runAssistantMessages = undefined;
     state.lastCtx = ctx;
+    if (state.connectionController.signal.aborted)
+      state.connectionController = new AbortController();
     startAutoConnectLoop();
     if (isSocketConnected()) {
       updateMeta(ctx);
@@ -1161,8 +1194,9 @@ export default function (pi: ExtensionAPI) {
     applyCompactingState(false, ctx);
   });
 
-  pi.on("session_shutdown", async (_event, _ctx) => {
-    stopAutoConnectLoop();
+  pi.on("session_shutdown", async (_event, ctx) => {
+    state.lastCtx = null;
+    await stopConnectionWork();
     clearPendingInjectedFlushTimer();
     clearCompactionReleaseTimer();
     state.busy = false;
@@ -1171,7 +1205,7 @@ export default function (pi: ExtensionAPI) {
     runAssistantMessages = undefined;
     state.pendingInjectedTexts = [];
     disconnect(false);
-    state.lastCtx = null;
+    clearUI(ctx);
   });
 
   pi.registerCommand("telegram", {
@@ -1207,22 +1241,43 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (sub === "unpair") {
-        const cfg = await loadConfig();
-        const tokenInfo = await resolveTelegramBotToken();
-        if (cfg.pairedChatId !== undefined) {
-          delete cfg.pairedChatId;
-          await saveConfig(buildPersistedConfig(cfg, tokenInfo.source));
-        }
+        const owner = state.lastCtx;
+        const unpair: Promise<void> =
+          state.unpairPromise ??
+          Promise.resolve().then(async () => {
+            await stopConnectionWork(unpair);
+            if (!owner || state.lastCtx !== owner) return;
+            state.connectionController = new AbortController();
+            await withDaemonStartupLock(
+              AGENT_DIR,
+              async (signal) => {
+                const cfg = await loadConfig();
+                const tokenInfo = await resolveTelegramBotToken();
+                signal.throwIfAborted();
+                if (cfg.pairedChatId !== undefined) {
+                  delete cfg.pairedChatId;
+                  await saveConfig(buildPersistedConfig(cfg, tokenInfo.source));
+                }
 
-        if (await canConnectSocket()) {
-          try {
-            await sendEphemeral({ type: "shutdown" });
-          } catch {
-            // ignore
-          }
+                if (await canConnectSocket(signal)) {
+                  try {
+                    await sendEphemeral({ type: "shutdown" });
+                  } catch {
+                    // The pairing is already revoked even if the daemon exited meanwhile.
+                  }
+                }
+              },
+              { signal: state.connectionController.signal },
+            );
+            disconnect();
+          });
+        state.unpairPromise = unpair;
+        try {
+          await unpair;
+        } finally {
+          if (state.unpairPromise === unpair) state.unpairPromise = null;
         }
-
-        disconnect();
+        if (!owner || state.lastCtx !== owner) return;
 
         notify(
           "Unpaired Telegram and disconnected all sessions. Run /telegram pair to pair again.",
@@ -1232,8 +1287,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (sub === "pair") {
+        const signal = state.connectionController.signal;
+        signal.throwIfAborted();
         const cfg = await loadConfig();
         const tokenInfo = await resolveTelegramBotToken();
+        signal.throwIfAborted();
         if (!tokenInfo.token) {
           if (!ctx.hasUI) {
             throw new Error(`Missing bot token. ${describeTelegramBotTokenSetup()}`);
@@ -1245,6 +1303,7 @@ export default function (pi: ExtensionAPI) {
             "Telegram bot token",
             `Paste the bot token (${promptLocation})`,
           );
+          signal.throwIfAborted();
           if (!token) {
             notify("Cancelled.", "info");
             return;
@@ -1260,7 +1319,11 @@ export default function (pi: ExtensionAPI) {
         const connectResult = await runWithLoader(
           ctx,
           "Connecting to Telegram daemon...",
-          (signal) => connectPersistent(ctx, { signal, ensureDaemon: true }),
+          (loaderSignal) =>
+            connectPersistent(ctx, {
+              signal: AbortSignal.any([signal, loaderSignal]),
+              ensureDaemon: true,
+            }),
         );
         if (connectResult.cancelled) {
           notify("Cancelled.", "info");

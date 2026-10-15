@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Avoid repeated Telegram Keychain polling and competing daemon launches while retaining automatic recovery after startup failures. ([#20](https://github.com/goncalossilva/tau/pull/20))
 - Refresh repo memory and preserve extension instructions in Answer, Loop, and Subagent-triggered runs.
 - Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
 - Preserve newer Sandbox policy changes when manually approving macOS service access.
