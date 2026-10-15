@@ -768,14 +768,7 @@ export default function (pi: ExtensionAPI) {
     if (cfg.pairedChatId === undefined) return;
 
     const daemonUp = await canConnectSocket();
-    if (!daemonUp) {
-      if (state.daemonStartFailed) return;
-      const tokenInfo = await resolveTelegramBotToken();
-      if (!tokenInfo.token) {
-        state.daemonStartFailed = true;
-        return;
-      }
-    }
+    if (!daemonUp && state.daemonStartFailed) return;
 
     try {
       await connectPersistent(ctx, { ensureDaemon: !daemonUp });

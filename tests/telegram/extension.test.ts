@@ -134,7 +134,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
 
   for (const tokenSource of ["env", "keychain"] as const) {
     test(
-      `reconnect ticks start a stopped daemon once and read the ${tokenSource} token only for that start`,
+      `reconnect ticks leave the ${tokenSource} token lookup to the daemon`,
       { skip: tokenSource === "keychain" && process.platform !== "darwin" && "macOS Keychain" },
       async () => {
         const agentDir = getAgentDir();
@@ -151,7 +151,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
         let launches = 0;
         let launched!: () => void;
         const launchRefused = new Promise<void>((resolve) => (launched = resolve));
-        // Answer the Keychain lookup with a fixture token; any other subprocess fails the test.
+        // A background reconnect must leave credential lookup to the daemon.
         mock.method(
           childProcess,
           "execFile",
@@ -182,7 +182,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
         await new Promise((resolve) => setImmediate(resolve));
 
         assert.equal(launches, 1);
-        assert.equal(keychainReads, tokenSource === "keychain" ? 1 : 0);
+        assert.equal(keychainReads, 0);
         assert.equal(probes.count(), 7, "later ticks only look for a daemon started elsewhere");
       },
     );
