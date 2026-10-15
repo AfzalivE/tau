@@ -615,11 +615,9 @@ export default function (pi: ExtensionAPI) {
 
   async function connectPersistent(
     ctx: ExtensionContext,
-    options: { signal?: AbortSignal; ensureDaemon?: boolean; automatic?: boolean } = {},
+    options: { signal: AbortSignal; automatic?: boolean },
   ): Promise<void> {
-    const signal = options.signal
-      ? AbortSignal.any([options.signal, state.connectionController.signal])
-      : state.connectionController.signal;
+    const { signal, automatic = false } = options;
     signal.throwIfAborted();
     if (isSocketConnected()) return;
 
@@ -632,24 +630,20 @@ export default function (pi: ExtensionAPI) {
       if (isSocketConnected()) return;
     }
 
-    const { ensureDaemon = true, automatic = false } = options;
-
     const connectPromise = (async () => {
       signal.throwIfAborted();
-      if (ensureDaemon) {
-        const ready = await ensureDaemonRunning({
-          agentDir: AGENT_DIR,
-          daemonPath,
-          entrypoint: process.argv[1] ?? "",
-          signal,
-          automatic,
-          shouldStart: automatic
-            ? async () => (await loadConfig()).pairedChatId !== undefined
-            : undefined,
-        });
-        if (!ready) return;
-        signal.throwIfAborted();
-      }
+      const ready = await ensureDaemonRunning({
+        agentDir: AGENT_DIR,
+        daemonPath,
+        entrypoint: process.argv[1] ?? "",
+        signal,
+        automatic,
+        shouldStart: automatic
+          ? async () => (await loadConfig()).pairedChatId !== undefined
+          : undefined,
+      });
+      if (!ready) return;
+      signal.throwIfAborted();
 
       const socket = net.connect(SOCKET_PATH);
 
@@ -672,13 +666,12 @@ export default function (pi: ExtensionAPI) {
         const cleanup = () => {
           socket.off("connect", onConnect);
           socket.off("error", onError);
-          signal?.removeEventListener("abort", onAbort);
+          signal.removeEventListener("abort", onAbort);
         };
 
         socket.once("connect", onConnect);
         socket.once("error", onError);
 
-        if (!signal) return;
         if (signal.aborted) {
           onAbort();
           return;
@@ -787,8 +780,7 @@ export default function (pi: ExtensionAPI) {
         const cfg = await loadConfig();
         signal.throwIfAborted();
         if (cfg.pairedChatId === undefined) return;
-        const daemonUp = await canConnectSocket(signal);
-        await connectPersistent(ctx, { signal, ensureDaemon: !daemonUp, automatic: true });
+        await connectPersistent(ctx, { signal, automatic: true });
         if (!signal.aborted) updateMeta(ctx);
       } catch {
         // Other windows share the startup cooldown; socket probes continue on later ticks.
@@ -800,14 +792,10 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function stopConnectionWork(exclude?: Promise<void>) {
+  async function stopConnectionWork() {
     stopAutoConnectLoop();
     state.connectionController.abort();
-    await Promise.allSettled(
-      [state.autoConnectPromise, state.connectPromise, state.unpairPromise].filter(
-        (work) => work !== exclude,
-      ),
-    );
+    await Promise.allSettled([state.autoConnectPromise, state.connectPromise]);
   }
 
   function startAutoConnectLoop() {
@@ -1197,6 +1185,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     state.lastCtx = null;
     await stopConnectionWork();
+    await Promise.allSettled([state.unpairPromise]);
     clearPendingInjectedFlushTimer();
     clearCompactionReleaseTimer();
     state.busy = false;
@@ -1242,10 +1231,10 @@ export default function (pi: ExtensionAPI) {
 
       if (sub === "unpair") {
         const owner = state.lastCtx;
-        const unpair: Promise<void> =
+        const unpair =
           state.unpairPromise ??
           Promise.resolve().then(async () => {
-            await stopConnectionWork(unpair);
+            await stopConnectionWork();
             if (!owner || state.lastCtx !== owner) return;
             state.connectionController = new AbortController();
             await withDaemonStartupLock(
@@ -1322,7 +1311,6 @@ export default function (pi: ExtensionAPI) {
           (loaderSignal) =>
             connectPersistent(ctx, {
               signal: AbortSignal.any([signal, loaderSignal]),
-              ensureDaemon: true,
             }),
         );
         if (connectResult.cancelled) {
