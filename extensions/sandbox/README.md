@@ -4,6 +4,20 @@ Sandboxes Bash commands and their descendants on macOS and Linux, including call
 
 Relative filesystem rules and socket paths resolve from the owning session's working directory, including session-only `/sandbox filesystem` changes. Configuration files are not rewritten by permission approvals.
 
+## macOS application launching
+
+The macOS-only `allowAppleEvents` setting defaults to `false`. To opt in, add it to your global `sandbox.json` in Pi's agent directory (normally `~/.pi/agent`), or to a trusted configuration file explicitly selected with `--sandbox-config`:
+
+```json
+{
+  "allowAppleEvents": true
+}
+```
+
+**This removes code-execution isolation.** Commands can launch arbitrary applications through `open` without an additional user prompt. Launched applications run outside the sandbox's filesystem and network restrictions, even after the originating command ends. macOS automation consent (TCC) still gates scripting other applications, but not ordinary launches. This is not a per-application permission and does not guarantee that every GUI operation will work.
+
+Automatic project configuration (`.pi/sandbox.json`) cannot change this setting, even for trusted projects. An explicit override file is trusted input: do not select an attacker-controlled or unreviewed file. Invalid non-boolean values in user-selected configuration block sandbox initialization. Reload after editing configuration. Enabled sessions warn at startup and in `/sandbox show`, and include the warning in agent context. Subagents inherit the parent's setting. Permission reviews never enable it.
+
 ## Classifier fallback
 
 Commands run under the normal sandbox policy first. At a supported permission block, an optional classifier can approve a temporary exception before the usual manual prompt. It must consider the user's intent, the actual permission change, and any side effects already performed by the failed command. There is no blanket approval of commands or automatic escape from the sandbox.

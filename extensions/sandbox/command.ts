@@ -12,6 +12,7 @@ import {
   type SandboxPolicy,
 } from "./config.js";
 import {
+  APPLE_EVENTS_WARNING,
   describeSandboxRuntimeState,
   formatSandboxEventTimestamp,
   getSandboxRunMode,
@@ -484,6 +485,10 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           `    ignoreViolations: ${runtimeConfig.ignoreViolations ? "configured" : "(none)"}`,
           `    enableWeakerNestedSandbox: ${runtimeConfig.enableWeakerNestedSandbox ? "true" : "false"}`,
           `    enableWeakerNetworkIsolation: ${runtimeConfig.enableWeakerNetworkIsolation ? "true" : "false"}`,
+          `    allowAppleEvents: ${runtimeConfig.allowAppleEvents ? "true" : "false"} (macOS only)`,
+          ...(IS_MACOS && runtimeConfig.allowAppleEvents
+            ? ["", `  Warning: ${APPLE_EVENTS_WARNING}`]
+            : []),
         ];
 
         notify(ctx, lines.join("\n"), "info");

@@ -76,6 +76,7 @@ const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_]
 const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
+  allowAppleEvents: false,
   network: {
     allowedDomains: [
       // System
@@ -526,6 +527,12 @@ export function loadConfig(
     } else {
       try {
         projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
+        if (isPlainObject(projectConfig) && projectConfig.allowAppleEvents !== undefined) {
+          console.error(
+            "Warning: Ignoring allowAppleEvents in project sandbox.json. Use global sandbox.json or an explicitly selected trusted --sandbox-config.",
+          );
+          delete projectConfig.allowAppleEvents;
+        }
         paths.push({ label: "Project", path: projectConfigPath, status: "loaded" });
       } catch (e) {
         paths.push({ label: "Project", path: projectConfigPath, status: "parse-error" });
@@ -575,6 +582,9 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
   }
   if (overrides.enableWeakerNetworkIsolation !== undefined) {
     result.enableWeakerNetworkIsolation = overrides.enableWeakerNetworkIsolation;
+  }
+  if (overrides.allowAppleEvents !== undefined) {
+    result.allowAppleEvents = overrides.allowAppleEvents;
   }
 
   return result;
@@ -733,6 +743,7 @@ export function toRuntimeConfig(config: SandboxConfig, cwd: string): SandboxPoli
     ignoreViolations: config.ignoreViolations,
     enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: config.enableWeakerNetworkIsolation,
+    allowAppleEvents: config.allowAppleEvents,
   };
 
   SandboxRuntimeConfigSchema.parse(runtimeConfig);

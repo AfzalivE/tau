@@ -41,6 +41,9 @@ const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
 const REVIEW_ENTRY_TYPE = "sandbox-review";
 
+export const APPLE_EVENTS_WARNING =
+  "allowAppleEvents removes code-execution isolation: launched applications run outside sandbox filesystem and network restrictions.";
+
 type UiLevel = "info" | "warning" | "error";
 
 export type SandboxEventOutcome = "blocked" | "allowed";
@@ -179,12 +182,13 @@ export function notify(ctx: ExtensionContext, text: string, level: UiLevel = "in
 function announceSandboxState(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  enabled: boolean,
+  runtimeConfig: SandboxPolicy | null,
   notification?: string,
   level: UiLevel = "info",
 ): void {
-  const text = `Sandbox ${enabled ? "enabled" : "disabled"}`;
-  notify(ctx, notification ?? text, level);
+  const warning = process.platform === "darwin" && runtimeConfig?.allowAppleEvents;
+  const text = `Sandbox ${runtimeConfig ? "enabled" : "disabled"}${warning ? `. Warning: ${APPLE_EVENTS_WARNING}` : ""}`;
+  notify(ctx, warning ? text : (notification ?? text), warning ? "warning" : level);
   pi.sendMessage(
     {
       customType: "sandbox-state",
@@ -719,7 +723,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const noSandbox = pi.getFlag("no-sandbox") as boolean;
     if (noSandbox) {
       sandboxState = { status: "bypassed", reason: "no-sandbox-flag" };
-      announceSandboxState(pi, ctx, false, "Sandbox disabled via --no-sandbox", "warning");
+      announceSandboxState(pi, ctx, null, "Sandbox disabled via --no-sandbox", "warning");
       return;
     }
 
@@ -728,7 +732,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
     if (!config.enabled) {
       sandboxState = { status: "bypassed", reason: "config-disabled" };
-      announceSandboxState(pi, ctx, false, "Sandbox disabled via config");
+      announceSandboxState(pi, ctx, null, "Sandbox disabled via config");
       return;
     }
 
@@ -747,7 +751,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     if (!runtimeConfig) return;
 
     setSandboxStatus(ctx, true, runtimeConfig, promptMode);
-    announceSandboxState(pi, ctx, true, "Sandbox initialized");
+    announceSandboxState(pi, ctx, runtimeConfig, "Sandbox initialized");
   }
 
   async function shutdown(ctx: ExtensionContext): Promise<void> {
@@ -790,7 +794,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     if (!runtimeConfig) return;
 
     setSandboxStatus(ctx, true, runtimeConfig, promptMode);
-    announceSandboxState(pi, ctx, true);
+    announceSandboxState(pi, ctx, runtimeConfig);
   }
 
   async function disable(ctx: ExtensionContext): Promise<void> {
@@ -815,7 +819,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       return;
     }
 
-    announceSandboxState(pi, ctx, false);
+    announceSandboxState(pi, ctx, null);
   }
 
   function setPromptMode(ctx: ExtensionContext, mode: PromptMode): void {

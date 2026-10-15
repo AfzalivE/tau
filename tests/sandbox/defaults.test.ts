@@ -66,6 +66,41 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
     });
   });
 
+  test("Apple Events requires user-selected configuration, never automatic project configuration", async (t) => {
+    const warnings = t.mock.method(console, "error", () => {});
+    const policy = (override?: string) =>
+      config.toRuntimeConfig(
+        config.loadConfig(cwd, override, { projectTrusted: true }).config,
+        cwd,
+      );
+    assert.equal(policy().allowAppleEvents, false);
+
+    const projectPath = path.join(cwd, ".pi", "sandbox.json");
+    await mkdir(path.dirname(projectPath));
+    await writeFile(projectPath, '{"allowAppleEvents":true}\n');
+    assert.equal(policy().allowAppleEvents, false, "project trust cannot enable app launching");
+    assert.equal(policy(projectPath).allowAppleEvents, true, "explicit selection trusts the file");
+
+    await writeFile(configPath, '{"allowAppleEvents":true}\n');
+    await writeFile(projectPath, '{"allowAppleEvents":false}\n');
+    assert.equal(policy().allowAppleEvents, true, "project values do not override user policy");
+    assert.ok(
+      warnings.mock.calls.some((call) =>
+        String(call.arguments[0]).includes("Ignoring allowAppleEvents in project sandbox.json"),
+      ),
+    );
+
+    await writeFile(configPath, '{"allowAppleEvents":null}\n');
+    assert.throws(
+      () => policy(),
+      /allowAppleEvents/,
+      "project values cannot mask invalid user policy",
+    );
+    assert.equal(policy(projectPath).allowAppleEvents, false);
+    await writeFile(projectPath, '{"allowAppleEvents":"false"}\n');
+    assert.throws(() => policy(projectPath), /allowAppleEvents/, "invalid booleans fail closed");
+  });
+
   test("classifier configuration is validated but never passed into OS policy", async () => {
     for (const [value, expected] of [
       ["openai-codex/guardian", "openai-codex/guardian"],

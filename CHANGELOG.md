@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Configurable Review models, thinking levels, and focuses via `review.json`.
 - Opt-in Sandbox permission review for main and subagent commands, using Pi classifiers or experimental Codex Guardian, with diagnostics.
 - Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
+- Opt-in Sandbox `allowAppleEvents` setting for macOS application launching, with isolation warnings and user-controlled configuration only.
 
 ### Changed
 

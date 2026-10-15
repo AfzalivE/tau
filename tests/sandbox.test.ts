@@ -840,6 +840,7 @@ describe("sandbox", { concurrency: false }, () => {
     try {
       const overridePath = path.join(cwd, "travel policy.json");
       const overrideBytes = JSON.stringify({
+        allowAppleEvents: true,
         network: {
           allowedDomains: ["octopus.invalid"],
           allowUnixSockets: ["sockets/kraken.sock"],
@@ -863,6 +864,22 @@ describe("sandbox", { concurrency: false }, () => {
       });
       const policy = structuredClone(SandboxManager.getConfig());
       assert.ok(policy);
+      assert.equal(policy.allowAppleEvents, true);
+      assert.equal(permissionRecord(pi.handoff().config).allowAppleEvents, true);
+      const show = await pi.command("show");
+      assert.match(show, /allowAppleEvents: true/);
+      if (process.platform === "darwin") {
+        assert.match(show, /removes code-execution isolation/);
+        const state = pi.session.sessionManager
+          .getEntries()
+          .find((entry) => entry.type === "custom_message" && entry.customType === "sandbox-state");
+        assert.ok(state?.type === "custom_message" && typeof state.content === "string");
+        assert.match(state.content, /allowAppleEvents removes code-execution isolation/);
+      }
+      const probe = "printf 'octopus aboard\\n'";
+      boundary.attempts(probe, [{ script: probe }]);
+      assert.equal(bashOutput(await pi.bash(probe)), "octopus aboard\n");
+      assert.equal(boundary.wrappers[0]?.config?.allowAppleEvents, true);
       assert.deepEqual(policy.network.allowedDomains, ["octopus.invalid"]);
       assert.deepEqual(policy.network.allowUnixSockets, [path.join(cwd, "sockets/kraken.sock")]);
       assert.deepEqual(policy.network.mitmProxy, {
