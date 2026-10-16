@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { once } from "node:events";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import fsp, { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import path from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import {
   getCurrentTools,
@@ -22,8 +24,11 @@ import { scriptedProvider } from "../helpers/provider.js";
 import { deadline } from "../helpers/async.js";
 import { Type } from "typebox";
 import { formatTelegramAssistantResultFromMessages } from "../../extensions/telegram/assistant-result.mjs";
+import type {} from "./fixtures/reconnect-daemon.js";
 
 const reply = "The otter keeps its report in the parent window.";
+const spawn = childProcess.spawn;
+const daemonFixture = fileURLToPath(new URL("./fixtures/reconnect-daemon.js", import.meta.url));
 
 describe("Telegram extension launch and opt-out", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>>;
@@ -99,10 +104,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
       },
     );
     syncBuiltinESMExports();
-    resources = await createPiResources(cwd, agentDir, [telegram]);
-    ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
-    await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
-
+    const session = await bindTelegram(cwd);
     await session.prompt("/telegram pair");
 
     assert.equal(launches.length, 1);
@@ -123,53 +125,221 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     );
   });
 
-  for (const tokenSource of ["env", "keychain"] as const) {
-    test(
-      `background starts leave the ${tokenSource} token lookup to the daemon`,
-      { skip: tokenSource === "keychain" && process.platform !== "darwin" && "macOS Keychain" },
-      async () => {
-        const agentDir = getAgentDir();
-        const cwd = path.join(agentDir, "otter-workshop");
-        await mkdir(path.join(agentDir, "telegram"), { recursive: true });
-        await mkdir(cwd, { recursive: true });
-        await writeFile(
-          path.join(agentDir, "telegram", "config.json"),
-          JSON.stringify({ pairedChatId: 42 }),
-        );
-        if (tokenSource === "keychain") delete process.env.TAU_TELEGRAM_BOT_TOKEN;
-        stoppedDaemonSocket(agentDir);
-        let keychainReads = 0;
-        let launches = 0;
-        let launched!: () => void;
-        const launchRefused = new Promise<void>((resolve) => (launched = resolve));
-        // A background reconnect must leave credential lookup to the daemon.
-        mock.method(
-          childProcess,
-          "execFile",
-          (command: string, args: string[], _options: unknown, callback: Function) => {
-            assert.equal(command, "security");
-            assert.equal(args[0], "find-generic-password");
-            keychainReads++;
-            callback(null, "fixture-only-keychain-token\n");
-          },
-        );
-        mock.method(childProcess, "spawn", () => {
-          launches++;
-          launched();
-          throw new Error("Fixture refuses detached daemon startup");
-        });
-        syncBuiltinESMExports();
-        resources = await createPiResources(cwd, agentDir, [telegram]);
-        ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
-        await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+  test(
+    "background starts without an environment token leave Keychain lookup to the daemon",
+    { skip: process.platform !== "darwin" && "macOS Keychain" },
+    async () => {
+      const { agentDir, cwd } = await pairedFiles();
+      delete process.env.TAU_TELEGRAM_BOT_TOKEN;
+      stoppedDaemonSocket(agentDir);
+      let keychainReads = 0;
+      let launches = 0;
+      let launched!: () => void;
+      const launchRefused = new Promise<void>((resolve) => (launched = resolve));
+      // A background reconnect must leave credential lookup to the daemon.
+      mock.method(
+        childProcess,
+        "execFile",
+        (command: string, args: string[], _options: unknown, callback: Function) => {
+          assert.equal(command, "security");
+          assert.equal(args[0], "find-generic-password");
+          keychainReads++;
+          callback(null, "fixture-only-keychain-token\n");
+        },
+      );
+      mock.method(childProcess, "spawn", () => {
+        launches++;
+        launched();
+        throw new Error("Fixture refuses detached daemon startup");
+      });
+      syncBuiltinESMExports();
+      const session = await bindTelegram(cwd);
+      await launchRefused;
+      await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 
-        await launchRefused;
-        await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      assert.equal(launches, 1);
+      assert.equal(keychainReads, 0);
+    },
+  );
 
-        assert.equal(launches, 1);
-        assert.equal(keychainReads, 0);
+  test("automatically retries failed startup, preserves cooldown on reload, and recovers by polling", async () => {
+    // Native intervals prove SDK liveness. Exact backoff/deadline boundaries use coordinator clocks.
+    mock.timers.reset();
+    const { agentDir, cwd } = await pairedFiles();
+    const retryPath = path.join(agentDir, "run", "telegram-startup.json");
+    const retried = completion();
+    let available = false;
+    let connections = 0;
+    let connected = completion();
+    substituteDaemonTransport(agentDir, failures, {
+      available: () => available,
+      // Automatic connection sends meta only after registration and retry-history reset finish.
+      onMeta: () => {
+        connections++;
+        connected.resolve();
       },
-    );
+    });
+    let launches = 0;
+    mock.method(childProcess, "spawn", () => {
+      if (++launches === 2) retried.resolve();
+      throw new Error("Fixture refuses detached daemon startup");
+    });
+    syncBuiltinESMExports();
+    const session = await bindTelegram(cwd);
+    await deadline(retried.promise, "second automatic startup without manual intervention");
+    assert.equal(launches, 2);
+    await session.reload(); // Joins the old failed attempt before replacing its extension instance.
+    assert.equal(JSON.parse(await fsp.readFile(retryPath, "utf8")).failures, 2);
+
+    await session.prompt("/telegram pair");
+    assert.equal(launches, 3, "manual pairing bypasses the persisted automatic cooldown");
+    available = true;
+    await deadline(connected.promise, "automatic connection and retry-history reset");
+    await assert.rejects(access(retryPath), { code: "ENOENT" });
+    connected = completion();
+    await session.reload();
+    await deadline(connected.promise, "completed connection after reload");
+    await assert.rejects(access(retryPath), { code: "ENOENT" });
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    assert.equal(connections, 2);
+    assert.equal(launches, 3, "independent daemon recovery and reload need no additional launch");
+  });
+
+  for (const action of ["failure", "shutdown", "unpair"] as const) {
+    test(`${action} joins owned startup${action === "unpair" ? "" : " and kills TERM-ignoring descendants after leader exit"}, without reviving reconnects`, async () => {
+      const { agentDir, cwd, configPath } = await pairedFiles();
+      const probes = stoppedDaemonSocket(agentDir);
+      const descendant = action === "unpair" ? undefined : await descendantBoundary();
+      const booted = completion();
+      let child: childProcess.ChildProcess | undefined;
+      let closed = false;
+      let launches = 0;
+      mock.method(
+        childProcess,
+        "spawn",
+        (command: string, args: string[], options: childProcess.SpawnOptions) => {
+          assert.equal(path.basename(args[0]!), "daemon.mjs");
+          assert.equal(options.detached, true);
+          assert.equal(++launches, 1, "Unexpected second owned startup");
+          child = spawn(command, [daemonFixture], {
+            ...options,
+            env: { ...options.env, TELEGRAM_RECONNECT_DESCENDANT_SOCKET: descendant?.socketPath },
+          });
+          child.once("close", () => {
+            closed = true;
+          });
+          child.on("message", (message) => {
+            if ((message as { type: string }).type === "fixture_booted") booted.resolve();
+          });
+          return child;
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const session = await bindTelegram(cwd);
+        await deadline(booted.promise, "owned daemon startup");
+        if (descendant) {
+          child!.send({ action: "spawn-descendant" });
+          await descendant.ready();
+        }
+        if (action === "failure") {
+          const close = once(child!, "close");
+          child!.send({ action: "fail" });
+          await deadline(close, "failed startup close");
+          await descendant!.waitDead();
+        }
+        if (action === "unpair") await session.prompt("/telegram unpair");
+        else await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+        if (descendant) await descendant.waitDead();
+        assert.equal(closed, true, "lifecycle completion must join the child's close event");
+        await assert.rejects(access(path.join(agentDir, "run", "telegram-startup.json.lock")), {
+          code: "ENOENT",
+        });
+        if (action === "unpair") await assert.rejects(access(configPath), { code: "ENOENT" });
+        const configRead = action === "unpair" ? completion() : undefined;
+        if (configRead) {
+          const read = fsp.readFile;
+          mock.method(fsp, "readFile", (target: string, ...options: unknown[]) => {
+            const result = (read as Function)(target, ...options);
+            return target === configPath ? result.finally(configRead.resolve) : result;
+          });
+        }
+        const before = probes.count();
+        mock.timers.tick(30_000);
+        if (configRead) await deadline(configRead.promise, "post-unpair config poll");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(probes.count(), before);
+        assert.equal(launches, 1);
+      } finally {
+        try {
+          if (child && !closed) {
+            const close = once(child, "close");
+            killFixtureProcess(-child.pid!);
+            await close;
+          }
+        } finally {
+          await descendant?.dispose();
+        }
+      }
+    });
+  }
+
+  for (const unpairFirst of [false, true]) {
+    test(`single-flights before config IO and joins ${unpairFirst ? "pending unpair plus shutdown" : "shutdown"} while that read is blocked`, async () => {
+      const { agentDir, cwd, configPath } = await pairedFiles();
+      const bytes = JSON.stringify({ pairedChatId: 42 });
+      const probes = stoppedDaemonSocket(agentDir);
+      const started = completion();
+      const released = completion();
+      const read = fsp.readFile;
+      let reads = 0;
+      mock.method(fsp, "readFile", async (target: string, ...options: unknown[]) => {
+        if (target === configPath) {
+          reads++;
+          started.resolve();
+          await released.promise;
+        }
+        return (read as Function)(target, ...options);
+      });
+      syncBuiltinESMExports();
+      try {
+        const session = await bindTelegram(cwd);
+        await deadline(started.promise, "blocked config read");
+        mock.timers.tick(9_000);
+        assert.equal(reads, 1, "three overlapping reconnect ticks share the first config read");
+        assert.equal(probes.count(), 0);
+        let unpaired = false;
+        let stopped = false;
+        const unpair = unpairFirst
+          ? session.prompt("/telegram unpair").then(() => {
+              unpaired = true;
+            })
+          : undefined;
+        // Yield command continuations, not filesystem work: the only config read is still held.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(unpaired, false);
+        const shutdown = session.extensionRunner
+          .emit({ type: "session_shutdown", reason: "quit" })
+          .then(() => {
+            stopped = true;
+          });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(stopped, false, "shutdown must join the blocked operation and pending unpair");
+        released.resolve();
+        await Promise.all([unpair, shutdown]);
+        mock.timers.tick(30_000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(reads, 1);
+        assert.equal(probes.count(), 0);
+        assert.equal(
+          await read(configPath, "utf8"),
+          bytes,
+          "retired unpair must preserve exact pairing config",
+        );
+      } finally {
+        released.resolve();
+      }
+    });
   }
 
   test("unpaired reconnect ticks neither read the token nor probe the daemon", async () => {
@@ -188,10 +358,7 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
       },
     );
     syncBuiltinESMExports();
-    resources = await createPiResources(cwd, agentDir, [telegram]);
-    ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
-    await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
-
+    const session = await bindTelegram(cwd);
     mock.timers.tick(30_000);
     // The explicit status command is the only token read and daemon probe.
     await session.prompt("/telegram status");
@@ -537,10 +704,83 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
       assert.deepEqual(failures, [], "startup, settlement and reconnect ticks stay offline");
     });
   }
+
+  async function pairedFiles() {
+    const agentDir = getAgentDir();
+    const cwd = path.join(agentDir, "otter-workshop");
+    const configPath = path.join(agentDir, "telegram", "config.json");
+    await mkdir(path.dirname(configPath), { recursive: true });
+    await mkdir(cwd);
+    await writeFile(configPath, JSON.stringify({ pairedChatId: 42 }));
+    return { agentDir, cwd, configPath };
+  }
+
+  async function bindTelegram(cwd: string) {
+    resources = await createPiResources(cwd, getAgentDir(), [telegram]);
+    ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
+    await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+    return session;
+  }
 });
 
+/** Socket EOF proves descendant death, including orphaned Linux processes becoming zombies. */
+async function descendantBoundary() {
+  const directory = await fsp.realpath(await fsp.mkdtemp("/tmp/tau-descendant-"));
+  const socketPath = path.join(directory, "credential.sock");
+  let socket: net.Socket | undefined;
+  let pid: number | undefined;
+  let dead: Promise<unknown> | undefined;
+  const server = net.createServer();
+  const ready = once(server, "connection").then(async ([connection]) => {
+    socket = connection as net.Socket;
+    dead = once(socket, "close");
+    const lines = createInterface({ input: socket });
+    socket.once("close", () => lines.close());
+    const [line] = await once(lines, "line");
+    pid = Number(line);
+    assert.ok(Number.isInteger(pid) && pid! > 0);
+  });
+  server.listen(socketPath);
+  await once(server, "listening");
+  return {
+    socketPath,
+    ready: () => deadline(ready, "descendant ready"),
+    waitDead: () => deadline(dead!, "descendant death"),
+    async dispose() {
+      if (pid && !socket?.destroyed) killFixtureProcess(pid);
+      socket?.destroy();
+      if (dead) await dead;
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Negative IDs target process groups. An already-exited fixture still needs its handles joined. */
+function killFixtureProcess(pid: number) {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function completion() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 /** Substitute only the daemon socket. Production JSONL parsing, pairing, tool registration and Pi navigation stay real. */
-function substituteDaemonTransport(agentDir: string, failures: unknown[]) {
+function substituteDaemonTransport(
+  agentDir: string,
+  failures: unknown[],
+  options: { available?: () => boolean; onMeta?: () => void } = {},
+) {
   let persistent: net.Socket | undefined;
   const results: { type: string; text: string; tone: string }[] = [];
   const send = (message: object) => {
@@ -550,6 +790,12 @@ function substituteDaemonTransport(agentDir: string, failures: unknown[]) {
   mock.method(net, "connect", (socketPath: string) => {
     assert.equal(socketPath, path.join(agentDir, "run", "telegram.sock"));
     const socket = new net.Socket();
+    if (options.available?.() === false) {
+      queueMicrotask(() =>
+        socket.emit("error", Object.assign(new Error("No otter daemon"), { code: "ENOENT" })),
+      );
+      return socket;
+    }
     mock.method(socket, "end", () => {
       socket.destroy();
       return socket;
@@ -570,6 +816,7 @@ function substituteDaemonTransport(agentDir: string, failures: unknown[]) {
           send({ type: "pin", code: "OTTER8", expiresAt: Date.now() + 60_000 });
           break;
         case "meta":
+          options.onMeta?.();
           break;
         case "assistant_result":
           results.push(message);
