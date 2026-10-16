@@ -188,6 +188,8 @@ Published packages contain their selected Tau resources and the patched sandbox 
 
 This fork keeps Afzal-specific packaging, personal setup helpers, and extra resources separate from the original Tau package documentation above.
 
+Fork-specific changes are recorded in [CHANGELOG_FORK.md](CHANGELOG_FORK.md). [CHANGELOG.md](CHANGELOG.md) mirrors upstream Tau.
+
 ### Package
 
 `afzal-tau-all-agent` bundles the base Tau package contents plus the fork-specific extensions and skills listed below, but intentionally excludes the `memory` extension.
