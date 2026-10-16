@@ -12,6 +12,7 @@ import {
   type SandboxPolicy,
 } from "./config.js";
 import {
+  APPLE_EVENTS_WARNING,
   describeSandboxRuntimeState,
   formatSandboxEventTimestamp,
   getSandboxRunMode,
@@ -378,11 +379,25 @@ function renderSandboxDoctorReport(options: {
   }
 
   for (const event of [...events].reverse()) {
+    if (event.type === "review") {
+      lines.push(
+        "",
+        `- [${formatSandboxEventTimestamp(event.timestamp)}] [${event.kind}] [review] ${event.outcome}`,
+        `  Attempted: ${event.attempted ? "yes" : "no"}`,
+        ...(event.classifier ? [`  Classifier: ${event.classifier}`] : []),
+        ...(event.label ? [`  Label: ${event.label}`] : []),
+        ...(event.toolCallId ? [`  Tool call: ${event.toolCallId}`] : []),
+        ...(event.persistenceFailed ? ["  Session persistence failed."] : []),
+        "  Review outcome is not a permission decision.",
+      );
+      continue;
+    }
     lines.push(
       "",
       `- [${formatSandboxEventTimestamp(event.timestamp)}] [${event.kind}] [${event.outcome}] ${event.reason}`,
       ...(event.target ? [`  Target: ${event.target}`] : []),
       ...(event.command ? [`  Command: ${event.command}`] : []),
+      ...(event.toolCallId ? [`  Tool call: ${event.toolCallId}`] : []),
       `  Summary: ${event.summary}`,
       ...(event.suggestedCommand
         ? ["  Suggested session fix:", `    ${event.suggestedCommand}`]
@@ -520,6 +535,10 @@ export function registerSandboxCommand(pi: ExtensionAPI, runtime: SandboxRuntime
           `    ignoreViolations: ${runtimeConfig.ignoreViolations ? "configured" : "(none)"}`,
           `    enableWeakerNestedSandbox: ${runtimeConfig.enableWeakerNestedSandbox ? "true" : "false"}`,
           `    enableWeakerNetworkIsolation: ${runtimeConfig.enableWeakerNetworkIsolation ? "true" : "false"}`,
+          `    allowAppleEvents: ${runtimeConfig.allowAppleEvents ? "true" : "false"} (macOS only)`,
+          ...(IS_MACOS && runtimeConfig.allowAppleEvents
+            ? ["", `  Warning: ${APPLE_EVENTS_WARNING}`]
+            : []),
         ];
 
         notify(ctx, lines.join("\n"), "info");

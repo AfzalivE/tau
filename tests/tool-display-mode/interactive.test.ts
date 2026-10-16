@@ -3,7 +3,6 @@ import { mkdir } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
-import { stripVTControlCharacters } from "node:util";
 import {
   AgentSessionRuntime,
   createAgentSessionFromServices,
@@ -13,7 +12,7 @@ import {
   type ExtensionContext,
   type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import toolDisplayMode from "../../extensions/tool-display-mode.js";
 import { deadline } from "../helpers/async.js";
 import { captureTerminal, rejectInteractiveExternalWork } from "../helpers/interactive.js";
@@ -400,7 +399,7 @@ function assertNativePriority(app: Awaited<ReturnType<typeof openInteractive>>, 
 /** Observe just the two native editor borders and their position around the preserved draft. */
 function editorBorder(tui: TUI, width: number) {
   const lines = tui.render(width);
-  const plain = lines.map((line) => stripVTControlCharacters(line.replaceAll(CURSOR_MARKER, "")));
+  const plain = lines.map(stripTerminalSequences);
   const borderRows = plain.flatMap((line, row) => (line.startsWith("─") ? [row] : []));
   assert.equal(borderRows.length, 2, "only the native editor has borders in this fixture");
   const [topRow, bottomRow] = borderRows;
@@ -413,10 +412,10 @@ function editorBorder(tui: TUI, width: number) {
   );
   const top = lines[topRow];
   const bottom = lines[bottomRow];
-  assert.match(stripVTControlCharacters(bottom), /^─+$/);
+  assert.match(stripTerminalSequences(bottom), /^─+$/);
   assert.equal(visibleWidth(top), width);
   assert.equal(visibleWidth(bottom), width);
-  return { top, bottom, editorHeight: bottomRow - topRow, plainTop: stripVTControlCharacters(top) };
+  return { top, bottom, editorHeight: bottomRow - topRow, plainTop: stripTerminalSequences(top) };
 }
 
 function sampleAnimation(tui: TUI) {
@@ -436,7 +435,7 @@ function assertStatus(tui: TUI, text: string | undefined) {
     assert.equal(
       tui
         .render(100)
-        .map(stripVTControlCharacters)
+        .map(stripTerminalSequences)
         .filter((line) => line.includes(text)).length,
       1,
       "activity appears only once, in the editor border",

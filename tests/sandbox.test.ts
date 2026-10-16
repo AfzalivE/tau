@@ -28,6 +28,7 @@ import {
   createBashToolDefinition,
   getAgentDir,
   initTheme,
+  SessionManager,
   ToolExecutionComponent,
   type ExtensionContext,
   type ExtensionFactory,
@@ -847,6 +848,7 @@ describe("sandbox", { concurrency: false }, () => {
     try {
       const overridePath = path.join(cwd, "travel policy.json");
       const overrideBytes = JSON.stringify({
+        allowAppleEvents: true,
         network: {
           allowedDomains: ["octopus.invalid"],
           allowUnixSockets: ["sockets/kraken.sock"],
@@ -870,6 +872,22 @@ describe("sandbox", { concurrency: false }, () => {
       });
       const policy = structuredClone(SandboxManager.getConfig());
       assert.ok(policy);
+      assert.equal(policy.allowAppleEvents, true);
+      assert.equal(permissionRecord(pi.handoff().config).allowAppleEvents, true);
+      const show = await pi.command("show");
+      assert.match(show, /allowAppleEvents: true/);
+      if (process.platform === "darwin") {
+        assert.match(show, /removes code-execution isolation/);
+        const state = pi.session.sessionManager
+          .getEntries()
+          .find((entry) => entry.type === "custom_message" && entry.customType === "sandbox-state");
+        assert.ok(state?.type === "custom_message" && typeof state.content === "string");
+        assert.match(state.content, /allowAppleEvents removes code-execution isolation/);
+      }
+      const probe = "printf 'octopus aboard\\n'";
+      boundary.attempts(probe, [{ script: probe }]);
+      assert.equal(bashOutput(await pi.bash(probe)), "octopus aboard\n");
+      assert.equal(boundary.wrappers[0]?.config?.allowAppleEvents, true);
       assert.deepEqual(policy.network.allowedDomains, ["octopus.invalid"]);
       assert.deepEqual(policy.network.allowUnixSockets, [path.join(cwd, "sockets/kraken.sock")]);
       assert.deepEqual(policy.network.mitmProxy, {
@@ -938,7 +956,7 @@ describe("sandbox", { concurrency: false }, () => {
   });
 
   describe("deciding what to do after a partially completed command", () => {
-    for (const { name, choice, allowed, retry } of [
+    for (const { name, choice, allowed, retry, elapsed = 2_000 } of [
       { name: "deny", choice: "Deny", allowed: false, retry: false },
       { name: "dismiss", choice: undefined, allowed: false, retry: false },
       {
@@ -948,10 +966,20 @@ describe("sandbox", { concurrency: false }, () => {
         retry: false,
       },
       { name: "explicitly retry once", choice: "Allow and retry now", allowed: true, retry: true },
+      {
+        name: "allow without retry when execution already exhausted its budget",
+        choice: "Allow but adapt for side-effects",
+        allowed: true,
+        retry: false,
+        elapsed: 5_000,
+      },
     ]) {
-      test(name, async () => {
+      test(name, async (t) => {
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
         const command = dinnerCommand;
-        boundary.attempts(command, permissionAttempts(target));
+        const attempts = permissionAttempts(target);
+        boundary.attempts(command, attempts);
+        boundary.onCommandClose(attempts[0]!.script, () => t.mock.timers.tick(elapsed));
         let prompts = 0;
         pi = await openSandbox(cwd, sandbox, failures, {
           ui: {
@@ -960,11 +988,11 @@ describe("sandbox", { concurrency: false }, () => {
               try {
                 assert.ok(title.includes(target));
                 assert.deepEqual(choices, [
-                  "Allow and retry now",
-                  "Always allow and retry",
+                  ...(elapsed < 5_000 ? ["Allow and retry now", "Always allow and retry"] : []),
                   "Allow but adapt for side-effects",
                   "Deny",
                 ]);
+                t.mock.timers.tick(60_000); // Waiting for approval is not command execution.
                 return choice;
               } catch (error) {
                 failures.push(error); // Tau catches dialog errors; do not lose test assertions.
@@ -974,9 +1002,20 @@ describe("sandbox", { concurrency: false }, () => {
           },
         });
 
-        // Only a successful rerun can turn the tool into a success.
+        // Observe the real execution timers without replacing their scheduling.
+        const timers = t.mock.method(globalThis, "setTimeout");
         const output = bashOutput(await pi.bash(command), retry ? 0 : 1);
         assert.equal(prompts, 1);
+        assert.equal(boundary.spawnedScripts.length, retry ? 2 : 1);
+        assert.deepEqual(
+          timers.mock.calls
+            .map((call) => call.arguments[1])
+            .filter((delay) => delay === 5_000 || delay === 3_000),
+          retry ? [5_000, 3_000] : [5_000],
+          "approval waiting preserves, but does not replenish, the execution allowance",
+        );
+        if (retry) assert.match(output, /retried successfully/);
+        else assert.doesNotMatch(output, /retrying the command/);
         assert.equal(
           await readFile(path.join(cwd, "effects.txt"), "utf8"),
           "fed the kraken\n".repeat(retry ? 2 : 1),
@@ -1133,6 +1172,125 @@ describe("sandbox", { concurrency: false }, () => {
       await writeFile(configPath, configBytes);
     });
 
+    test("a successful command continues after live denials without review or replay", async () => {
+      const protectedPath = path.join(cwd, ".bashrc");
+      await writeFile(protectedPath, "The kraken sleeps here.\n");
+      const command = nodeCommand(`
+        const fs = require("node:fs");
+        fs.appendFileSync("effects.txt", "fed the kraken\\n");
+        let continued = false;
+        const watcher = fs.watch(".", (_event, name) => {
+          if (name !== "continue.txt" || continued) return;
+          continued = true;
+          watcher.close();
+          fs.appendFileSync("effects.txt", "served dinner\\n");
+          console.log("recovered");
+        });
+        console.error("optional write refused");
+      `);
+      const denied = `bash(42) deny(1) file-write-data ${target}`;
+      const protectedWrite = `bash(42) deny(1) file-write-data ${protectedPath}`;
+      boundary.attempts(command, [
+        {
+          script: command,
+          // Fill the tail before this protected write, then evict it before post-processing.
+          violation: [
+            ...Array<string>(100).fill(denied),
+            protectedWrite,
+            ...Array<string>(100).fill(denied),
+          ],
+        },
+      ]);
+      const observed = deferred<void>();
+      boundary.onCommandOutput(command, () => observed.resolve());
+      pi = await openClassified();
+      const snapshot = permissionSnapshot();
+      const controller = new AbortController();
+      const execution = pi.bash(command, { signal: controller.signal });
+      try {
+        await waitForStep(
+          observed.promise,
+          execution.then(() => {}),
+        );
+        await writeFile(path.join(cwd, "continue.txt"), "Dinner is ready.\n");
+        const result = await execution;
+        const output = bashOutput(result);
+        assert.match(output, /recovered/);
+        assert.match(output, /exited 0 with filesystem diagnostics/);
+        assert.ok(output.includes(target));
+        if (process.platform === "darwin") {
+          assert.match(output, /runtime-protected write/);
+          assert.ok(output.includes(protectedPath));
+        }
+        assert.ok(
+          SandboxManager.getSandboxViolationStore()
+            .getViolations()
+            .every((item) => item.line !== protectedWrite),
+        );
+        assert.equal(result.usage, undefined);
+        assert.equal(classifier.calls.length, 0);
+        assert.equal(pi.permissionCount(), 0);
+        assert.equal(boundary.spawnedScripts.length, 1);
+        assert.deepEqual(boundary.wrappers[0]?.config, snapshot.invocationPolicy);
+        assert.equal(
+          await readFile(path.join(cwd, "effects.txt"), "utf8"),
+          "fed the kraken\nserved dinner\n",
+        );
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        assert.equal(await readFile(protectedPath, "utf8"), "The kraken sleeps here.\n");
+        await assertPermissionState(snapshot);
+      } finally {
+        controller.abort();
+        await Promise.allSettled([execution]);
+      }
+    });
+
+    for (const ending of ["timeout", "cancellation"] as const) {
+      test(`${ending} still terminates a running command after a live denial`, async (t) => {
+        const command = nodeCommand(`
+          console.error("ready");
+          setTimeout(() => { console.error("fixture safety deadline"); process.exit(99); }, 10_000);
+        `);
+        boundary.attempts(command, [
+          { script: command, violation: `bash(42) deny(1) file-write-data ${target}` },
+        ]);
+        const ready = deferred<void>();
+        boundary.onCommandOutput(command, () => ready.resolve());
+        pi = await openClassified();
+        const snapshot = permissionSnapshot();
+        const controller = new AbortController();
+        // The child's real safety deadline survives the parent's controlled execution clock.
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const execution = pi.bash(command, { signal: controller.signal });
+        const rejected = assert.rejects(execution, (error) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /^ready$/m);
+          assert.match(
+            error.message,
+            ending === "timeout" ? /Command timed out after 5 seconds/ : /Command aborted/,
+          );
+          assert.doesNotMatch(error.message, /fixture safety deadline/);
+          return true;
+        });
+        try {
+          await waitForStep(ready.promise, rejected);
+          if (ending === "timeout") {
+            t.mock.timers.tick(5_000);
+            t.mock.timers.tick(2_000);
+          } else controller.abort();
+          await rejected;
+          assert.equal(boundary.spawnedScripts.length, 1);
+          assert.equal(classifier.calls.length, 0);
+          assert.equal(pi.permissionCount(), 0);
+          await assertPermissionState(snapshot);
+        } finally {
+          controller.abort();
+          await Promise.allSettled([execution, rejected]);
+          t.mock.timers.reset();
+        }
+      });
+    }
+
     for (const { scenario, mode } of [
       { scenario: "file deny", mode: "tui" },
       { scenario: "file deny", mode: "rpc" },
@@ -1213,11 +1371,45 @@ describe("sandbox", { concurrency: false }, () => {
           const snapshot = permissionSnapshot();
           const { policy, invocationPolicy } = snapshot;
 
-          const result = await pi.bash(command);
+          const toolCallId =
+            mode === "rpc"
+              ? "call|kraken"
+              : scenario === "Linux-shaped output"
+                ? "call\u001bunsafe"
+                : "fixture-bash";
+          const attribution = scenario === "Linux-shaped output" ? undefined : toolCallId;
+          const result = await pi.bash(command, { toolCallId });
           const output = bashOutput(result, retryFails ? 1 : 0);
           assert.equal(classifier.calls.length, 1);
           assert.equal(pi.permissionCount(), 0);
           assert.deepEqual(result.usage, permissionUsage);
+          const reviews = sandboxReviewEvents(pi);
+          assert.deepEqual(
+            reviews.map(({ outcome, attempted, label, toolCallId }) => ({
+              outcome,
+              attempted,
+              label,
+              toolCallId,
+            })),
+            [
+              {
+                outcome: "approved",
+                attempted: true,
+                label: "approve",
+                toolCallId: attribution,
+              },
+            ],
+          );
+          const doctor = await pi.command("doctor");
+          assert.match(doctor, /\[filesystem\] \[review\] approved/);
+          assert.match(doctor, /Review outcome is not a permission decision/);
+          if (attribution) assert.ok(doctor.includes(`Tool call: ${attribution}`));
+          else
+            assert.doesNotMatch(
+              doctor,
+              /Tool call:/,
+              "invalid optional IDs never affect approval or reach doctor",
+            );
           assert.equal(
             await readFile(path.join(cwd, "effects.txt"), "utf8"),
             "fed the kraken\n".repeat(2),
@@ -1344,50 +1536,192 @@ describe("sandbox", { concurrency: false }, () => {
       assert.equal(await readFile(target, "utf8"), "Dinner served.\n");
     });
 
-    test("classifier abstention returns to an ordinary manual filesystem session grant", async () => {
-      boundary.attempts(dinnerCommand, permissionAttempts(target));
-      classifier = nativePermissionClassifier(async (_model, context) =>
-        permissionClassification(context, "escalate"),
-      );
-      let manualPrompts = 0;
-      pi = await openClassified({
-        ui: {
-          async select(title, choices) {
-            manualPrompts++;
-            try {
-              assert.ok(title.includes(target));
-              assert.deepEqual(choices, [
-                "Allow and retry now",
-                "Always allow and retry",
-                "Allow but adapt for side-effects",
-                "Deny",
-              ]);
-              return "Allow but adapt for side-effects";
-            } catch (error) {
-              failures.push(error);
-              throw error;
-            }
+    for (const scenario of [
+      "escalated",
+      "invalid-response",
+      "provider-error",
+      "storage-failure",
+    ] as const) {
+      const outcome = scenario === "storage-failure" ? "escalated" : scenario;
+      test(`${scenario} returns to an ordinary manual filesystem grant with safe durable diagnostics`, async () => {
+        boundary.attempts(dinnerCommand, permissionAttempts(target));
+        const providerSecret = "password=tentacles-only raw provider request";
+        classifier = nativePermissionClassifier(async (_model, context) => {
+          if (outcome === "provider-error") throw new Error(providerSecret);
+          const response = permissionClassification(context, "escalate");
+          if (outcome === "invalid-response") {
+            const answer = Object.values(response.answers)[0]!;
+            if (answer.type === "choice") answer.probabilities = { approve: 0.99, escalate: 0.99 };
+          }
+          return response;
+        });
+        let manualPrompts = 0;
+        pi = await openClassified({
+          ui: {
+            async select(title, choices) {
+              manualPrompts++;
+              try {
+                assert.ok(title.includes(target));
+                assert.match(title, /^Sandbox blocked write to /);
+                assert.doesNotMatch(title, /Automatic review|\/sandbox doctor/);
+                assert.ok(!title.includes(providerSecret));
+                assert.deepEqual(choices, [
+                  "Allow and retry now",
+                  "Always allow and retry",
+                  "Allow but adapt for side-effects",
+                  "Deny",
+                ]);
+                // Manual grants still merge only their nominated action into the latest policy.
+                await pi!.command("network deny add low-tide.invalid");
+                return "Allow but adapt for side-effects";
+              } catch (error) {
+                failures.push(error);
+                throw error;
+              }
+            },
           },
-        },
-      });
-      const snapshot = permissionSnapshot();
-      const policy = structuredClone(snapshot.policy);
-      policy.filesystem.denyWrite = [];
+        });
+        let retainedDiagnostic: unknown;
+        const storageSecret = "password=kraken-vault storage failure";
+        if (scenario === "storage-failure") {
+          const manager = pi.session.sessionManager;
+          const append = manager.appendCustomEntry.bind(manager);
+          let failNextReview = true;
+          mock.method(manager, "appendCustomEntry", (customType: string, data?: unknown) => {
+            const id = append(customType, data);
+            if (customType === "sandbox-review" && failNextReview) {
+              failNextReview = false;
+              // A storage failure can follow SessionManager retaining the exact supplied object.
+              retainedDiagnostic = data;
+              throw new Error(storageSecret);
+            }
+            return id;
+          });
+        }
+        const snapshot = permissionSnapshot();
+        const policy = structuredClone(snapshot.policy);
+        policy.filesystem.denyWrite = [];
+        policy.network.deniedDomains.push("low-tide.invalid");
 
-      bashOutput(await pi.bash(dinnerCommand), 1);
-      assert.equal(classifier.calls.length, 1);
-      assert.equal(manualPrompts, 1);
-      assert.equal(pi.permissionCount(), 1);
-      assert.equal(boundary.wrappers.length, 1, "manual adapt never replays the side effect");
-      assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
-      assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
-      assert.deepEqual(
-        SandboxManager.getConfig(),
-        policy,
-        "only the manual decision changes session policy",
-      );
-      assert.equal(await readFile(configPath, "utf8"), configBytes);
-    });
+        const result = await pi.bash(dinnerCommand);
+        bashOutput(result, 1);
+        if (scenario === "storage-failure") assert.deepEqual(result.usage, permissionUsage);
+        assert.equal(classifier.calls.length, 1);
+        assert.equal(manualPrompts, 1);
+        assert.equal(pi.permissionCount(), 1);
+        assert.equal(boundary.wrappers.length, 1, "manual adapt never replays the side effect");
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        assert.deepEqual(
+          SandboxManager.getConfig(),
+          policy,
+          "only the manual decision changes session policy",
+        );
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+        const reviews = sandboxReviewEvents(pi);
+        assert.equal(reviews.length, 1);
+        assert.equal(reviews[0]!.outcome, outcome);
+        assert.equal(reviews[0]!.attempted, true);
+        assert.equal(
+          reviews[0]!.classifier,
+          `${permissionClassifier.provider}/${permissionClassifier.id}`,
+        );
+        const doctor = await pi.command("doctor");
+        assert.ok(doctor.includes(`[filesystem] [review] ${outcome}`));
+        assert.match(doctor, /\[filesystem\] \[allowed\] explicit-deny-write/);
+        assert.ok(!doctor.includes(providerSecret));
+        assert.ok(!JSON.stringify(reviews).includes(providerSecret));
+        if (scenario === "storage-failure") {
+          assert.match(doctor, /Session persistence failed\./);
+          assert.ok(!doctor.includes(storageSecret));
+          assert.ok(retainedDiagnostic);
+          assert.equal(
+            "persistenceFailed" in permissionRecord(retainedDiagnostic),
+            false,
+            "the object retained by SessionManager must not acquire the memory-only flag",
+          );
+          assert.deepEqual(retainedDiagnostic, reviews[0]);
+          assert.ok(!JSON.stringify(reviews).includes(storageSecret));
+        }
+
+        // Restoration and retention share the same path for all review outcomes.
+        if (scenario !== "storage-failure") return;
+        const oldBranch = pi.session.sessionManager.getLeafId()!;
+        for (const invalid of [
+          { ...reviews[0], command: providerSecret },
+          { ...reviews[0], outcome: "raw-provider-text" },
+          { ...reviews[0], timestamp: -1 },
+          { ...reviews[0], attempted: "yes" },
+          { ...reviews[0], label: providerSecret },
+        ])
+          pi.session.sessionManager.appendCustomEntry("sandbox-review", invalid);
+        const malformedBranch = pi.session.sessionManager.getLeafId()!;
+        await pi.session.reload();
+        const restored = await pi.command("doctor");
+        assert.ok(restored.includes(`[filesystem] [review] ${outcome}`));
+        assert.doesNotMatch(
+          restored,
+          /Session persistence failed\./,
+          "memory-only persistence failure markers are not restored",
+        );
+        assert.doesNotMatch(
+          restored,
+          /\[allowed\]/,
+          "live permission decisions are not persisted as reviews",
+        );
+        assert.ok(!restored.includes(providerSecret));
+        assert.equal(
+          (restored.match(/\[review\]/g) ?? []).length,
+          1,
+          "invalid persisted data is ignored",
+        );
+
+        const beforeReview = pi.session.sessionManager
+          .getBranch()
+          .find((entry) => entry.type === "message" && entry.message.role === "user")!.parentId!;
+        assert.equal((await pi.session.navigateTree(beforeReview)).cancelled, false);
+        assert.doesNotMatch(
+          await pi.command("doctor"),
+          /\[review\]/,
+          "abandoned branch reviews disappear",
+        );
+        assert.equal((await pi.session.navigateTree(oldBranch)).cancelled, false);
+        assert.ok((await pi.command("doctor")).includes(`[filesystem] [review] ${outcome}`));
+        assert.equal((await pi.session.navigateTree(malformedBranch)).cancelled, false);
+
+        // A fresh runtime reconstructs the same selected branch from serialized Pi entries.
+        const manager = pi.session.sessionManager;
+        const entries = JSON.parse(JSON.stringify([manager.getHeader(), ...manager.getEntries()]));
+        await pi.dispose();
+        pi = await openSandbox(cwd, classifierExtensions, failures, {
+          sessionManager: SessionManager.inMemory(cwd, undefined, entries),
+        });
+        const resumed = await pi.command("doctor");
+        assert.equal((resumed.match(/\[review\]/g) ?? []).length, 1);
+        assert.ok(resumed.includes(`[filesystem] [review] ${outcome}`));
+        assert.ok(!resumed.includes(providerSecret));
+        const now = Date.now();
+        for (let index = 0; index < 55; index++) {
+          pi.session.sessionManager.appendCustomEntry("sandbox-review", {
+            type: "review",
+            timestamp: now + index,
+            kind: "network",
+            outcome: "manual",
+            attempted: false,
+            toolCallId: index === 54 ? "restored\u001binvalid" : `restored-kraken-${index}`,
+          });
+        }
+        await pi.session.reload();
+        const bounded = await pi.command("doctor");
+        assert.equal((bounded.match(/\[review\]/g) ?? []).length, 50);
+        assert.ok(!bounded.includes("Tool call: restored-kraken-4\n"));
+        assert.ok(bounded.includes("Tool call: restored-kraken-5\n"));
+        assert.ok(
+          !bounded.includes("restored\u001binvalid"),
+          "invalid persisted optional IDs are omitted without losing diagnostics",
+        );
+      });
+    }
 
     for (const kind of ["filesystem", "network"] as const) {
       const endings =
@@ -1485,6 +1819,26 @@ describe("sandbox", { concurrency: false }, () => {
               manualPrompts,
               ending === "policy change" && kind === "filesystem" ? 1 : 0,
             );
+            const reviews = sandboxReviewEvents(pi);
+            if (ending === "session tree") {
+              assert.deepEqual(reviews, [], "cancelled old-branch reviews must never be appended");
+              assert.doesNotMatch(await pi.command("doctor"), /\[review\]/);
+            } else {
+              assert.equal(reviews.length, 1);
+              assert.equal(
+                reviews[0]!.outcome,
+                ending === "policy change" ? "stale-policy" : "cancelled",
+              );
+              assert.equal(reviews[0]!.attempted, true);
+              const doctor = await pi.command("doctor");
+              assert.ok(doctor.includes(`[review] ${reviews[0]!.outcome}`));
+              assert.doesNotMatch(
+                doctor,
+                /\[allowed\]/,
+                "late approval is not an applied permission",
+              );
+              if (ending === "policy change") assert.equal(reviews[0]!.label, "approve");
+            }
             if (kind === "network") assert.equal(approved, false);
             else {
               assert.equal(
@@ -1578,21 +1932,38 @@ describe("sandbox", { concurrency: false }, () => {
       assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
     });
 
-    for (const ending of ["abort", "preparation failure"] as const) {
+    for (const ending of [
+      "abort",
+      "preparation failure",
+      "stale before retry preparation",
+      "stale while wrapping retry",
+    ] as const) {
       test(`${ending} after a nested classification preserves billed usage and the Bash error`, async () => {
         const child = new AbortController();
-        const command = "printf 'must not spawn\\n' >> effects.txt";
+        const stale = ending.startsWith("stale");
+        const command = stale ? dinnerCommand : "printf 'must not spawn\\n' >> effects.txt";
         const nextCommand = "printf 'next squid\\n'";
-        boundary.attempts(command, [{ script: command }]);
+        boundary.attempts(command, stale ? permissionAttempts(target) : [{ script: command }]);
         boundary.attempts(nextCommand, [{ script: nextCommand }]);
-        const cleanup = mock.method(SandboxManager, "cleanupAfterCommand");
+        let policyChange: Promise<string> | undefined;
+        const cleanupAfterCommand = SandboxManager.cleanupAfterCommand;
+        const cleanup = mock.method(SandboxManager, "cleanupAfterCommand", () => {
+          cleanupAfterCommand();
+          if (ending === "stale before retry preparation" && !policyChange) {
+            // Public extension commands run immediately. Change policy at the first attempt's cleanup boundary.
+            policyChange = pi!.command("network deny add low-tide.invalid");
+          }
+        });
         const wrap = SandboxManager.wrapWithSandbox;
         mock.method(SandboxManager, "wrapWithSandbox", async (...args: Parameters<typeof wrap>) => {
           const script = await wrap(...args);
-          if (args[0] === command) {
+          if (args[0] === command && !stale) {
             assert.equal(await boundary.askNetwork({ host: "kraken.invalid", port: 443 }), true);
             if (ending === "abort") child.abort();
             else throw new Error("fixture preparation failed after classification");
+          } else if (ending === "stale while wrapping retry" && boundary.wrappers.length === 2) {
+            policyChange = pi!.command("network deny add low-tide.invalid");
+            await policyChange;
           }
           return script;
         });
@@ -1636,22 +2007,36 @@ describe("sandbox", { concurrency: false }, () => {
         const execution = pi.session.prompt(permissionIntent);
         try {
           await execution;
+          await policyChange;
           assert.ok(outcome);
           assert.equal(outcome.isError, true);
           const errorText = outcome.result.content
             .map((part) => (part.type === "text" ? part.text : ""))
             .join("");
-          assert.match(
-            errorText,
-            ending === "abort"
-              ? /Command aborted/
-              : /fixture preparation failed after classification/,
-          );
+          if (stale) {
+            assert.equal(
+              errorText,
+              ending === "stale before retry preparation"
+                ? "Sandbox policy changed after classification; the temporary retry was cancelled."
+                : "Sandbox policy changed while preparing the classifier-approved retry.",
+            );
+          } else {
+            assert.match(
+              errorText,
+              ending === "abort"
+                ? /Command aborted/
+                : /fixture preparation failed after classification/,
+            );
+          }
           assert.deepEqual(outcome.result.usage, permissionUsage);
           assert.equal(
             cleanup.mock.callCount(),
-            ending === "abort" ? 2 : 1,
-            "only successful wrap handoffs receive per-command cleanup, including the sibling",
+            ending === "abort" || ending === "stale before retry preparation"
+              ? 2
+              : ending === "stale while wrapping retry"
+                ? 3
+                : 1,
+            "only successful wrap handoffs receive per-command cleanup, including stale preparation and the sibling",
           );
           assert.ok(nextOutcome);
           assert.equal(nextOutcome.isError, false);
@@ -1672,12 +2057,46 @@ describe("sandbox", { concurrency: false }, () => {
           );
           assert.equal(classifier.calls.length, 1);
           assert.ok(!boundary.spawnedScripts.includes(command));
-          await assert.rejects(readFile(path.join(cwd, "effects.txt")), { code: "ENOENT" });
-          await assertPermissionState(snapshot);
+          if (stale) {
+            assert.ok(policyChange, "policy must change at the selected preparation boundary");
+            assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+            assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+            const expected = structuredClone(snapshot.policy);
+            expected.network.deniedDomains.push("low-tide.invalid");
+            assert.deepEqual(SandboxManager.getConfig(), expected);
+            const nextPolicy = structuredClone(snapshot.invocationPolicy);
+            nextPolicy.network.deniedDomains.push("low-tide.invalid");
+            assert.deepEqual(
+              boundary.wrappers.at(-1)?.config,
+              nextPolicy,
+              "the sibling cannot inherit the stale temporary exception",
+            );
+            assert.equal(await readFile(configPath, "utf8"), configBytes);
+            const reviews = sandboxReviewEvents(pi);
+            assert.deepEqual(
+              reviews.map(({ outcome, attempted, label }) => ({ outcome, attempted, label })),
+              [
+                { outcome: "approved", attempted: true, label: "approve" },
+                { outcome: "stale-policy", attempted: true, label: "approve" },
+              ],
+            );
+            assert.equal(reviews[0]!.toolCallId, "billed-parent/1");
+            assert.equal(
+              reviews[1]!.toolCallId,
+              reviews[0]!.toolCallId,
+              "preparation rejection remains attributed to the reviewed call",
+            );
+            const doctor = await pi.command("doctor");
+            assert.match(doctor, /\[filesystem\] \[review\] stale-policy/);
+            assert.match(doctor, /\[filesystem\] \[review\] approved/);
+          } else {
+            await assert.rejects(readFile(path.join(cwd, "effects.txt")), { code: "ENOENT" });
+            await assertPermissionState(snapshot);
+          }
           assert.equal(pi.session.getLastAssistantText(), "Parent kept swimming.");
         } finally {
           child.abort();
-          await execution;
+          await Promise.all([execution, policyChange]);
         }
       });
     }
@@ -1766,6 +2185,12 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(classifier.calls.length, 1);
         assert.equal(pi.permissionCount(), 0);
         assert.equal(boundary.wrappers.length, 1, "late approval cannot start a retry");
+        assert.deepEqual(
+          sandboxReviewEvents(pi),
+          [],
+          "tree invalidation cannot persist a late diagnostic on either branch",
+        );
+        assert.doesNotMatch(await pi.command("doctor"), /\[review\]/);
         assert.deepEqual(boundary.wrappers[0]?.config, snapshot.invocationPolicy);
         await assertNormalFallback(snapshot);
         assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
@@ -1824,6 +2249,25 @@ describe("sandbox", { concurrency: false }, () => {
           const classifications = scheduling === "sequential" ? 2 : 1;
           assert.equal(classifier.calls.length, classifications);
           assert.equal(manualPrompts, 1);
+          const reviews = sandboxReviewEvents(pi);
+          assert.deepEqual(
+            reviews.map(({ outcome, attempted }) => ({ outcome, attempted })),
+            scheduling === "sequential"
+              ? [
+                  { outcome: "approved", attempted: true },
+                  { outcome: "escalated", attempted: true },
+                ]
+              : [
+                  { outcome: "busy", attempted: false },
+                  { outcome: "approved", attempted: true },
+                ],
+          );
+          const doctor = await pi.command("doctor");
+          assert.ok(
+            doctor.includes(
+              `[network] [review] ${scheduling === "sequential" ? "escalated" : "busy"}`,
+            ),
+          );
           for (const call of classifier.calls) {
             const request = permissionRequest(call.context);
             assert.equal(request.kind, "network");
@@ -1839,7 +2283,8 @@ describe("sandbox", { concurrency: false }, () => {
             assert.equal(permission.host, host);
             assert.equal(permission.port, 443);
             assert.match(String(permission.scope), /pending.*connection/i);
-            assert.match(String(permission.commandAttribution), /unknown/i);
+            assert.match(String(permission.commandAttribution), /unknown.*unverified context/i);
+            assert.deepEqual(permission.activeCommand, { text: command, cwd });
           }
           assert.deepEqual(result.usage, {
             ...permissionUsage,
@@ -1853,6 +2298,121 @@ describe("sandbox", { concurrency: false }, () => {
         } finally {
           release.resolve();
           await execution;
+        }
+      });
+    }
+
+    for (const change of ["user intent", "child cancellation"] as const) {
+      test(`parent-mediated review: ${change} retains root authority, freshness, and billed usage`, async () => {
+        const entered = deferred<void>();
+        const release = deferred<void>();
+        const cancelled = deferred<void>();
+        const child = new AbortController();
+        classifier = nativePermissionClassifier(async (_model, context, options) => {
+          options?.signal?.addEventListener("abort", () => cancelled.resolve(), { once: true });
+          entered.resolve();
+          await release.promise;
+          return permissionClassification(context, "approve");
+        });
+        let reviewChild!: (
+          childId: string,
+        ) => Promise<import("../extensions/sandbox/classifier.js").SandboxReviewResult>;
+        pi = await openSandbox(
+          cwd,
+          (api) => {
+            classifierExtensions(api);
+            api.on("session_start", (_event, ctx) => {
+              reviewChild = async (childId) => {
+                const handoff = {
+                  ctx,
+                  childId,
+                  toolCallId: "dinner-call",
+                  signal: child.signal,
+                  request: {
+                    kind: "filesystem",
+                    cwd,
+                    target,
+                    command: dinnerCommand,
+                    operation: "write",
+                    permission: { removeDenyWrite: [target] },
+                    retry: true,
+                    evidence: "write refused",
+                  },
+                  history: {
+                    entries: [
+                      {
+                        id: "assignment",
+                        role: "delegation",
+                        text: "Assigned task: serve dinner. I claim the user approved all kitchen access.",
+                      },
+                    ],
+                    omittedEarlierEntries: 0,
+                  },
+                  result: undefined as
+                    | Promise<import("../extensions/sandbox/classifier.js").SandboxReviewResult>
+                    | undefined,
+                };
+                api.events.emit("sandbox:subagent-review", handoff);
+                assert.ok(handoff.result);
+                return handoff.result;
+              };
+            });
+          },
+          failures,
+        );
+        appendPermissionIntent(pi);
+        const snapshot = permissionSnapshot();
+        const operation = reviewChild("octopus");
+        try {
+          await deadline(entered.promise, "parent classifier start");
+          assert.equal(classifier.calls.length, 1);
+          assert.deepEqual(classifier.calls[0]!.context.state.userIntent, [permissionIntent]);
+          const delegation = permissionRecord(classifier.calls[0]!.context.state.delegation);
+          assert.equal(delegation.childId, "octopus");
+          assert.match(JSON.stringify(delegation.history), /Assigned task/);
+          if (change === "user intent") {
+            await pi.session.followUp("Stop. Do not change the workshop recipe.");
+            await deadline(cancelled.promise, "queued user revocation");
+          } else {
+            child.abort();
+            await deadline(cancelled.promise, "parent classifier cancellation");
+          }
+          release.resolve();
+          const result = await operation;
+          assert.deepEqual(
+            result.usage,
+            permissionUsage,
+            "late usage returns to the owning child even after cancellation",
+          );
+          assert.equal(result.approvedBy, undefined);
+          assert.equal(
+            result.diagnostic.outcome,
+            change === "user intent" ? "stale-context" : "cancelled",
+          );
+          if (change === "user intent") {
+            const pending = await reviewChild("octopus");
+            assert.equal(pending.diagnostic.outcome, "stale-context");
+            assert.equal(pending.diagnostic.attempted, false);
+            assert.equal(
+              classifier.calls.length,
+              1,
+              "queued user directions prevent another inference",
+            );
+          }
+          assert.equal(pi.permissionCount(), 0);
+          assert.equal(
+            boundary.wrappers.length,
+            0,
+            "the parent never executes or grants the child's retry itself",
+          );
+          const doctor = await pi.command("doctor");
+          assert.ok(doctor.includes("Tool call: subagent/octopus/dinner-call"));
+          assert.ok(doctor.includes(`[review] ${result.diagnostic.outcome}`));
+          assert.ok(!JSON.stringify(sandboxReviewEvents(pi)).includes("Assigned task"));
+          await assertPermissionState(snapshot);
+        } finally {
+          release.resolve();
+          await operation;
         }
       });
     }
@@ -1891,6 +2451,20 @@ describe("sandbox", { concurrency: false }, () => {
           bashOutput(await pi.bash(dinnerCommand), 1);
           assert.equal(classifier.calls.length, 0);
           assert.equal(manualPrompts, mode === "noninteractive policy" || mode === "print" ? 0 : 1);
+          const reviews = sandboxReviewEvents(pi);
+          assert.equal(reviews.length, 1);
+          assert.equal(reviews[0]!.attempted, false);
+          assert.equal(
+            reviews[0]!.outcome,
+            mode === "disabled classifier"
+              ? "manual"
+              : mode === "noninteractive policy" || mode === "print"
+                ? "non-interactive"
+                : mode === "missing user intent"
+                  ? "incomplete-context"
+                  : "ineligible",
+          );
+          assert.equal(reviews[0]!.label, undefined, "a skipped review has no model label");
           assert.equal(boundary.wrappers.length, 1);
           await assertPermissionState(snapshot);
           assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
@@ -1955,6 +2529,18 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(classifier.calls.length, process.platform === "darwin" ? 1 : 0);
         assert.deepEqual(result.usage, process.platform === "darwin" ? permissionUsage : undefined);
         assert.equal(manualPrompts, automatic ? Number(retryFails) : 1);
+        const reviews = sandboxReviewEvents(pi);
+        assert.deepEqual(
+          reviews.map(({ outcome, attempted }) => ({ outcome, attempted })),
+          process.platform !== "darwin"
+            ? [{ outcome: "unsupported-permission", attempted: false }]
+            : outcome === "refusal"
+              ? [{ outcome: "escalated", attempted: true }]
+              : [
+                  { outcome: "approved", attempted: true },
+                  ...(retryFails ? [{ outcome: "retry-unavailable", attempted: false }] : []),
+                ],
+        );
         assert.equal(pi.permissionCount(), manualPrompts);
         assert.equal(boundary.wrappers.length, automatic ? 2 : 1, "at most one automatic retry");
         assert.equal(
@@ -2163,7 +2749,7 @@ exit 73`,
         else assert.doesNotMatch(output, /\[sandbox\].*initializ/i);
         assert.doesNotMatch(
           output,
-          /Sandbox blocked filesystem|temporarily allow for this session|already been granted/i,
+          /Sandbox blocked (?:read|write|access)|temporarily allow for this session|already been granted/i,
         );
         assert.equal(pi.permissionCount(), 0);
         assert.deepEqual(SandboxManager.getConfig(), policy);
@@ -2407,7 +2993,10 @@ exit 73`,
       const violation = `bash(42) deny(1) file-write-data ${target}`;
       boundary.attempts(probe, [{ script: probe, violation }]);
       pi = await openSandbox(cwd, sandbox, failures);
-      assert.equal(bashOutput(await pi.bash(probe)), "sandboxed squid\n");
+      assert.equal(
+        bashOutput(await pi.bash(probe)),
+        `sandboxed squid\n[sandbox] Command exited 0 with filesystem diagnostics: ${target}`,
+      );
       const sessionId = pi.session.sessionId;
       await pi.dispose();
       const records = (
@@ -2809,6 +3398,7 @@ async function openSandbox(
     ui?: Partial<ExtensionUIContext>;
     tools?: string[];
     mode?: "tui" | "rpc" | "print";
+    sessionManager?: SessionManager;
   } = {},
 ) {
   let permissionCount = 0;
@@ -2837,6 +3427,7 @@ async function openSandbox(
     ...resources,
     model: fixtureModel,
     tools: options.tools ?? ["bash"],
+    sessionManager: options.sessionManager ?? resources.sessionManager,
   });
   const statuses = new Map<string, string>();
   const notifications: string[] = [];
@@ -2888,10 +3479,14 @@ async function openSandbox(
         await session.prompt(`/sandbox ${args}`);
         return notifications.slice(before).join("\n");
       },
-      async bash(command: string, options: { signal?: AbortSignal } = {}) {
+      async bash(command: string, options: { signal?: AbortSignal; toolCallId?: string } = {}) {
         const tool = session.agent.state.tools.find((tool) => tool.name === "bash");
         assert.ok(tool);
-        return tool.execute("fixture-bash", { command, timeout: 5 }, options.signal);
+        return tool.execute(
+          options.toolCallId ?? "fixture-bash",
+          { command, timeout: 5 },
+          options.signal,
+        );
       },
       dispose,
     };
@@ -2899,6 +3494,30 @@ async function openSandbox(
     await dispose();
     throw error;
   }
+}
+
+/** Observe the exact safe custom-entry contract, independently of live permission-decision events. */
+function sandboxReviewEvents(pi: Awaited<ReturnType<typeof openSandbox>>) {
+  return pi.session.sessionManager.getEntries().flatMap((entry) => {
+    if (entry.type !== "custom" || entry.customType !== "sandbox-review") return [];
+    const data = permissionRecord(entry.data);
+    assert.deepEqual(
+      Object.keys(data).sort(),
+      [
+        "attempted",
+        "kind",
+        "outcome",
+        "timestamp",
+        "type",
+        ...(data.toolCallId === undefined ? [] : ["toolCallId"]),
+        ...(data.classifier === undefined ? [] : ["classifier"]),
+        ...(data.label === undefined ? [] : ["label"]),
+      ].sort(),
+    );
+    assert.equal(data.type, "review");
+    assert.ok(Number.isSafeInteger(data.timestamp));
+    return [data as unknown as import("../extensions/sandbox/runtime.js").SandboxReviewEvent];
+  });
 }
 
 /** Assert native Bash's returned status without converting error results into rejections. */
@@ -2988,14 +3607,16 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-type Attempt = { script: string; violation?: string };
+type Attempt = { script: string; violation?: string | string[] };
 
 /** Script only OS setup/wrapping/violation input. SRT policy storage and annotation, Tau orchestration,
  * Pi tools, Git discovery, and bash processes stay real. This does NOT prove OS confinement. */
 function sandboxBoundary(cwd: string, failures: unknown[]) {
   const scripts = new Set<string>();
   const attempts = new Map<string, Attempt[]>();
-  const violations = new Map<string, string>();
+  const violations = new Map<string, string[]>();
+  const commandIds = new Map<string, string>();
+  const outputListeners = new Map<string, () => void>();
   const closeListeners = new Map<string, () => void>();
   const spawnedScripts: string[] = [];
   const wrappers: {
@@ -3041,25 +3662,23 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
         config: structuredClone(_config),
         sessionPolicy: structuredClone(SandboxManager.getConfig()),
       });
-      if (attempt.violation) violations.set(attribution.commandId, attempt.violation);
+      commandIds.set(attempt.script, attribution.commandId);
+      if (attempt.violation)
+        violations.set(
+          attribution.commandId,
+          typeof attempt.violation === "string" ? [attempt.violation] : attempt.violation,
+        );
       return attempt.script;
     },
   );
-  // Deliver the OS log after the child closes, before SRT annotates its output.
-  // Pre-seeding the store would interrupt bash before its first side effect on macOS.
+  // Deliver scripted telemetry on stderr while the child can still run. Attempts without
+  // stderr retain a post-close fallback. This does not exercise the native log monitor.
   const annotate = SandboxManager.annotateStderrWithSandboxFailures;
   mock.method(
     SandboxManager,
     "annotateStderrWithSandboxFailures",
     (commandId: string, output: string) => {
-      const line = violations.get(commandId);
-      if (line)
-        SandboxManager.getSandboxViolationStore().addViolation({
-          line,
-          encodedCommand: Buffer.from(commandId.slice(0, 100)).toString("base64"),
-          timestamp: new Date(),
-        });
-      violations.delete(commandId);
+      deliverViolations(commandId);
       return annotate(commandId, output);
     },
   );
@@ -3075,7 +3694,13 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       return reject(...args);
     const child = spawn(...args);
     spawnedScripts.push(args[1][1]);
-    const onClose = closeListeners.get(args[1][1]);
+    const script = args[1][1];
+    child.stderr?.once("data", () => {
+      const commandId = commandIds.get(script);
+      if (commandId) deliverViolations(commandId);
+      outputListeners.get(script)?.();
+    });
+    const onClose = closeListeners.get(script);
     if (onClose) child.once("close", onClose);
     return child;
   });
@@ -3100,6 +3725,9 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       assert.ok(askNetwork, "the runtime must register its network permission callback");
       return askNetwork(params);
     },
+    onCommandOutput(script: string, listener: () => void) {
+      outputListeners.set(script, listener);
+    },
     onCommandClose(script: string, listener: () => void) {
       closeListeners.set(script, listener);
     },
@@ -3111,6 +3739,24 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       for (const { script } of replies) scripts.add(script);
     },
   });
+
+  function deliverViolations(commandId: string): void {
+    for (const line of violations.get(commandId) ?? []) {
+      SandboxManager.getSandboxViolationStore().addViolation({
+        line,
+        encodedCommand: Buffer.from(commandId.slice(0, 100)).toString("base64"),
+        timestamp: new Date(),
+      });
+    }
+    violations.delete(commandId);
+  }
+}
+
+/** Quote a fixture-only Node program without shell expansion. */
+function nodeCommand(script: string): string {
+  return [process.execPath, "-e", script]
+    .map((value) => `'${value.replaceAll("'", "'\\''")}'`)
+    .join(" ");
 }
 
 /** Substitute only auth and inference. Registration, catalog lookup, request dispatch and tools remain Pi's. */

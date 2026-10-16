@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -15,6 +15,7 @@ const PI_PACKAGES = [
   "@earendil-works/pi-tui",
 ];
 const TAU_PACKAGES = ["tau-coding-agent", "tau-all-agent"];
+const runtimeProbePath = fileURLToPath(new URL("./runtime.mjs", import.meta.url));
 const SOURCE_ROOTS = [".agents", "extensions", "skills", "themes", "packages", "scripts"];
 const ROOT_SOURCE_FILES = [
   "package.json",
@@ -417,19 +418,7 @@ async function prepareScratchCopy(output, repo, targetVersion) {
   let compileCode = null;
   let packageValidationCode = null;
   if (install.code === 0) {
-    let cliHelp;
-    try {
-      const cliPath = await resolvePiCliPath(scratchDir);
-      cliHelp = await runCaptured(process.execPath, [cliPath, "--help"], {
-        cwd: scratchDir,
-      });
-    } catch (error) {
-      cliHelp = {
-        code: 1,
-        stdout: "",
-        stderr: error instanceof Error ? error.stack || error.message : String(error),
-      };
-    }
+    const cliHelp = await runRuntimeProbe("help", scratchDir);
     cliHelpCode = cliHelp.code;
     await writeCommandLog(path.join(output, "target-cli-help.log"), cliHelp);
 
@@ -440,8 +429,8 @@ async function prepareScratchCopy(output, repo, targetVersion) {
     compileCode = compile.code;
     await writeCommandLog(path.join(output, "scratch-compile.log"), compile);
 
-    progress("Validating generated Tau packages");
-    const packageValidation = await validateGeneratedPackages(output, scratchDir);
+    progress("Validating source packages and independently installed Tau tarballs");
+    const packageValidation = await validatePackages(output, scratchDir);
     packageValidationCode = packageValidation.code;
     await writeCommandLog(path.join(output, "package-validation.log"), packageValidation);
   } else {
@@ -460,22 +449,13 @@ async function prepareScratchCopy(output, repo, targetVersion) {
   };
 }
 
-async function resolvePiCliPath(root) {
-  const packageDir = path.join(root, "node_modules", "@earendil-works", "pi-coding-agent");
-  const manifest = await readJson(path.join(packageDir, "package.json"));
-  const binPath = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.pi;
-  if (typeof binPath !== "string" || !binPath.trim()) {
-    throw new Error("Target Pi package does not declare bin.pi");
-  }
-
-  const cliPath = path.resolve(packageDir, binPath);
-  if (!isInside(cliPath, packageDir) || !(await isFile(cliPath))) {
-    throw new Error(`Target Pi package declares an invalid bin.pi path: ${binPath}`);
-  }
-  return cliPath;
+async function runRuntimeProbe(mode, targetRoot, packageDir) {
+  const args = [runtimeProbePath, mode, "--target-root", targetRoot];
+  if (packageDir) args.push("--package-dir", packageDir);
+  return runCaptured(process.execPath, args);
 }
 
-async function validateGeneratedPackages(output, scratchDir) {
+async function validatePackages(output, scratchDir) {
   const stdout = [];
   const stderr = [];
   const validationDir = path.join(output, "package-validation");
@@ -495,11 +475,23 @@ async function validateGeneratedPackages(output, scratchDir) {
       return { code: build.code, stdout: `${stdout.join("\n")}\n`, stderr: stderr.join("\n\n") };
     }
 
-    const cliPath = await resolvePiCliPath(scratchDir);
-    const sdkPath = path.join(path.dirname(cliPath), "index.js");
-    const { DefaultResourceLoader, SettingsManager } = await import(pathToFileURL(sdkPath).href);
-
     for (const packageName of TAU_PACKAGES) {
+      const sourceDir = path.join(scratchDir, "packages", packageName);
+      for (const mode of ["resources", "smoke"]) {
+        const result = await runRuntimeProbe(mode, scratchDir, sourceDir);
+        recordCommand(
+          `${mode === "resources" ? "validate" : "CLI smoke"} source ${packageName}`,
+          result,
+        );
+        if (result.code !== 0) {
+          return {
+            code: result.code,
+            stdout: `${stdout.join("\n")}\n`,
+            stderr: stderr.join("\n\n"),
+          };
+        }
+      }
+
       const generatedDir = path.join(scratchDir, "dist", packageName);
       const packed = await runCaptured(
         npmCommand(),
@@ -523,10 +515,7 @@ async function validateGeneratedPackages(output, scratchDir) {
       }
 
       const installDir = path.join(validationDir, "installs", packageName);
-      const projectDir = path.join(installDir, "project");
-      const agentDir = path.join(installDir, "agent");
-      await mkdir(projectDir, { recursive: true });
-      await mkdir(agentDir, { recursive: true });
+      await mkdir(installDir, { recursive: true });
       await writeJson(path.join(installDir, "package.json"), {
         name: `${packageName}-validation`,
         private: true,
@@ -555,28 +544,19 @@ async function validateGeneratedPackages(output, scratchDir) {
       }
 
       const packageDir = path.join(installDir, "node_modules", packageName);
-      const manifest = await readJson(path.join(packageDir, "package.json"));
-      await writeJson(path.join(agentDir, "settings.json"), { packages: [packageDir] });
-
-      const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-      const previousOffline = process.env.PI_OFFLINE;
-      process.env.PI_CODING_AGENT_DIR = agentDir;
-      process.env.PI_OFFLINE = "1";
-      try {
-        const settingsManager = SettingsManager.create(projectDir, agentDir);
-        const loader = new DefaultResourceLoader({
-          cwd: projectDir,
-          agentDir,
-          settingsManager,
-          noContextFiles: true,
-        });
-        await loader.reload({ resolveProjectTrust: async () => true });
-        assertPackageResources(packageName, packageDir, manifest, loader, stdout);
-      } finally {
-        if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-        else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-        if (previousOffline === undefined) delete process.env.PI_OFFLINE;
-        else process.env.PI_OFFLINE = previousOffline;
+      for (const mode of ["resources", "smoke"]) {
+        const result = await runRuntimeProbe(mode, scratchDir, packageDir);
+        recordCommand(
+          `${mode === "resources" ? "validate" : "CLI smoke"} tarball ${packageName}`,
+          result,
+        );
+        if (result.code !== 0) {
+          return {
+            code: result.code,
+            stdout: `${stdout.join("\n")}\n`,
+            stderr: stderr.join("\n\n"),
+          };
+        }
       }
     }
 
@@ -584,57 +564,6 @@ async function validateGeneratedPackages(output, scratchDir) {
   } catch (error) {
     stderr.push(error instanceof Error ? error.stack || error.message : String(error));
     return { code: 1, stdout: `${stdout.join("\n")}\n`, stderr: stderr.join("\n\n") };
-  }
-}
-
-function assertPackageResources(packageName, packageDir, manifest, loader, output) {
-  const extensions = loader.getExtensions();
-  const skills = loader.getSkills();
-  const prompts = loader.getPrompts();
-  const themes = loader.getThemes();
-  const belongsToPackage = (sourceInfo) =>
-    sourceInfo?.source && path.resolve(sourceInfo.source) === path.resolve(packageDir);
-
-  const loadedExtensions = extensions.extensions.filter((extension) =>
-    belongsToPackage(extension.sourceInfo),
-  );
-  const loadedSkills = skills.skills.filter((skill) => belongsToPackage(skill.sourceInfo));
-  const loadedPrompts = prompts.prompts.filter((prompt) => belongsToPackage(prompt.sourceInfo));
-  const loadedThemes = themes.themes.filter((theme) => belongsToPackage(theme.sourceInfo));
-  const diagnostics = [
-    ...extensions.errors.map(({ path: resourcePath, error }) => ({
-      type: "error",
-      message: `${resourcePath}: ${error}`,
-    })),
-    ...skills.diagnostics,
-    ...prompts.diagnostics,
-    ...themes.diagnostics,
-  ];
-
-  const expected = {
-    extensions: manifest.pi?.extensions?.length ?? 0,
-    skills: manifest.pi?.skills?.length ?? 0,
-    prompts: manifest.pi?.prompts?.length ?? 0,
-    themes: manifest.pi?.themes?.length ?? 0,
-  };
-  const actual = {
-    extensions: loadedExtensions.length,
-    skills: loadedSkills.length,
-    prompts: loadedPrompts.length,
-    themes: loadedThemes.length,
-  };
-
-  output.push(
-    `${packageName}: extensions ${actual.extensions}/${expected.extensions}, skills ${actual.skills}/${expected.skills}, prompts ${actual.prompts}/${expected.prompts}, themes ${actual.themes}/${expected.themes}, diagnostics ${diagnostics.length}`,
-  );
-
-  const mismatches = Object.keys(expected).filter((key) => actual[key] !== expected[key]);
-  if (mismatches.length > 0 || diagnostics.length > 0) {
-    const details = [
-      ...mismatches.map((key) => `${key}: loaded ${actual[key]}, expected ${expected[key]}`),
-      ...diagnostics.map((diagnostic) => `${diagnostic.type}: ${diagnostic.message}`),
-    ];
-    throw new Error(`${packageName} resource validation failed:\n${details.join("\n")}`);
   }
 }
 
@@ -710,7 +639,7 @@ async function writeSummary({
 - Scratch install: ${installStatus}
 - Target CLI help: ${cliHelpStatus}
 - Scratch compile: ${compileStatus}
-- Generated package validation: ${packageValidationStatus}
+- Source and installed tarball validation (resource counts, diagnostics, target theme schema): ${packageValidationStatus}
 
 ## Git status at preparation time
 
@@ -731,7 +660,7 @@ ${git.status || "(clean)"}
 - \`scratch-install.log\`: target dependency installation result
 - \`scratch-compile.log\`: initial compatibility compile result
 - \`target-cli-help.log\`: target Pi CLI flags
-- \`package-validation.log\`: generated tarball installation and resource diagnostics
+- \`package-validation.log\`: source and independently installed tarball resource counts, diagnostics, explicit target theme schema checks with negative controls, and CLI smoke results
 - \`scratch/tau/\`: isolated Tau copy using target dependencies
 
 ## Next step

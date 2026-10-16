@@ -19,7 +19,13 @@ node .agents/skills/upgrade-pi/scripts/prepare.mjs --repo "$PWD"
 node .agents/skills/upgrade-pi/scripts/prepare.mjs --repo "$PWD" --target <version>
 ```
 
-The script creates a temporary workspace with target Pi packages, complete and per-minor changelog slices, Tau source/API inventories and resource units, and a scratch Tau copy using the target dependencies. It records install, target CLI help, compile, and independently installed Tau tarball validation results, including resource and diagnostic counts for both packages.
+The script creates a temporary workspace with target Pi packages, complete and per-minor changelog slices, Tau source/API inventories and resource units, and a scratch Tau copy using the target dependencies. It records installation, target CLI help, compilation, and validation of both source packages and independently installed Tau tarballs.
+
+Runtime validation uses the target's public SDK for exact resource counts and zero diagnostics. It separately validates every declared theme against that target installation's published `schemas/theme.schema.json`, including an unsupported-property negative control. Each help, SDK, and CLI smoke probe starts with a fresh HOME, XDG paths, agent directory, and credential-free allowlisted environment before Pi imports. Help disables unrelated resource discovery. Model refreshes and telemetry are disabled. npm downloads, installation, and builds are separate work and retain their normal network/configuration access.
+
+This is configuration isolation, not a security sandbox. The caller's Node environment and executable search path remain trusted bootstrap inputs.
+
+`--list-models` is only a CLI smoke check. It exits before resource diagnostics and cannot establish theme or resource validity.
 
 Start with `summary.md`. Read the changelog slices, inventories, compile diagnostics, and package validation log before delegating. A failed scratch compile is audit evidence. Keep its complete diagnostics.
 
@@ -78,24 +84,38 @@ Search for removed or deprecated APIs from intervening releases. Extend existing
 
 Compare Tool Display Mode's background indicator with Pi's native Working presentation, including animation, colors, narrow borders, and lifecycle priority. Shared `Loader` and `CustomEditor` behavior carries through upstream changes, but the border adapter must follow any native presentation changes.
 
-Confirm flags against `target-cli-help.log`. In addition to validating both generated tarballs, load both source packages with the local target CLI and an isolated agent directory:
+Confirm flags against `target-cli-help.log`. Revalidate the final source and rebuilt tarballs, not only the initial scratch copy. The root dependencies must now be the exact target version. Run the skill-local probe CLI, which creates a separate disposable runtime environment for each invocation:
 
 ```bash
 (
-  agent_dir="$(mktemp -d)"
-  trap 'rm -rf "$agent_dir"' EXIT
+  set -e
+  repo="$PWD"
+  probe="$repo/.agents/skills/upgrade-pi/scripts/runtime.mjs"
+  validation_dir="$(mktemp -d)"
+  trap 'rm -rf "$validation_dir"' EXIT
 
-  PI_CODING_AGENT_DIR="$agent_dir" PI_OFFLINE=1 \
-    ./node_modules/.bin/pi \
-    --approve -e ./packages/tau-coding-agent --list-models
+  npm run package
+  for package in tau-coding-agent tau-all-agent; do
+    node "$probe" resources --target-root "$repo" --package-dir "$repo/packages/$package"
+    node "$probe" smoke --target-root "$repo" --package-dir "$repo/packages/$package"
 
-  PI_CODING_AGENT_DIR="$agent_dir" PI_OFFLINE=1 \
-    ./node_modules/.bin/pi \
-    --approve -e ./packages/tau-all-agent --list-models
+    archive="$(cd "$repo/dist/$package" && npm pack --silent --pack-destination "$validation_dir")"
+    install_dir="$validation_dir/$package"
+    mkdir -p "$install_dir"
+    printf '{"private":true}\n' > "$install_dir/package.json"
+    (cd "$install_dir" && npm install --ignore-scripts --legacy-peer-deps \
+      --package-lock=false --no-audit --no-fund "$validation_dir/$archive")
+
+    installed_package="$install_dir/node_modules/$package"
+    node "$probe" resources --target-root "$repo" --package-dir "$installed_package"
+    node "$probe" smoke --target-root "$repo" --package-dir "$installed_package"
+  done
 )
 ```
 
-Package loading does not establish runtime correctness. Report untested behavior and any global Pi version mismatch. Do not update the global installation as part of the repository upgrade.
+The `resources` probe must pass exact manifest resource counts, zero diagnostics, and explicit target-schema theme validation with negative controls for all four package loads. The `smoke` probe runs `--list-models` without a model request. Its exit status is not resource-validation evidence.
+
+These checks do not establish interactive lifecycle correctness or native sandbox enforcement. Report untested behavior and any global Pi version mismatch. Do not update the global installation as part of the repository upgrade.
 
 ## 7. Review and hand off
 

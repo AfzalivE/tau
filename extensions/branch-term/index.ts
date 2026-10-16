@@ -1,7 +1,12 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { SessionManager, highlightCode, type SessionHeader } from "@earendil-works/pi-coding-agent";
+import {
+  copyToClipboard,
+  SessionManager,
+  highlightCode,
+  type SessionHeader,
+} from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 
 const TERMINAL_FLAG = "branch-term";
@@ -113,50 +118,22 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function runClipboardCommand(command: string, args: string[], text: string): boolean {
-  try {
-    const result = spawnSync(command, args, {
-      input: text,
-      stdio: ["pipe", "ignore", "ignore"],
-      timeout: 3000,
-    });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
-}
-
-function copyToClipboard(text: string): boolean {
-  if (process.platform === "darwin") {
-    return runClipboardCommand("pbcopy", [], text);
-  }
-
-  if (process.platform === "win32") {
-    return runClipboardCommand("clip", [], text);
-  }
-
-  if (process.platform === "linux") {
-    return (
-      runClipboardCommand("wl-copy", [], text) ||
-      runClipboardCommand("xclip", ["-selection", "clipboard"], text) ||
-      runClipboardCommand("xsel", ["--clipboard", "--input"], text)
-    );
-  }
-
-  return false;
-}
-
 function formatCommandMessageIntro(intro: string, copiedToClipboard: boolean): string {
   return `${intro}${copiedToClipboard ? " (copied to clipboard)" : ""}:`;
 }
 
-function showCommandMessage(
+async function showCommandMessage(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   intro: string,
   command: string,
-): void {
-  const copiedToClipboard = copyToClipboard(command);
+): Promise<void> {
+  const copiedToClipboard =
+    ctx.mode === "tui" &&
+    (await copyToClipboard(command).then(
+      () => true,
+      () => false,
+    ));
   if (ctx.mode === "print") {
     console.log(formatCommandMessageIntro(intro, copiedToClipboard));
     console.log(command);
@@ -310,7 +287,7 @@ export default function (pi: ExtensionAPI) {
 
       const terminalFlag = getStringFlag(pi, TERMINAL_FLAG);
       if (terminalFlag) {
-        launchTerminal(terminalFlag, forkFile, resumeCommand, ctx);
+        await launchTerminal(terminalFlag, forkFile, resumeCommand, ctx);
         return;
       }
 
@@ -339,7 +316,9 @@ export default function (pi: ExtensionAPI) {
           } else {
             console.error(`tmux failed: ${details}`);
           }
-          showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
+          await joinRecoveryReport(() =>
+            showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand),
+          );
           return;
         }
 
@@ -347,28 +326,31 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
+      await joinRecoveryReport(() =>
+        showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand),
+      );
     },
   });
 
-  function launchTerminal(
+  async function launchTerminal(
     template: string,
     forkFile: string,
     resumeCommand: string,
     ctx: ExtensionCommandContext,
   ) {
-    const reportFailure = (message: string) => {
-      try {
-        if (ctx.hasUI) ctx.ui.notify(`Terminal command failed: ${message}`, "error");
-        else console.error(`Terminal command failed: ${message}`);
-        showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
-      } catch (error) {
-        console.error(
-          `Could not show terminal recovery instructions: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        console.error(`${MANUAL_RESUME_INTRO}:\n${resumeCommand}`);
-      }
-    };
+    const reportFailure = (message: string) =>
+      joinRecoveryReport(async () => {
+        try {
+          if (ctx.hasUI) ctx.ui.notify(`Terminal command failed: ${message}`, "error");
+          else console.error(`Terminal command failed: ${message}`);
+          await showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
+        } catch (error) {
+          console.error(
+            `Could not show terminal recovery instructions: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          console.error(`${MANUAL_RESUME_INTRO}:\n${resumeCommand}`);
+        }
+      });
     try {
       const child = spawn("bash", ["-c", renderTerminalCommand(template)], {
         cwd: ctx.cwd,
@@ -388,11 +370,15 @@ export default function (pi: ExtensionAPI) {
       };
       const onError = (error: Error) => {
         stopObserving();
-        reportFailure(error.message);
+        void reportFailure(error.message).catch(console.error);
       };
       const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
         stopObserving();
-        if (code !== 0) reportFailure(signal ? `terminated by ${signal}` : `exit code ${code}`);
+        if (code !== 0) {
+          void reportFailure(signal ? `terminated by ${signal}` : `exit code ${code}`).catch(
+            console.error,
+          );
+        }
       };
       // A detached, user-owned launcher may still emit an error after Pi stops observing it.
       child.on("error", ignoreDetachedLauncherError);
@@ -401,10 +387,16 @@ export default function (pi: ExtensionAPI) {
       launchObservers.add(stopObserving);
       child.unref();
     } catch (error) {
-      reportFailure(error instanceof Error ? error.message : String(error));
+      await reportFailure(error instanceof Error ? error.message : String(error));
       return;
     }
     if (ctx.hasUI) ctx.ui.notify("Terminal launch requested", "info");
+  }
+
+  function joinRecoveryReport(publish: () => Promise<void>): Promise<void> {
+    const report = publish();
+    const unsubscribe = pi.on("session_shutdown", () => report);
+    return report.finally(unsubscribe);
   }
 
   function releaseLaunchObservers() {

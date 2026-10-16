@@ -16,6 +16,8 @@ import {
   getCurrentTools,
   type AssistantMessage,
   type JsonObject,
+  type ClassifierModel,
+  type ProviderClassifier,
 } from "@earendil-works/pi-ai";
 import {
   SandboxManager,
@@ -59,11 +61,30 @@ import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
 import { openSelector } from "../helpers/dialog.js";
-import { approvalCommand, parentModel, workerModel } from "./provider.js";
+import { approvalCommand, connectionCommand, parentModel, workerModel } from "./provider.js";
 
 const spawn = childProcess.spawn;
 const spawnSync = childProcess.spawnSync;
 type Request = Generation & { child: string; reply: (message: AssistantMessage) => void };
+const reviewModel: ClassifierModel<"icing-classify"> = {
+  type: "classifier",
+  provider: "icing-fixture",
+  api: "icing-classify",
+  id: "review",
+  name: "Icing review",
+  baseUrl: "https://icing.invalid",
+  input: ["text"],
+  contextWindow: 64000,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
+const reviewUsage = {
+  input: 9,
+  output: 2,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 11,
+  cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+};
 type Dialog = {
   title: string;
   choices?: string[];
@@ -82,6 +103,8 @@ describe("subagent", { concurrency: false }, () => {
   let foregroundShell: Awaited<ReturnType<typeof holdShellWork>> | undefined;
   let unavailable: boolean;
   let sandboxed: boolean;
+  let reviewConnection: boolean;
+  let reviewCancellation: ReturnType<typeof mailbox<void>>;
   let holdStartup: boolean;
   let starting: ReturnType<typeof mailbox<void>>;
   let policies: ReturnType<typeof mailbox<SandboxRuntimeConfig>>;
@@ -92,6 +115,9 @@ describe("subagent", { concurrency: false }, () => {
       child: string;
       type: string;
       aborted?: boolean;
+      toolCallId?: string;
+      isError?: boolean;
+      result?: { usage?: unknown };
       messages?: { role: string; stopReason?: string }[];
     }>
   >;
@@ -102,6 +128,8 @@ describe("subagent", { concurrency: false }, () => {
     generations = mailbox<Request>();
     unavailable = false;
     sandboxed = false;
+    reviewConnection = false;
+    reviewCancellation = mailbox<void>();
     holdStartup = false;
     starting = mailbox<void>();
     policies = mailbox<SandboxRuntimeConfig>();
@@ -146,7 +174,7 @@ describe("subagent", { concurrency: false }, () => {
       assert.equal(options.env?.PI_CODING_AGENT_DIR, getAgentDir());
       assert.equal(options.env?.TAU_SUBAGENT_CHILD, "1");
       assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
-      assert.ok(Array.isArray(options.stdio));
+      assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe", "ipc"]);
       const sessionFile = args[args.indexOf("--session") + 1];
       const child = path.basename(path.dirname(sessionFile));
       const proc = spawn(
@@ -169,9 +197,10 @@ describe("subagent", { concurrency: false }, () => {
             ...options.env,
             ...(shell ? { TAU_SUBAGENT_TEST_SHELL: shell.command } : {}),
             ...(sandboxed ? { TAU_SUBAGENT_TEST_SANDBOX: "1" } : {}),
+            ...(reviewConnection ? { TAU_SUBAGENT_TEST_REVIEW: "1" } : {}),
             ...(holdStartup ? { TAU_SUBAGENT_TEST_STARTUP: "1" } : {}),
           },
-          stdio: [...options.stdio, "ipc"],
+          stdio: options.stdio,
         },
       );
       const tracked = { process: proc, closed: Promise.resolve(), hasClosed: false };
@@ -194,16 +223,24 @@ describe("subagent", { concurrency: false }, () => {
           if (!line.trim()) continue;
           const event = JSON.parse(line);
           if (
-            ["auto_retry_start", "agent_end", "agent_settled", "tool_execution_start"].includes(
-              event.type,
-            )
+            [
+              "auto_retry_start",
+              "agent_end",
+              "agent_settled",
+              "tool_execution_start",
+              "tool_execution_end",
+            ].includes(event.type)
           )
             childEvents.push({ ...event, child });
           if (event.type === "extension_error") failures.push(event);
         }
       });
       proc.on("message", (data) => {
-        const request = data as Generation & { type: string; id: number };
+        const request = data as Generation & { type: string; id: number; channel?: string };
+        if (request.channel === "tau:subagent-review") {
+          if (request.type === "cancel") reviewCancellation.push();
+          return;
+        }
         if (request.type === "bash") {
           const { command, cwd } = data as { command: string; cwd: string };
           bashRuns.push({ child, command, cwd });
@@ -1217,24 +1254,127 @@ describe("subagent", { concurrency: false }, () => {
 
   test("child Bash uses the parent's active sandbox policy", async () => {
     sandboxed = true;
-    app = await openParent(cwd, failures, true, true);
-    await app.run({
-      action: "start",
-      goal: "Ice one biscuit",
-      prompt: "Run the icing command with the inherited sandbox state.",
+    reviewConnection = true;
+    let calls = 0;
+    const reviewing = mailbox<void>();
+    let release!: () => void;
+    const lateReview = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    (await generations.next()).reply(call("bash", { command: approvalCommand }));
-    const result = await generations.next();
-    assert.equal(contentText(result.context.messages.at(-1)!.content), "sandboxed biscuit\n");
-    assert.deepEqual(await bashRuns.next(), {
-      child: "alpha",
-      command: "printf 'sandboxed biscuit\\n'",
-      cwd: await fs.realpath(cwd),
-    });
-    assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox");
-    result.reply(assistantMessage("The biscuit stayed sandboxed."));
-    assert.match(await app.reports.next(), /The biscuit stayed sandboxed/);
-    assert.equal(app.editor.getText(), "Unsent cookie recipe");
+    const intent = "Allow one pending connection to icing.invalid to inspect biscuit icing.";
+    app = await openParent(
+      cwd,
+      failures,
+      true,
+      true,
+      true,
+      undefined,
+      async (model, context, options) => {
+        calls++;
+        assert.equal(options?.apiKey, "fixture-only");
+        assert.ok(
+          Array.isArray(context.state.userIntent) && context.state.userIntent.includes(intent),
+        );
+        const delegation = context.state.delegation;
+        assert.ok(
+          delegation &&
+            typeof delegation === "object" &&
+            !Array.isArray(delegation) &&
+            "childId" in delegation,
+        );
+        assert.equal(delegation.childId, "alpha");
+        if (calls === 2) {
+          reviewing.push();
+          await deadline(lateReview, "late classifier result");
+        }
+        const question = Object.keys(context.questions)[0];
+        assert.ok(question);
+        return {
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          answers: {
+            [question]: {
+              type: "choice",
+              choice: "approve",
+              confidence: 0.99,
+              probabilities: { approve: 0.99, escalate: 0.01 },
+            },
+          },
+          stopReason: "stop",
+          timestamp: 0,
+          usage: reviewUsage,
+        };
+      },
+    );
+    await app.session.prompt(intent, { source: "rpc" });
+    const config = await readFile(path.join(cwd, "sandbox-fixture.json"), "utf8");
+    const policy = structuredClone(SandboxManager.getConfig());
+    try {
+      await app.run({
+        action: "start",
+        goal: "Ice one biscuit",
+        prompt: "Run the icing command with the inherited sandbox state.",
+      });
+      (await generations.next()).reply(call("bash", { command: approvalCommand }));
+      const result = await generations.next();
+      assert.equal(contentText(result.context.messages.at(-1)!.content), "sandboxed biscuit\n");
+      assert.deepEqual(await bashRuns.next(), {
+        child: "alpha",
+        command: "printf 'sandboxed biscuit\\n'",
+        cwd: await fs.realpath(cwd),
+      });
+      assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox");
+      result.reply(assistantMessage("The biscuit stayed sandboxed."));
+      assert.match(await app.reports.next(), /The biscuit stayed sandboxed/);
+      assert.equal(app.editor.getText(), "Unsent cookie recipe");
+
+      await app.run({ action: "steer", id: "alpha", message: "Inspect the icing connection." });
+      (await generations.next()).reply(
+        call("bash", { command: connectionCommand }, "icing-connect"),
+      );
+      const connected = await generations.next();
+      const message = connected.context.messages.at(-1);
+      assert.ok(message?.role === "toolResult");
+      assert.equal(contentText(message.content), "connected icing\n");
+      assert.deepEqual(message.usage, reviewUsage);
+      assert.equal(calls, 1);
+      assert.equal((await bashRuns.next()).command, connectionCommand);
+      assert.ok(!JSON.stringify(connected.context).includes("parent-only secret"));
+      assert.equal(app.dialogs.size, 0, "automatic review must not become a manual prompt");
+      connected.reply(assistantMessage("Icing connection inspected."));
+      await app.reports.next();
+
+      await app.run({ action: "steer", id: "alpha", message: "Inspect a fresh icing connection." });
+      (await generations.next()).reply(
+        call("bash", { command: connectionCommand }, "cancelled-connect"),
+      );
+      await reviewing.next();
+      const reports = app.reportCount();
+      const stopping = app.run({ action: "stop", id: "alpha" });
+      try {
+        await reviewCancellation.next();
+        assert.equal(processes[0].hasClosed, false, "native abort must precede joining late usage");
+      } finally {
+        release();
+        await stopping;
+      }
+      let ended;
+      do {
+        ended = await childEvents.next();
+      } while (ended.type !== "tool_execution_end" || ended.toolCallId !== "cancelled-connect");
+      assert.equal(ended.isError, true);
+      assert.deepEqual(ended.result?.usage, reviewUsage);
+      assert.equal(calls, 2, "the first approval cannot authorize another connection");
+      assert.equal(bashRuns.size, 0, "stopping cannot launch a classifier-approved command");
+      assert.equal(app.reportCount(), reports);
+      assert.equal(app.dialogs.size, 0);
+      assert.equal(app.editor.getText(), "Unsent cookie recipe");
+      assert.deepEqual(SandboxManager.getConfig(), policy);
+      assert.equal(await readFile(path.join(cwd, "sandbox-fixture.json"), "utf8"), config);
+    } finally {
+      release();
+    }
   });
 
   test("Escape and session changes join startup, Bash work, and result delivery", async () => {
@@ -1551,6 +1691,7 @@ async function openParent(
   withSandbox: boolean | "blocked" | "disabled" | "no-sandbox" = false,
   trusted = true,
   beforeSettled?: (aborted: boolean) => Promise<void>,
+  classifier?: ProviderClassifier["classify"],
 ) {
   let askParent: SandboxAskCallback | undefined;
   if (withSandbox) {
@@ -1578,6 +1719,7 @@ async function openParent(
       JSON.stringify({
         enabled: withSandbox !== "disabled",
         mode: "interactive",
+        ...(classifier ? { classifier: `${reviewModel.provider}/${reviewModel.id}` } : {}),
         network: { allowedDomains: [], deniedDomains: [], allowUnixSockets: [] },
         filesystem: {
           denyRead: [],
@@ -1613,6 +1755,34 @@ async function openParent(
         ]
       : []),
     subagent,
+    ...(classifier
+      ? [
+          (pi: ExtensionAPI) => {
+            pi.registerProvider(reviewModel.provider, {
+              apiKey: "fixture-only",
+              models: [reviewModel],
+              classifiers: {
+                [reviewModel.api]: {
+                  async classify(model, context, options) {
+                    try {
+                      return await classifier(model, context, options);
+                    } catch (error) {
+                      failures.push(error);
+                      throw error;
+                    }
+                  },
+                },
+              },
+            });
+            pi.on("session_start", async (_event, ctx) => {
+              await ctx.modelRegistry.refresh({
+                allowNetwork: false,
+                providers: [reviewModel.provider],
+              });
+            });
+          },
+        ]
+      : []),
     scriptedProvider(parentModel, ({ context }, signal) => {
       parentCalls++;
       parentContexts.push(context);

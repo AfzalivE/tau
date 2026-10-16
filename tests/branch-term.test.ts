@@ -14,12 +14,14 @@ import {
   initTheme,
   parseArgs,
   SessionManager,
+  type AgentSession,
   type AgentSessionEvent,
   type CustomEntry,
   type ExtensionCommandContext,
   type ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
 import branchTerm from "../extensions/branch-term/index.js";
+import { clipboardBoundary } from "./helpers/clipboard.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 describe("branch-term", { concurrency: false }, () => {
@@ -29,6 +31,7 @@ describe("branch-term", { concurrency: false }, () => {
   let answer: string;
   let ui: Awaited<ReturnType<typeof openBranch>> | undefined;
   let external: ReturnType<typeof terminalBoundary>;
+  let clipboard: ReturnType<typeof clipboardBoundary>;
   let failures: unknown[];
   let previousEnvironment: Record<string, string | undefined>;
 
@@ -37,7 +40,8 @@ describe("branch-term", { concurrency: false }, () => {
     previousEnvironment = { TMUX: process.env.TMUX, PI_HYPERLINKS: process.env.PI_HYPERLINKS };
     process.env.TMUX = "tau-fixture-socket,1,0";
     process.env.PI_HYPERLINKS = "0"; // No capability probe against a user's tmux server.
-    external = terminalBoundary(failures);
+    clipboard = clipboardBoundary(failures);
+    external = terminalBoundary(failures, clipboard);
     directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "tau-branch-term-")));
     const cwd = path.join(
       directory,
@@ -57,11 +61,13 @@ describe("branch-term", { concurrency: false }, () => {
 
   afterEach(async () => {
     try {
+      clipboard.release();
       await ui?.dispose();
       assert.deepEqual(failures, [], "unexpected work or extension errors must not be swallowed");
     } finally {
       ui = undefined;
       await external.dispose();
+      await clipboard.dispose();
       mock.restoreAll();
       syncBuiltinESMExports();
       for (const [key, value] of Object.entries(previousEnvironment)) {
@@ -156,7 +162,7 @@ describe("branch-term", { concurrency: false }, () => {
       "the entire source tree remains byte-identical",
     );
     assert.equal((await forkFiles(history)).length, 1);
-    assert.deepEqual(external.clipboard, []);
+    assert.deepEqual(clipboard.writes, []);
     assert.match(ui.notifications.at(-1)?.message ?? "", /opened.*split.*right/i);
   });
 
@@ -228,8 +234,9 @@ describe("branch-term", { concurrency: false }, () => {
     );
   });
 
-  for (const mode of ["tui", "json"] as const) {
-    test(`keeps a durable, copyable recovery command after tmux fails in ${mode}, including sessions in a custom vault`, async () => {
+  for (const mode of ["tui", "json", "rpc", "print"] as const) {
+    test(`keeps an exact recovery command after tmux fails in ${mode}, including sessions in a custom vault`, async () => {
+      process.env.PI_CLIPBOARD_OSC52 = "1";
       const output: string[] = [];
       const diagnostics: string[] = [];
       mock.method(console, "log", (...parts: unknown[]) =>
@@ -264,8 +271,7 @@ describe("branch-term", { concurrency: false }, () => {
       );
       assert.deepEqual(ui.session.messages, context.messages);
       assert.equal(ui.session.pendingMessageCount, 0);
-      assert.deepEqual(output, [], "command output uses session events, not stdout");
-      if (mode === "json") {
+      if (mode === "json" || mode === "print") {
         assert.deepEqual(ui.notifications, []);
         assert.equal(diagnostics.length, 1);
         assert.match(diagnostics[0], /tmux.*fixture socket unavailable/i);
@@ -274,27 +280,42 @@ describe("branch-term", { concurrency: false }, () => {
         assert.equal(ui.notifications.at(-1)?.type, "warning");
         assert.match(ui.notifications.at(-1)?.message ?? "", /tmux.*fixture socket unavailable/i);
       }
-      const entry = recoveryEntry(SessionManager.open(sourceFile));
-      assert.deepEqual(events, [{ type: "entry_appended", entry }]);
-      assert.deepEqual(external.clipboard, [Buffer.from(entry.data!.command)]);
-      assert.equal(entry.data!.copiedToClipboard, true);
-      assert.ok(
-        ui.render(entry).includes(entry.data!.command),
-        "the displayed command preserves shell bytes",
-      );
-      assert.match(ui.render(entry), /separate terminal|tmux pane/i);
-      assert.match(ui.render(entry), /copied to clipboard/i);
+      let command: string;
+      if (mode === "print") {
+        assert.deepEqual(events, []);
+        assert.equal(output.length, 2);
+        assert.doesNotMatch(output[0], /copied to clipboard/i);
+        command = output[1];
+        assert.deepEqual(await readFile(sourceFile), before);
+      } else {
+        assert.deepEqual(output, [], "command output uses session events, not stdout");
+        const entry = recoveryEntry(SessionManager.open(sourceFile));
+        command = entry.data!.command;
+        assert.deepEqual(events, [{ type: "entry_appended", entry }]);
+        assert.equal(entry.data!.copiedToClipboard, mode === "tui");
+        assert.ok(
+          ui.render(entry).includes(command),
+          "the displayed command preserves shell bytes",
+        );
+        assert.match(ui.render(entry), /separate terminal|tmux pane/i);
+        assert.equal(/copied to clipboard/i.test(ui.render(entry)), mode === "tui");
 
-      await ui.session.reload();
-      const recovered = recoveryEntry(SessionManager.open(sourceFile));
-      assert.deepEqual(recovered, entry);
-      assert.ok(
-        ui.render(recovered).includes(entry.data!.command),
-        "the entry renders after reload",
+        await ui.session.reload();
+        const recovered = recoveryEntry(SessionManager.open(sourceFile));
+        assert.deepEqual(recovered, entry);
+        assert.ok(ui.render(recovered).includes(command), "the entry renders after reload");
+        assert.deepEqual(history.buildSessionContext(), context);
+      }
+      assert.deepEqual(clipboard.writes, mode === "tui" ? [Buffer.from(command)] : []);
+      assert.deepEqual(
+        Buffer.concat(clipboard.stdout),
+        mode === "tui"
+          ? Buffer.from(`\x1b]52;c;${Buffer.from(command).toString("base64")}\x07`)
+          : Buffer.alloc(0),
+        "only the TUI may emit OSC 52, with the exact UTF-8 command",
       );
-      assert.deepEqual(history.buildSessionContext(), context);
 
-      const invocation = interpretCommand(recovered.data!.command, directory!);
+      const invocation = interpretCommand(command, directory!);
       assert.equal(invocation.cwd, history.getCwd(), "shell quoting preserves the owning cwd");
       assert.deepEqual(
         invocation.args,
@@ -303,6 +324,44 @@ describe("branch-term", { concurrency: false }, () => {
       );
     });
   }
+
+  test("joins a failed clipboard write across reload and keeps recovery durable and visible", async () => {
+    clipboard.fail = true;
+    const paused = clipboard.pause();
+    external.exitCode = 1;
+    ui = await openBranch(directory!, history, failures);
+    let completed = false;
+    const command = ui.prompt("/branch").then(() => {
+      completed = true;
+    });
+    let reloading: Promise<void> | undefined;
+    try {
+      await ready(paused.ready);
+      assert.equal(completed, false, "the command waits for the asynchronous clipboard attempt");
+      assert.equal(
+        history
+          .getEntries()
+          .some((entry) => entry.type === "custom" && entry.customType === "branch-term-message"),
+        false,
+        "the persisted copy result is not guessed before completion",
+      );
+      reloading = ui.session.reload();
+      await ready(ui.shutdownStarted);
+    } finally {
+      paused.release();
+      await Promise.all([command, reloading]);
+    }
+
+    const entry = recoveryEntry(SessionManager.open(history.getSessionFile()!));
+    assert.deepEqual(ui.shutdownEntries, [[entry]], "reload joins ordinary command reporting too");
+    assert.equal(entry.data!.copiedToClipboard, false);
+    assert.ok(ui.render(entry).includes(entry.data!.command));
+    assert.doesNotMatch(ui.render(entry), /copied to clipboard/i);
+    assert.ok(clipboard.writes.length > 0);
+    for (const bytes of clipboard.writes) assert.deepEqual(bytes, Buffer.from(entry.data!.command));
+    assert.deepEqual(clipboard.stdout, []);
+    assert.deepEqual(recoveryEntry(ui.session.sessionManager), entry);
+  });
 
   for (const layout of ["split-down", "constructor"]) {
     test(`honors or rejects the configured tmux layout ${layout} without a command override`, async () => {
@@ -371,7 +430,7 @@ describe("branch-term", { concurrency: false }, () => {
         terminal.child.send(0);
         await ready(terminal.done);
         assert.deepEqual(await readFile(history.getSessionFile()!), before);
-        assert.deepEqual(external.clipboard, []);
+        assert.deepEqual(clipboard.writes, []);
         assert.ok(!ui.notifications.some((notice) => notice.type === "error"));
       });
     }
@@ -382,18 +441,23 @@ describe("branch-term", { concurrency: false }, () => {
         ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand("{session}"));
         if (failure === "spawn error") external.shell = path.join(directory!, "missing-bash");
         const context = structuredClone(history.buildSessionContext());
+        const recovery = observeRecovery(ui.session);
+        try {
+          await ui.prompt("/branch");
 
-        await ui.prompt("/branch");
-
-        assert.equal(external.terminals.length, 1);
-        const terminal = external.terminals[0];
-        if (failure === "spawn error") {
-          await assert.rejects(terminal.request, { code: "ENOENT" });
-        } else {
-          await ready(terminal.request);
-          terminal.child.send(7);
+          assert.equal(external.terminals.length, 1);
+          const terminal = external.terminals[0];
+          if (failure === "spawn error") {
+            await assert.rejects(terminal.request, { code: "ENOENT" });
+          } else {
+            await ready(terminal.request);
+            terminal.child.send(7);
+          }
+          await ready(terminal.done);
+          await ready(recovery.entry);
+        } finally {
+          recovery.dispose();
         }
-        await ready(terminal.done);
         assert.equal(ui.notifications.filter((notice) => notice.type === "error").length, 1);
         const entry = recoveryEntry(SessionManager.open(history.getSessionFile()!));
         const invocation = interpretCommand(entry.data!.command, directory!);
@@ -406,16 +470,22 @@ describe("branch-term", { concurrency: false }, () => {
           history.getSessionFile(),
         );
         assert.deepEqual(history.buildSessionContext(), context);
-        assert.deepEqual(external.clipboard, [Buffer.from(entry.data!.command)]);
+        assert.deepEqual(clipboard.writes, [Buffer.from(entry.data!.command)]);
         assert.equal((await forkFiles(history)).length, 1, "recovery uses the existing fork");
       });
     }
 
     test("keeps recovery usable if its session entry cannot be written", async () => {
       const diagnostics: string[] = [];
-      mock.method(console, "error", (...parts: unknown[]) =>
-        diagnostics.push(parts.map(String).join(" ")),
-      );
+      let printed!: () => void;
+      const recoveryPrinted = new Promise<void>((resolve) => {
+        printed = resolve;
+      });
+      mock.method(console, "error", (...parts: unknown[]) => {
+        const message = parts.map(String).join(" ");
+        diagnostics.push(message);
+        if (message.includes("\ncd ")) printed();
+      });
       ui = await openBranch(directory!, history, failures);
       ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand("{session}"));
       await ui.prompt("/branch");
@@ -430,6 +500,7 @@ describe("branch-term", { concurrency: false }, () => {
 
       terminal.child.send(7);
       await ready(terminal.done);
+      await ready(recoveryPrinted);
 
       const command = diagnostics
         .join("\n")
@@ -441,6 +512,59 @@ describe("branch-term", { concurrency: false }, () => {
     });
 
     for (const lifecycle of ["reload", "shutdown"] as const) {
+      test(`${lifecycle} joins a launcher's pending clipboard report before replacing its session`, async () => {
+        const diagnostics: string[] = [];
+        for (const method of ["log", "error"] as const) {
+          mock.method(console, method, (...parts: unknown[]) =>
+            diagnostics.push(parts.map(String).join(" ")),
+          );
+        }
+        ui = await openBranch(directory!, history, failures);
+        ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand("{session}"));
+        const sourceFile = history.getSessionFile()!;
+        const before = await readFile(sourceFile);
+        await ui.prompt("/branch");
+        const terminal = external.terminals[0];
+        const request = await ready(terminal.request);
+        const paused = clipboard.pause();
+        terminal.child.send(7);
+        await ready(paused.ready);
+        const replacing = lifecycle === "reload" ? ui.session.reload() : ui.dispose();
+        try {
+          await ready(ui.shutdownStarted);
+          assert.deepEqual(await readFile(sourceFile), before);
+        } finally {
+          paused.release();
+          await ready(replacing);
+        }
+        const entry = recoveryEntry(SessionManager.open(sourceFile));
+        assert.deepEqual(
+          ui.shutdownEntries,
+          [[entry]],
+          "the next shutdown handler sees recovery already persisted in the outgoing session",
+        );
+        assert.equal(entry.data!.copiedToClipboard, true);
+        assert.deepEqual(clipboard.writes, [Buffer.from(entry.data!.command)]);
+        assert.deepEqual((await readFile(sourceFile)).subarray(0, before.length), before);
+        assert.deepEqual(interpretCommand(entry.data!.command, directory!), {
+          cwd: history.getCwd(),
+          args: ["--session", request.args[0]],
+        });
+        assert.deepEqual(
+          recoveryEntry(ui.session.sessionManager),
+          entry,
+          "the outgoing session owns the completed recovery report",
+        );
+        const persisted = await readFile(sourceFile);
+        const notices = [...ui.notifications];
+        const output = [...diagnostics];
+        await ready(terminal.done);
+        assert.deepEqual(await readFile(sourceFile), persisted);
+        assert.deepEqual(ui.notifications, notices);
+        assert.deepEqual(diagnostics, output, "no recovery work survives completed teardown");
+        assert.deepEqual(clipboard.stdout, []);
+      });
+
       test(`${lifecycle} releases failure observers without closing the user's terminal`, async () => {
         const diagnostics: string[] = [];
         for (const method of ["log", "error"] as const) {
@@ -479,7 +603,7 @@ describe("branch-term", { concurrency: false }, () => {
           output,
           "late failures must not leak through console fallback either",
         );
-        assert.deepEqual(external.clipboard, []);
+        assert.deepEqual(clipboard.writes, []);
       });
     }
   });
@@ -543,11 +667,33 @@ async function openBranch(
   generate?: NonNullable<ProviderConfig["streamSimple"]>,
   mode: ExtensionCommandContext["mode"] = "tui",
 ) {
+  const shutdownEntries: CustomEntry[][] = [];
+  let shuttingDown!: () => void;
+  const shutdownStarted = new Promise<void>((resolve) => {
+    shuttingDown = resolve;
+  });
   const runtime = await createAgentSessionRuntime(
     async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
       const resources = await createPiResources(cwd, agentDir, [
+        (pi) => {
+          pi.on("session_shutdown", () => shuttingDown());
+        },
         branchTerm,
-        (pi) =>
+        (pi) => {
+          // Pi dispatches each extension's shutdown handlers together, in extension load order.
+          const unsubscribe = pi.on("session_shutdown", (_event, ctx) => {
+            unsubscribe();
+            shutdownEntries.push(
+              structuredClone(
+                ctx.sessionManager
+                  .getEntries()
+                  .filter(
+                    (entry): entry is CustomEntry =>
+                      entry.type === "custom" && entry.customType === "branch-term-message",
+                  ),
+              ),
+            );
+          });
           pi.registerProvider(fixtureModel.provider, {
             api: fixtureModel.api,
             baseUrl: fixtureModel.baseUrl,
@@ -562,7 +708,8 @@ async function openBranch(
                 throw error;
               }
             },
-          }),
+          });
+        },
       ]);
       return {
         ...(await createAgentSession({
@@ -635,6 +782,8 @@ async function openBranch(
       },
       notifications,
       queuedBranch,
+      shutdownStarted,
+      shutdownEntries,
       prompt(text: string) {
         const work = runtime.session.prompt(text, { source: "interactive" });
         pending.push(work);
@@ -661,15 +810,14 @@ const spawnSync = childProcess.spawnSync;
 
 type TerminalRequest = { cwd: string; args: string[] };
 
-/** Replace terminal/clipboard programs with controlled Node children; custom launchers still run through real Bash. */
-function terminalBoundary(failures: unknown[]) {
+/** Replace terminal programs with controlled Node children; custom launchers still run through real Bash. */
+function terminalBoundary(failures: unknown[], clipboard: ReturnType<typeof clipboardBoundary>) {
   const launches: string[][] = [];
   const terminals: {
     child: ReturnType<typeof spawn>;
     request: Promise<TerminalRequest>;
     done: Promise<void>;
   }[] = [];
-  const clipboard: Buffer[] = [];
   const children = new Map<ReturnType<typeof spawn>, { done: Promise<void>; detached: boolean }>();
   const reject = () => {
     const error = new Error("Unexpected network request or subprocess in branch workflow");
@@ -682,7 +830,6 @@ function terminalBoundary(failures: unknown[]) {
   const boundary = {
     launches,
     terminals,
-    clipboard,
     shell: "/bin/bash",
     exitCode: 0,
     async dispose() {
@@ -701,6 +848,8 @@ function terminalBoundary(failures: unknown[]) {
     },
   };
   mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
+    const writer = clipboard.spawn(...args);
+    if (writer) return writer;
     if (!Array.isArray(args[1])) return reject();
     if (args[0] === "bash") {
       const child = spawn(boundary.shell, args[1], {
@@ -741,12 +890,7 @@ function terminalBoundary(failures: unknown[]) {
     track(child);
     return child;
   });
-  mock.method(childProcess, "spawnSync", (...args: Parameters<typeof spawnSync>) => {
-    const allowed = process.platform === "darwin" ? ["pbcopy"] : ["wl-copy", "xclip", "xsel"];
-    if (!allowed.includes(args[0]) || typeof args[2]?.input !== "string") return reject();
-    clipboard.push(Buffer.from(args[2].input));
-    return spawnSync(process.execPath, ["-e", "process.stdin.resume()"], args[2]);
-  });
+  mock.method(childProcess, "spawnSync", reject);
   syncBuiltinESMExports();
   return boundary;
 
@@ -835,6 +979,24 @@ async function forkFiles(history: SessionManager) {
   return (await readdir(history.getSessionDir())).filter(
     (name) => name.endsWith(".jsonl") && name !== path.basename(history.getSessionFile()!),
   );
+}
+
+/** Launcher exit only starts async recovery. The public entry event marks durable completion. */
+function observeRecovery(session: AgentSession) {
+  let appended!: (entry: CustomEntry) => void;
+  const entry = new Promise<CustomEntry>((resolve) => {
+    appended = resolve;
+  });
+  const dispose = session.subscribe((event) => {
+    if (
+      event.type === "entry_appended" &&
+      event.entry.type === "custom" &&
+      event.entry.customType === "branch-term-message"
+    ) {
+      appended(event.entry);
+    }
+  });
+  return { entry, dispose };
 }
 
 function recoveryEntry(history: SessionManager) {

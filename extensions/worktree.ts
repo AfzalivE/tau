@@ -19,9 +19,13 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { SessionManager, highlightCode, type SessionHeader } from "@earendil-works/pi-coding-agent";
+import {
+  copyToClipboard,
+  SessionManager,
+  highlightCode,
+  type SessionHeader,
+} from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -140,39 +144,6 @@ function shellQuoteCompact(value: string): string {
   return shellQuote(value);
 }
 
-function runClipboardCommand(command: string, args: string[], text: string): boolean {
-  try {
-    const result = spawnSync(command, args, {
-      input: text,
-      stdio: ["pipe", "ignore", "ignore"],
-      timeout: 3000,
-    });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
-}
-
-function copyToClipboard(text: string): boolean {
-  if (process.platform === "darwin") {
-    return runClipboardCommand("pbcopy", [], text);
-  }
-
-  if (process.platform === "win32") {
-    return runClipboardCommand("clip", [], text);
-  }
-
-  if (process.platform === "linux") {
-    return (
-      runClipboardCommand("wl-copy", [], text) ||
-      runClipboardCommand("xclip", ["-selection", "clipboard"], text) ||
-      runClipboardCommand("xsel", ["--clipboard", "--input"], text)
-    );
-  }
-
-  return false;
-}
-
 function formatCommandMessageIntro(intro: string, copiedToClipboard: boolean): string {
   return `${intro}${copiedToClipboard ? " (copied to clipboard)" : ""}:`;
 }
@@ -187,27 +158,40 @@ function showCommandMessage(
   customType: string,
   intro: string,
   command: string,
-): void {
-  const copiedToClipboard = copyToClipboard(command);
-  if (ctx.mode === "print") {
-    console.log(formatCommandMessageIntro(intro, copiedToClipboard));
-    console.log(command);
-    return;
-  }
+): Promise<void> {
+  return joinRecoveryReport(pi, async () => {
+    const copiedToClipboard =
+      ctx.mode === "tui" &&
+      (await copyToClipboard(command).then(
+        () => true,
+        () => false,
+      ));
+    if (ctx.mode === "print") {
+      console.log(formatCommandMessageIntro(intro, copiedToClipboard));
+      console.log(command);
+      return;
+    }
 
-  pi.appendEntry<CommandMessageDetails>(customType, {
-    intro,
-    command,
-    copiedToClipboard,
+    pi.appendEntry<CommandMessageDetails>(customType, {
+      intro,
+      command,
+      copiedToClipboard,
+    });
   });
+}
+
+function joinRecoveryReport(pi: ExtensionAPI, publish: () => Promise<void>): Promise<void> {
+  const report = publish();
+  const unsubscribe = pi.on("session_shutdown", () => report);
+  return report.finally(unsubscribe);
 }
 
 function showManualOpenCommand(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   command: string,
-): void {
-  showCommandMessage(pi, ctx, MANUAL_OPEN_ENTRY_TYPE, MANUAL_OPEN_INTRO, command);
+): Promise<void> {
+  return showCommandMessage(pi, ctx, MANUAL_OPEN_ENTRY_TYPE, MANUAL_OPEN_INTRO, command);
 }
 
 function showRestoreStashCommand(
@@ -215,8 +199,8 @@ function showRestoreStashCommand(
   ctx: ExtensionCommandContext,
   targetPath: string,
   stashSpec: string,
-): void {
-  showCommandMessage(
+): Promise<void> {
+  return showCommandMessage(
     pi,
     ctx,
     RESTORE_STASH_ENTRY_TYPE,
@@ -232,8 +216,8 @@ function showScriptRerunCommand(
   exitCode: number,
   worktreeRoot: string,
   command: string,
-): void {
-  showCommandMessage(
+): Promise<void> {
+  return showCommandMessage(
     pi,
     ctx,
     SCRIPT_RERUN_ENTRY_TYPE,
@@ -1032,7 +1016,7 @@ async function runProjectScripts(
   await withSpinnerStatus(ctx, statusText, async () => {
     const result = await pi.exec("bash", ["-c", chosen.command], { cwd: worktreeRoot });
     if (result.code !== 0) {
-      showScriptRerunCommand(pi, ctx, label, result.code, worktreeRoot, chosen.command);
+      await showScriptRerunCommand(pi, ctx, label, result.code, worktreeRoot, chosen.command);
       throw new Error(`${label} failed (exit ${result.code}).`);
     }
   });
@@ -1281,13 +1265,9 @@ async function switchToWorktree(
   if (!currentSessionFile) {
     const manualCommand = buildManualOpenCommand(targetPath);
     const message = "Current session is ephemeral; cannot switch worktrees in-place.";
-    if (ctx.hasUI) {
-      ctx.ui.notify(message, "warning");
-      showManualOpenCommand(pi, ctx, manualCommand);
-    } else {
-      showManualOpenCommand(pi, ctx, manualCommand);
-      throw new Error(message);
-    }
+    if (ctx.hasUI) ctx.ui.notify(message, "warning");
+    await showManualOpenCommand(pi, ctx, manualCommand);
+    if (!ctx.hasUI) throw new Error(message);
     return;
   }
 
@@ -1431,11 +1411,12 @@ async function handleNew(
 
   if (!result) return;
 
-  if (result.stashSpec) {
-    showRestoreStashCommand(pi, ctx, result.targetPath, result.stashSpec);
-  }
-
-  showManualOpenCommand(pi, ctx, buildManualOpenCommand(result.targetPath));
+  await joinRecoveryReport(pi, async () => {
+    if (result.stashSpec) {
+      await showRestoreStashCommand(pi, ctx, result.targetPath, result.stashSpec);
+    }
+    await showManualOpenCommand(pi, ctx, buildManualOpenCommand(result.targetPath));
+  });
 }
 
 async function handleSwitch(

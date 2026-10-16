@@ -46,4 +46,5 @@ export type PermissionProposal = PermissionDetails &
 export interface TemporaryPermissionGrant {
   config: SandboxPolicy;
   policy: SandboxPolicy;
+  onStalePolicy: () => void;
 }

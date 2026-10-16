@@ -125,8 +125,8 @@ export default function stashExtension(pi: ExtensionAPI): void {
     return { action: "continue" };
   });
 
-  pi.on("before_agent_start", async (_event, ctx) => {
-    restoreDraft(ctx);
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (event.messageType === "user") restoreDraft(ctx);
   });
 
   pi.on("session_before_compact", async (_event, ctx) => {

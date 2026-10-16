@@ -9,8 +9,9 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Added
 
 - Configurable Review models, thinking levels, and focuses via `review.json`.
-- Opt-in Sandbox permission review with Pi classifiers or experimental Codex Guardian.
+- Opt-in Sandbox permission review for main and subagent commands, using Pi classifiers or experimental Codex Guardian, with diagnostics.
 - Sandbox automatically configures newly launched JVMs to use its authenticated network proxy.
+- Opt-in Sandbox `allowAppleEvents` setting for macOS application launching, with isolation warnings and user-controlled configuration only.
 - Added an optional `pi_model` setting to select Dream’s Pi model and thinking level without changing Pi defaults.
 - Added “Always allow and retry” for global sandbox permissions that persist across Pi sessions, while preserving project overrides.
 - Added per-session sandbox audit logs, an exclusion disable switch, and a strict standalone `sandbox-run` command.
@@ -24,6 +25,9 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
+- **Breaking:** Requires Pi 1.2.0 or newer.
+- Branch and Worktree use Pi's clipboard support in TUI mode.
+- Sandbox lets macOS commands handle filesystem denials instead of interrupting them, while retaining OS restrictions and reviewing permissions only after failure.
 - Documented `gh --attach` uploads for issues and PR/issue comments in the `gh` skill, in addition to PR create and edit.
 - Restricted model-driven `acp_agent` delegation to tasks requiring capabilities unavailable through Pi's active tools.
 - Moved `acp-client` out of the Tau bundle packages into standalone `tau-acp-client`.
@@ -41,6 +45,8 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Avoid repeated Telegram Keychain polling and competing daemon launches while retaining automatic recovery after startup failures. ([#20](https://github.com/goncalossilva/tau/pull/20))
+- Refresh repo memory and preserve extension instructions in Answer, Loop, and Subagent-triggered runs.
 - Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
 - Preserve newer Sandbox policy changes when manually approving macOS service access.
 - Prevent fabricated traversal diagnostics in command output from masking a command failure.

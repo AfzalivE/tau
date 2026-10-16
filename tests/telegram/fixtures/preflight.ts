@@ -52,7 +52,7 @@ export default function (pi: ExtensionAPI) {
     process.removeListener("message", onControl);
   });
   pi.on("before_agent_start", async (event) => {
-    if (!event.prompt.startsWith("delay:")) return;
+    if (event.messageType !== "user" || !event.prompt.startsWith("delay:")) return;
     if (event.prompt === "delay: inherited pipes") {
       const descendant = spawn(
         process.execPath,

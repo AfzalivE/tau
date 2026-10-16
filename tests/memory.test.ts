@@ -111,8 +111,16 @@ describe("memory", { concurrency: false }, () => {
 
     discovery = "The updated jellyfish catalogue is available.";
     await app.session.reload();
-    await app.chat("What remains to do?");
+    await app.tools(
+      [call("write", { path: "tides.txt", content: "The tide is rising.\n" })],
+      "custom",
+    );
     const prompt = getCurrentSystemPrompt(app.contexts.at(-1)!.messages);
+    assert.equal(
+      prompt,
+      getCurrentSystemPrompt(app.contexts.at(-2)!.messages),
+      "fresh memory and discovery sections survive a custom run's tool continuation",
+    );
     assert.ok(prompt.includes(discovery));
     assert.doesNotMatch(prompt, /The jellyfish catalogue is available/);
     assert.equal(prompt.split("<aquarium_discovery>").length - 1, 1);
@@ -858,7 +866,7 @@ async function openMemory(
           JSON.stringify(session.messages),
         );
       },
-      async tools(calls: Omit<ToolCall, "id">[]) {
+      async tools(calls: Omit<ToolCall, "id">[], messageType: "user" | "custom" = "user") {
         const message = assistantMessage("");
         message.content = calls.map((call) => ({ ...call, id: `memory-${++toolId}` }));
         message.stopReason = "toolUse";
@@ -867,7 +875,15 @@ async function openMemory(
           () => assistantMessage("Tools finished."),
         );
         const start = session.messages.length;
-        await session.prompt("Apply the requested memory operation.");
+        const prompt = "Apply the requested memory operation.";
+        if (messageType === "custom") {
+          await session.sendCustomMessage(
+            { customType: "aquarium-update", content: prompt, display: false },
+            { triggerTurn: true },
+          );
+        } else {
+          await session.prompt(prompt);
+        }
         const results = session.messages
           .slice(start)
           .filter((message) => message.role === "toolResult");

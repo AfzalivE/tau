@@ -77,8 +77,10 @@ describe("stash", { concurrency: false }, () => {
     ]) {
       test(`preserves a ${description} until it is finished and submitted`, async () => {
         const finishedDraft = `${text}\nReady now.`;
+        const backgroundReport = "The octopus finished counting tentacles.";
         // Pi trims submitted messages, but must preserve whitespace in unsent drafts.
         ui = await openEditor(directory!, stashExtension, failures, [
+          backgroundReport,
           "One quick question first.",
           finishedDraft.trim(),
         ]);
@@ -88,6 +90,13 @@ describe("stash", { concurrency: false }, () => {
         await ui.shortcut();
         assert.equal(ui.editor.getExpandedText(), "");
         assert.match(ui.status(), /stash.*alt\+x/i);
+        await ui.session.sendCustomMessage(
+          { customType: "octopus-report", content: backgroundReport, display: false },
+          { triggerTurn: true },
+        );
+        assert.equal(ui.editor.getExpandedText(), "", "background work must leave the stash armed");
+        assert.match(ui.status(), /stash.*alt\+x/i);
+        assert.deepEqual(userTexts(ui.session.messages), []);
         ui.paste("One quick question first.");
         await ui.submit();
 

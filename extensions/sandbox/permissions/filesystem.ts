@@ -299,10 +299,7 @@ export function formatTraversalNotice(paths: string[]): string {
   return `[sandbox] Continued after skipping protected ${label}: ${visiblePaths}${suffix}`;
 }
 
-export function formatRuntimeProtectedWriteNotice(
-  violations: FilesystemViolation[],
-  continued: boolean,
-): string {
+export function formatRuntimeProtectedWriteNotice(violations: FilesystemViolation[]): string {
   const paths = violations
     .map((violation) => violation.path)
     .filter((path): path is string => path !== undefined);
@@ -311,8 +308,7 @@ export function formatRuntimeProtectedWriteNotice(
   const visiblePaths = paths.slice(0, 3).join(", ");
   const suffix = paths.length > 3 ? ", ..." : "";
   const label = paths.length === 1 ? "write" : "writes";
-  const prefix = continued ? "Continued after blocking" : "Blocked";
-  return `[sandbox] ${prefix} runtime-protected ${label} that sandbox config cannot override: ${visiblePaths}${suffix}`;
+  return `[sandbox] Continued after blocking runtime-protected ${label} that sandbox config cannot override: ${visiblePaths}${suffix}`;
 }
 
 type FilesystemAllowAction = Extract<PermissionProposal, { kind: "filesystem" }>["action"];

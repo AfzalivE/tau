@@ -175,19 +175,25 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
           operations: {
             exec(command, cwd, options) {
               // Keep queue rejection and cancellation inside native Bash's output/error handling.
-              return runtime.runBash(ctx, toolSignal, (owner) => {
-                invocation = owner;
-                return createSandboxedBashOps({
-                  ctx: owner.ctx,
-                  getSandboxConfig: () => runtime.config,
-                  getRuntimeConfig: () => runtime.getRuntimeConfig(),
-                  applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
-                  isRequired: () => runtime.required,
-                  checkCommand: runtime.checkCommand,
-                  recordEvent: runtime.recordEvent,
-                  resolvePermission: (proposal) => runtime.resolvePermission(proposal, owner),
-                }).exec(command, cwd, { ...options, signal: owner.signal });
-              });
+              return runtime.runBash(
+                ctx,
+                toolSignal,
+                (owner) => {
+                  invocation = owner;
+                  owner.activeCommand = { text: command, cwd };
+                  return createSandboxedBashOps({
+                    ctx: owner.ctx,
+                    getSandboxConfig: () => runtime.config,
+                    getRuntimeConfig: () => runtime.getRuntimeConfig(),
+                    applyRuntimeConfigForSession: runtime.applyRuntimeConfigForSession,
+                    isRequired: () => runtime.required,
+                    checkCommand: runtime.checkCommand,
+                    recordEvent: runtime.recordEvent,
+                    resolvePermission: (proposal) => runtime.resolvePermission(proposal, owner),
+                  }).exec(command, cwd, { ...options, signal: owner.signal });
+                },
+                id,
+              );
             },
           },
         });
