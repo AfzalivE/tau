@@ -15,13 +15,16 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
-- **Breaking:** Requires Pi 1.2.0 or newer.
+- **Breaking:** Requires Pi 1.3.0 or newer.
+- **Breaking:** Custom `kimi-coding` base URLs in `models.json` must include `/v1` for Pi's new Chat Completions transport.
 - Branch and Worktree use Pi's clipboard support in TUI mode.
 - Sandbox lets macOS commands handle filesystem denials instead of interrupting them, while retaining OS restrictions and reviewing permissions only after failure.
 
 ### Fixed
 
 - Avoid repeated Telegram Keychain polling and competing daemon launches while retaining automatic recovery after startup failures. ([#20](https://github.com/goncalossilva/tau/pull/20))
+- Prevent loops from starting or continuing when their completion tool is unavailable.
+- Let Review and Triage recover from rejected submit calls instead of treating them as completed submissions.
 - Refresh repo memory and preserve extension instructions in Answer, Loop, and Subagent-triggered runs.
 - Avoid duplicate Subagent follow-ups after reading completed answers. Batch unread reports into one parent continuation and identify them as internal evidence, not user requests.
 - Preserve newer Sandbox policy changes when manually approving macOS service access.

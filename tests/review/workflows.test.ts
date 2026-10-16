@@ -805,6 +805,107 @@ describe("review", { concurrency: false }, () => {
     }
   });
 
+  test("recovers a rejected submission in the same worker", async () => {
+    respond = ({ context }) => {
+      if (generations.length === 1)
+        return toolCall("submit_review", { findings: "The octopus forgot the array." });
+      const rejected = context.messages.at(-1);
+      assert.ok(rejected?.role === "toolResult" && rejected.isError);
+      assert.equal(rejected.toolName, "submit_review");
+      assert.deepEqual(rejected.details, {});
+      return submit([finding]);
+    };
+    app = await openReview(directory, cwd, failures);
+    await app.run("/review commit HEAD focus=general");
+
+    assert.deepEqual(app.report().details.findings, [
+      { ...finding, focus: "general", model: reviewModel.id },
+    ]);
+    assert.equal(generations.length, 2, "one rejected call and one corrected submission");
+    assert.equal(children.length, 1, "correction needs no resumed retry");
+    assert.equal(app.mainRequests.length, 0);
+    await assert.rejects(readFile(sessionPath(generations[0].args)), { code: "ENOENT" });
+  });
+
+  test("retries a rejected submission in the same saved session", async () => {
+    const rawArguments = '{"findings":[],"';
+    respond = ({ context }) => {
+      if (context.messages.filter((message) => message.role === "user").length > 1)
+        return submit([finding]);
+      if (context.messages.at(-1)?.role === "toolResult")
+        return assistantMessage("The octopus forgot to correct its submission.");
+      return {
+        ...assistantMessage(""),
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "rejected-submit",
+            name: "submit_review",
+            arguments: {},
+            argumentsError: `Malformed final arguments:\n${rawArguments}`,
+          },
+        ],
+      };
+    };
+    app = await openReview(directory, cwd, failures);
+    await app.run("/review commit HEAD focus=general");
+
+    assert.deepEqual(app.report().details.findings, [
+      { ...finding, focus: "general", model: reviewModel.id },
+    ]);
+    assert.equal(generations.length, 3, "rejection, final prose, then resumed submission");
+    assert.equal(children.length, 2, "no successful submission triggers one resumed retry");
+    const first = generations[0];
+    const retry = generations[2];
+    assert.notEqual(retry.process, first.process);
+    assert.equal(sessionPath(retry.args), sessionPath(first.args));
+    const rejected = retry.context.messages.find(
+      (message) => message.role === "toolResult" && message.isError,
+    );
+    assert.ok(rejected?.role === "toolResult");
+    assert.equal(rejected.toolName, "submit_review");
+    assert.deepEqual(rejected.details, {});
+    assert.ok(contentText(rejected.content).includes(rawArguments));
+    assert.equal(app.mainRequests.length, 0);
+    await assert.rejects(readFile(sessionPath(first.args)), { code: "ENOENT" });
+  });
+
+  test("rejects two successful submissions", async () => {
+    respond = () => ({
+      ...assistantMessage(""),
+      stopReason: "toolUse",
+      content: [
+        {
+          type: "toolCall",
+          id: "first-submit",
+          name: "submit_review",
+          arguments: { findings: [] },
+        },
+        {
+          type: "toolCall",
+          id: "second-submit",
+          name: "submit_review",
+          arguments: { findings: [] },
+        },
+      ],
+    });
+    app = await openReview(directory, cwd, failures);
+    const end = app.nextEnd();
+    await app.session.prompt("/review commit HEAD focus=general");
+    assert.equal((await deadline(end, "duplicate submissions")).outcome, "failed");
+    await app.settle();
+
+    const report = app.reports().at(-1);
+    assert.ok(report?.type === "custom_message");
+    assert.equal((report.details as { kind: string }).kind, "failure");
+    assert.match(String(report.content), /called submit_review 2 times/);
+    assert.equal(generations.length, 1, "successful submissions terminate the native tool batch");
+    assert.equal(children.length, 1, "duplicate submissions must not trigger a retry");
+    assert.equal(app.mainRequests.length, 0);
+    await assert.rejects(readFile(sessionPath(generations[0].args)), { code: "ENOENT" });
+  });
+
   for (const { target, mode, policy, focuses } of [
     {
       target: "branch main",
