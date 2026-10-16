@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Changed
+
+- Minimal tool display limits Bash commands to one terminal row and shows line counts for Write and Edit instead of code previews. Expanding reveals the full content.
+
 ## [0.4.0] - 2026-10-16
 
 ### Added

@@ -191,8 +191,18 @@ describe("tool-display-mode", { concurrency: false }, () => {
     app = await openDisplay(cwd, failures);
     const fixtures = [
       ["read", { path: "menu.txt" }, "Soup of the day.\nChocolate éclair.", "2 lines"],
-      ["bash", { command: "printf 'cake'" }, "Chocolate cake.\nLemon cake.", "2 lines"],
-      ["bash", { command: "printf 'tea'" }, "Earl Grey.\nOolong.", "2 lines"],
+      [
+        "bash",
+        { command: "python3 - <<'PY'\nprint('Chocolate cake.')\nprint('Lemon cake.')\nPY" },
+        "Chocolate cake.\nLemon cake.",
+        "2 lines",
+      ],
+      [
+        "bash",
+        { command: `printf '${"café 茶 🐙 ".repeat(12)}'` },
+        "Earl Grey.\nOolong.",
+        "2 lines",
+      ],
       [
         "grep",
         { pattern: "éclair" },
@@ -213,6 +223,8 @@ describe("tool-display-mode", { concurrency: false }, () => {
       const renderResult = mock.fn(definition.renderResult);
       const row = app!.row(name, args, { ...definition, renderCall, renderResult });
       row.updateResult({ content: [{ type: "text", text }], isError: false });
+      const callComponent = renderCall.mock.calls.at(-1)!.result;
+      assert.ok(callComponent);
       return {
         name,
         row,
@@ -220,7 +232,8 @@ describe("tool-display-mode", { concurrency: false }, () => {
         summary,
         renderCall,
         renderResult,
-        callComponent: renderCall.mock.calls.at(-1)!.result,
+        callComponent,
+        callView: screen(callComponent),
         nativeComponent: renderResult.mock.calls.at(-1)!.result,
       };
     });
@@ -248,8 +261,11 @@ describe("tool-display-mode", { concurrency: false }, () => {
           renderCall,
           renderResult,
           callComponent,
+          callView,
           nativeComponent,
         } = entry;
+        if (mode === "collapsed")
+          assert.equal(screen(callComponent), callView, "mode changes work before rerendering");
         row.setExpanded(app.expanded());
         const component = renderResult.mock.calls.at(-1)!.result;
         assert.equal(
@@ -284,6 +300,21 @@ describe("tool-display-mode", { concurrency: false }, () => {
           for (const line of text.split("\n")) assert.ok(view.includes(line), view);
         for (const width of [40, 100])
           assert.ok(row.render(width).every((line) => visibleWidth(line) <= width));
+        if (name === "bash" && mode === "minimal") {
+          const hidden = callView.split("\n").length - 1;
+          assert.ok(
+            screen(callComponent).includes(`(+${hidden} ${hidden === 1 ? "line" : "lines"})`),
+          );
+          for (const width of [0, 1, 10, 40, 100]) {
+            const lines = callComponent.render(width);
+            assert.equal(lines.length, width === 0 ? 0 : 1);
+            assert.ok(lines.every((line) => visibleWidth(line) <= width));
+          }
+          row.setExpanded(true);
+          assert.equal(screen(callComponent), callView, "expansion restores the original command");
+          row.setExpanded(false);
+          assert.equal(callComponent.render(100).length, 1);
+        }
         for (const rendered of [...renderCall.mock.calls, ...renderResult.mock.calls]) {
           assert.equal(
             rendered.error,
@@ -904,6 +935,61 @@ describe("tool-display-mode", { concurrency: false }, () => {
       row.updateResult(results[index]);
       assert.ok(screen(row).includes(summary), `Expected ${summary}: ${screen(row)}`);
       assert.doesNotMatch(screen(row), /Use (offset|limit)=/);
+    }
+  });
+
+  test("summarizes real writes and edits while retaining full file contents and diffs", async () => {
+    await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
+    app = await openDisplay(cwd, failures, [], { tools: ["write", "edit"] });
+    const content = `${ledger}\n`;
+    const oldText = "Restore the jellyfish database.";
+    const newText = "Restore the jellyfish database carefully.\nFeed the otters.";
+    for (const fixture of [
+      {
+        name: "write",
+        args: { path: "manifest.txt", content },
+        expected: content,
+        summary: "↳ 3 lines",
+      },
+      {
+        name: "edit",
+        args: { path: "manifest.txt", edits: [{ oldText, newText }] },
+        expected: content.replace(oldText, newText),
+        summary: "↳ +2 -1 lines",
+      },
+    ]) {
+      const tool = app.session.agent.state.tools.find((tool) => tool.name === fixture.name);
+      assert.ok(tool);
+      const row = app.row(fixture.name, fixture.args);
+      if (fixture.name === "edit") {
+        // Join Pi's real asynchronous diff preview before applying the edit.
+        const ready = deferred<void>();
+        const invalidate = row.invalidate.bind(row);
+        const observer = mock.method(row, "invalidate", () => {
+          invalidate();
+          ready.resolve();
+        });
+        await ready.promise;
+        observer.mock.restore();
+      }
+      const result = await tool.execute(`display-${fixture.name}`, fixture.args);
+      row.updateResult({ ...result, isError: false });
+      const compact = screen(row);
+      assert.match(compact, new RegExp(`${fixture.name} .*manifest\\.txt`));
+      assert.ok(compact.includes(fixture.summary), compact);
+      assert.equal(compact.split("\n").filter(Boolean).length, 2);
+      assert.doesNotMatch(compact, /jellyfish database|Feed the otters/);
+      for (const width of [10, 40, 100])
+        assert.ok(row.render(width).every((line) => visibleWidth(line) <= width));
+
+      row.setExpanded(true);
+      const expanded = screen(row);
+      for (const line of fixture.expected.trimEnd().split("\n"))
+        assert.ok(expanded.includes(line), expanded);
+      assert.doesNotMatch(expanded, /↳/);
+      row.setExpanded(false);
+      assert.equal(screen(row), compact);
+      assert.equal(await fs.readFile(path.join(cwd, "manifest.txt"), "utf8"), fixture.expected);
     }
   });
 
