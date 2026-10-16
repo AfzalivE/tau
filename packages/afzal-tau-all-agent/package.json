@@ -59,6 +59,7 @@
       "../../extensions/branch-term/index.ts",
       "../../extensions/btw.ts",
       "../../extensions/caffeinate/index.ts",
+      "../../extensions/code-links/index.ts",
       "../../extensions/tool-display-mode.ts",
       "../../extensions/raw/index.ts",
       "../../extensions/converge.ts",

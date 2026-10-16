@@ -259,11 +259,14 @@ The value is passed directly to Pi’s `--model` option. It supports `provider/m
 
 Bundled in `afzal-tau-all-agent`.
 
-| Extension   | Command         | Description                                                                |
-| ----------- | --------------- | -------------------------------------------------------------------------- |
-| `converge`  | `/converge`     | Run multiple planner personas and synthesize one recommended plan.         |
-| `raw`       | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
-| `spotlight` | `/spotlight`    | Mirror a linked worktree into the main worktree while you work elsewhere.  |
+| Extension    | Command         | Description                                                                |
+| ------------ | --------------- | -------------------------------------------------------------------------- |
+| `code-links` | `/code-links`   | Open file paths and code symbols from the transcript in your editor.       |
+| `converge`   | `/converge`     | Run multiple planner personas and synthesize one recommended plan.         |
+| `raw`        | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
+| `spotlight`  | `/spotlight`    | Mirror a linked worktree into the main worktree while you work elsewhere.  |
+
+Code Links turns `src/Foo.kt:42`, `Foo.kt`, `Foo.bar()`, and `` `Foo` `` in finished user and assistant messages into terminal hyperlinks. It indexes the Git working tree with [Universal Ctags](https://ctags.io) at session start and updates a file's entries after `edit` or `write`. Bare names in prose and names defined in more than one file stay plain text. Links need a terminal with OSC 8 hyperlink support. `/code-links` chooses `zed` (default), `vscode`, `cursor`, `studio` (Android Studio and other JetBrains IDEs, through `idea://`), or `file`, saved in `code-links.json` in the Pi agent directory.
 
 ### Skills in this fork
 

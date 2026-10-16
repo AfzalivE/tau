@@ -49,6 +49,7 @@ This package intentionally matches the `afzal-tau-all-agent` extension manifest.
 | `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
 | `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
+| `code-links`        | `/code-links`        | Make file paths and code symbols in the transcript open in your editor. Requires Universal Ctags.                         |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
 | `raw`               | `/raw`, `alt+r`      | Open the full active-branch transcript in terminal scrollback for copying.                                                |
 | `converge`          | `/converge`          | Run multiple planner personas and synthesize one recommended plan.                                                        |
