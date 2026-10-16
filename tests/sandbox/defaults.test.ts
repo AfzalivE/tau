@@ -204,6 +204,7 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
             { name: "subsequent session policy", policy: undefined, restricted },
           ]) {
             const result = await runWatcher(
+              launch.name,
               cwd,
               watchDirectory,
               changedFile,
@@ -300,6 +301,7 @@ async function runFilesystemCommand(
 
 /** Run a real sandboxed Node watcher; change the nested file only after readiness and join exit. */
 async function runWatcher(
+  launchName: string,
   cwd: string,
   directory: string,
   changedFile: string,
@@ -369,7 +371,7 @@ async function runWatcher(
     assert.equal(
       timedOut,
       false,
-      `Native watcher did not finish: ${JSON.stringify({ stdout, stderr })}`,
+      `${launchName}: native watcher did not finish: ${JSON.stringify({ stdout, stderr })}`,
     );
     return { code, stdout, stderr };
   } finally {
