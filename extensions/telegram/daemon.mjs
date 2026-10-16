@@ -7,6 +7,7 @@ import process from "node:process";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { lock } from "proper-lockfile";
 import { formatTelegramAssistantResultFromMessages } from "./assistant-result.mjs";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
@@ -18,6 +19,25 @@ const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const TELEGRAM_BOT_TOKEN_ENV = "TAU_TELEGRAM_BOT_TOKEN";
 const TELEGRAM_KEYCHAIN_SERVICE = "pi.telegram";
 const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
+const MARKED_STARTUP = process.env.TAU_TELEGRAM_STARTUP === "1";
+delete process.env.TAU_TELEGRAM_STARTUP;
+const startupController = new AbortController();
+let startupComplete = false;
+let ready = false;
+
+if (MARKED_STARTUP) {
+  process.once("disconnect", () => {
+    if (!ready) startupController.abort();
+  });
+  if (!process.connected) startupController.abort();
+}
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    if (!startupComplete) startupController.abort();
+    else void shutdownDaemon().catch(() => {});
+  });
+}
 
 const TELEGRAM_COMMANDS = [
   { command: "pin", description: "Pair this chat with pi using a 6-digit PIN" },
@@ -51,7 +71,7 @@ const MAX_QUEUED_HEADLESS_PROMPTS = 20;
 const RECENT_UPDATE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_RECENT_UPDATES = 5_000;
 const PI_ENTRYPOINT = process.env.TAU_TELEGRAM_PI_ENTRYPOINT?.trim() || undefined;
-const RESOLVED_TMPDIR = await fsp.realpath(os.tmpdir()).catch(() => os.tmpdir());
+let RESOLVED_TMPDIR = os.tmpdir();
 const HEADLESS_SESSION_PATH_ERROR = "Path must start with / or ~ and refer to a directory.";
 
 class TelegramApiError extends Error {
@@ -285,14 +305,23 @@ function canUseTelegramKeychain() {
 }
 
 async function runTelegramKeychainCommand(args) {
+  const signal = startupController.signal;
+  signal.throwIfAborted();
   return await new Promise((resolve, reject) => {
-    execFile("security", args, { encoding: "utf8" }, (error, stdout) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(stdout.trim());
-    });
+    const child = execFile(
+      "security",
+      args,
+      { encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL" },
+      (error, stdout) => {
+        signal.removeEventListener("abort", abort);
+        // execFile calls back after close. Cancellation must join the credential process.
+        if (signal.aborted) reject(signal.reason);
+        else if (error) reject(error);
+        else resolve(stdout.trim());
+      },
+    );
+    const abort = () => child.kill("SIGKILL");
+    signal.addEventListener("abort", abort, { once: true });
   });
 }
 
@@ -310,7 +339,9 @@ async function readTelegramBotTokenFromKeychain() {
         TELEGRAM_KEYCHAIN_SERVICE,
       ])) || null
     );
-  } catch {
+  } catch (error) {
+    startupController.signal.throwIfAborted();
+    if (error?.killed) console.error("[telegram] Keychain token read timed out.");
     return null;
   }
 }
@@ -329,6 +360,7 @@ async function resolveTelegramBotToken(config = undefined) {
   if (envToken) return { token: envToken, source: "env" };
 
   const keychainToken = await readTelegramBotTokenFromKeychain();
+  startupController.signal.throwIfAborted();
   if (keychainToken) return { token: keychainToken, source: "keychain" };
 
   const loadedConfig = config ?? (await loadConfig());
@@ -707,13 +739,10 @@ async function ensureHeadlessSessionPathExists(cwd) {
   return await fsp.realpath(cwd).catch(() => cwd);
 }
 
-let config = await loadConfig();
-const botTokenInfo = await resolveTelegramBotToken(config);
-if (!botTokenInfo.token) {
-  console.error(`[telegram] Missing bot token. ${describeTelegramBotTokenSetup()}`);
-  process.exit(1);
-}
-config = buildPersistedConfig(config, botTokenInfo.source);
+let config = {};
+let botTokenInfo;
+let releaseDaemonLease = null;
+let socketIdentity = null;
 
 let bot = null;
 const sessions = new Map();
@@ -1038,7 +1067,7 @@ async function stopPollingWithTimeout(reason) {
   await Promise.race([stopPromise, sleep(POLLING_STOP_TIMEOUT_MS)]);
 }
 
-async function shutdownDaemon({ clearPairingState = false } = {}) {
+async function shutdownDaemon({ clearPairingState = false, exitCode = 0 } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
   cancelShutdown();
@@ -1074,7 +1103,8 @@ async function shutdownDaemon({ clearPairingState = false } = {}) {
     // ignore
   }
 
-  if (server) {
+  // net.Server.close also unlinks its Unix socket. Never close over a replacement's path.
+  if (server && ownsSocket()) {
     await new Promise((resolve) => {
       let done = false;
       const finish = () => {
@@ -1093,13 +1123,31 @@ async function shutdownDaemon({ clearPairingState = false } = {}) {
     });
   }
 
-  try {
-    fs.unlinkSync(SOCKET_PATH);
-  } catch {
-    // ignore
+  if (ownsSocket()) {
+    try {
+      fs.unlinkSync(SOCKET_PATH);
+    } catch {
+      // ignore
+    }
+  }
+  if (releaseDaemonLease) {
+    await releaseDaemonLease().catch((error) => {
+      console.error(`[telegram] Failed to release daemon lease: ${errorMessage(error)}`);
+    });
+    releaseDaemonLease = null;
   }
 
-  process.exit(0);
+  process.exit(exitCode);
+}
+
+function ownsSocket() {
+  if (!socketIdentity) return false;
+  try {
+    const current = fs.lstatSync(SOCKET_PATH);
+    return current.dev === socketIdentity.dev && current.ino === socketIdentity.ino;
+  } catch {
+    return false;
+  }
 }
 
 function escapeHtml(text) {
@@ -2110,29 +2158,63 @@ function cancelShutdown() {
   }
 }
 
-async function startServer() {
-  await fsp.mkdir(RUN_DIR, { recursive: true, mode: 0o700 });
-
-  if (fs.existsSync(SOCKET_PATH)) {
-    const ok = await new Promise((resolve) => {
-      const socket = net.connect(SOCKET_PATH);
-      socket.on("connect", () => {
-        socket.end();
-        resolve(true);
-      });
-      socket.on("error", () => resolve(false));
+async function hasLiveSocket() {
+  const signal = startupController.signal;
+  signal.throwIfAborted();
+  return await new Promise((resolve, reject) => {
+    const socket = net.connect(SOCKET_PATH);
+    const finish = (error, live = false) => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(live);
+    };
+    const abort = () => finish(signal.reason);
+    const timeout = setTimeout(() => finish(new Error("Daemon socket probe timed out")), 1_000);
+    signal.addEventListener("abort", abort, { once: true });
+    socket.once("connect", () => finish(null, true));
+    socket.once("error", (error) => {
+      finish(["ENOENT", "ECONNREFUSED"].includes(error.code) ? null : error);
     });
-    if (ok) {
-      console.error("[telegram] Daemon already running.");
-      process.exit(0);
-    }
-    try {
-      fs.unlinkSync(SOCKET_PATH);
-    } catch {
-      // ignore
-    }
-  }
+  });
+}
 
+async function acquireDaemonLease() {
+  await fsp.mkdir(RUN_DIR, { recursive: true, mode: 0o700 });
+  startupController.signal.throwIfAborted();
+  try {
+    releaseDaemonLease = await lock(path.join(RUN_DIR, "telegram.daemon"), {
+      realpath: false,
+      retries: 0,
+      stale: 30_000,
+      onCompromised: () => {
+        releaseDaemonLease = null;
+        console.error("[telegram] Daemon lease compromised; stopping.");
+        if (!startupComplete) startupController.abort();
+        else void shutdownDaemon({ exitCode: 1 }).catch(() => {});
+      },
+    });
+  } catch (error) {
+    if (error?.code !== "ELOCKED") throw error;
+    console.error("[telegram] Daemon already starting or running.");
+    return false;
+  }
+  startupController.signal.throwIfAborted();
+  if (await hasLiveSocket()) {
+    console.error("[telegram] Daemon already running.");
+    return false;
+  }
+  startupController.signal.throwIfAborted();
+  try {
+    fs.unlinkSync(SOCKET_PATH);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  return true;
+}
+
+async function startServer() {
   const srv = net.createServer((socket) => {
     cancelShutdown();
 
@@ -2374,6 +2456,7 @@ async function startServer() {
     srv.listen(SOCKET_PATH);
   });
 
+  socketIdentity = fs.lstatSync(SOCKET_PATH);
   try {
     fs.chmodSync(SOCKET_PATH, 0o600);
   } catch {
@@ -2383,89 +2466,117 @@ async function startServer() {
   return srv;
 }
 
-server = await startServer();
+async function startDaemon() {
+  startupController.signal.throwIfAborted();
+  if (!(await acquireDaemonLease())) return false;
+  config = await loadConfig();
+  startupController.signal.throwIfAborted();
+  botTokenInfo = await resolveTelegramBotToken(config);
+  startupController.signal.throwIfAborted();
+  if (!botTokenInfo.token) {
+    throw new Error(`Missing bot token. ${describeTelegramBotTokenSetup()}`);
+  }
+  config = buildPersistedConfig(config, botTokenInfo.source);
+  pairedChatId = config.pairedChatId;
+  RESOLVED_TMPDIR = await fsp.realpath(os.tmpdir()).catch(() => os.tmpdir());
+  startupController.signal.throwIfAborted();
+  server = await startServer();
+  startupController.signal.throwIfAborted();
 
-bot = new TelegramPollingBot(botTokenInfo.token, {
-  polling: {
-    params: {
-      timeout: TELEGRAM_POLL_TIMEOUT_SEC,
+  bot = new TelegramPollingBot(botTokenInfo.token, {
+    polling: {
+      params: {
+        timeout: TELEGRAM_POLL_TIMEOUT_SEC,
+      },
     },
-  },
-  request: {
-    timeout: TELEGRAM_HTTP_TIMEOUT_MS,
-    uploadTimeout: TELEGRAM_UPLOAD_TIMEOUT_MS,
-  },
-});
+    request: {
+      timeout: TELEGRAM_HTTP_TIMEOUT_MS,
+      uploadTimeout: TELEGRAM_UPLOAD_TIMEOUT_MS,
+    },
+  });
 
-void syncBotCommands();
-// The polling client retries failed polls internally. Avoid stop/start recovery here:
-// cancelling an in-flight poll can spin up overlapping pollers and replay the same
-// Telegram update multiple times.
-bot.on("polling_error", (error) => {
-  const message = errorMessage(error);
-  const kind = isLikelyNetworkPollingError(error) ? "polling_error (network)" : "polling_error";
-  console.error(`[telegram] ${kind}: ${message}`);
-});
+  void syncBotCommands();
+  // The polling client retries failed polls internally. Avoid stop/start recovery here:
+  // cancelling an in-flight poll can spin up overlapping pollers and replay the same
+  // Telegram update multiple times.
+  bot.on("polling_error", (error) => {
+    const message = errorMessage(error);
+    const kind = isLikelyNetworkPollingError(error) ? "polling_error (network)" : "polling_error";
+    console.error(`[telegram] ${kind}: ${message}`);
+  });
 
-bot.on("message", (msg) => {
-  const updateKey = getUpdateDedupeKeyForMessage(msg);
-  if (wasUpdateProcessed(updateKey)) {
-    return;
-  }
-
-  handleTelegramMessage(msg).catch((error) =>
-    console.error("[telegram] telegram handler error", error),
-  );
-});
-
-bot.on("callback_query", (query) => {
-  const updateKey = getUpdateDedupeKeyForCallbackQuery(query);
-  if (wasUpdateProcessed(updateKey)) {
-    return;
-  }
-
-  (async () => {
-    const chatId = query.message?.chat?.id;
-    if (!chatId || !isAuthorizedChat(chatId)) {
-      try {
-        await bot.answerCallbackQuery(query.id, { text: "Not authorized" });
-      } catch {}
+  bot.on("message", (msg) => {
+    const updateKey = getUpdateDedupeKeyForMessage(msg);
+    if (wasUpdateProcessed(updateKey)) {
       return;
     }
 
-    const sessionKey = getSessionKeyFromCallbackData(query.data);
-    if (!sessionKey) {
+    handleTelegramMessage(msg).catch((error) =>
+      console.error("[telegram] telegram handler error", error),
+    );
+  });
+
+  bot.on("callback_query", (query) => {
+    const updateKey = getUpdateDedupeKeyForCallbackQuery(query);
+    if (wasUpdateProcessed(updateKey)) {
+      return;
+    }
+
+    (async () => {
+      const chatId = query.message?.chat?.id;
+      if (!chatId || !isAuthorizedChat(chatId)) {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Not authorized" });
+        } catch {}
+        return;
+      }
+
+      const sessionKey = getSessionKeyFromCallbackData(query.data);
+      if (!sessionKey) {
+        try {
+          await bot.answerCallbackQuery(query.id);
+        } catch {}
+        return;
+      }
+
+      const session = sessions.get(sessionKey);
+      if (!session) {
+        try {
+          await bot.answerCallbackQuery(query.id, {
+            text: "That session is no longer available. Use /session.",
+          });
+        } catch {}
+        return;
+      }
+
       try {
         await bot.answerCallbackQuery(query.id);
       } catch {}
-      return;
-    }
+      await activateSession(chatId, session);
+    })().catch((error) => console.error("[telegram] callback query error", error));
+  });
 
-    const session = sessions.get(sessionKey);
-    if (!session) {
-      try {
-        await bot.answerCallbackQuery(query.id, {
-          text: "That session is no longer available. Use /session.",
-        });
-      } catch {}
-      return;
-    }
+  updateTypingIndicator();
 
-    try {
-      await bot.answerCallbackQuery(query.id);
-    } catch {}
-    await activateSession(chatId, session);
-  })().catch((error) => console.error("[telegram] callback query error", error));
-});
+  startupController.signal.throwIfAborted();
+  if (MARKED_STARTUP) {
+    if (!process.connected) throw new Error("Launcher disconnected before readiness");
+    // Commit to handoff before sending: the launcher may disconnect as soon as it receives this.
+    ready = true;
+    await new Promise((resolve, reject) => {
+      process.send({ type: "telegram_ready" }, (error) => (error ? reject(error) : resolve()));
+    });
+  }
+  startupController.signal.throwIfAborted();
+  startupComplete = true;
+  console.error(`[telegram] Daemon running. Socket: ${SOCKET_PATH}`);
+  return true;
+}
 
-updateTypingIndicator();
-
-process.on("SIGINT", () => {
-  shutdownDaemon().catch(() => {});
-});
-
-process.on("SIGTERM", () => {
-  shutdownDaemon().catch(() => {});
-});
-
-console.error(`[telegram] Daemon running. Socket: ${SOCKET_PATH}`);
+try {
+  if (!(await startDaemon())) await shutdownDaemon();
+} catch (error) {
+  const cancelled = startupController.signal.aborted;
+  if (!cancelled) console.error(`[telegram] Failed to start daemon: ${errorMessage(error)}`);
+  await shutdownDaemon({ exitCode: cancelled ? 0 : 1 });
+}

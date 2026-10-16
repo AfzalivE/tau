@@ -317,6 +317,8 @@ describe("Telegram prompt preflight", () => {
           .length,
         1,
       );
+      // Model telemetry uses IPC, independently of the RPC stdout settlement above.
+      await daemon.waitFixture((event) => event.type === "model" && event.text === "awake owl");
       assert.equal(
         daemon.fixtureEvents.filter((event) => event.type === "model").length,
         boundary === "tool-retry" ? 4 : 3,
