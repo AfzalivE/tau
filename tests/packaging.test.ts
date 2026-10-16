@@ -151,7 +151,9 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
   });
 
   for (const name of packageNames) {
-    test(`${name} preserves sandbox overrides and dependency isolation after install and dedupe`, async () => {
+    const title = `${name} preserves sandbox overrides and dependency isolation after install and dedupe`;
+    // Budget the full offline workflow, retaining each subprocess's 20-second deadline.
+    test(title, { timeout: 60_000 }, async () => {
       await run(process.execPath, ["scripts/package.mjs"]);
       assert.deepEqual(
         await readPatchedFiles(path.join(fixture, "node_modules", runtimeName)),
