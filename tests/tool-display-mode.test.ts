@@ -1049,6 +1049,62 @@ describe("tool-display-mode", { concurrency: false }, () => {
     assert.match(screen(row), /↳ 1 line/);
   });
 
+  test("summarizes real Websearch results without clipping queries or replacing native expansion", async () => {
+    const { default: websearch } = await import("../extensions/websearch/index.js");
+    app = await openDisplay(cwd, failures, [], {
+      tools: ["websearch"],
+      extensions: [websearch],
+    });
+    const native = app.session.getToolDefinition("websearch");
+    const definition = app.renderers("websearch");
+    assert.ok(native?.renderCall && native.renderResult && definition);
+    assert.equal(definition.renderCall, native.renderCall, "queries keep their original renderer");
+    assert.equal(definition.renderShell, native.renderShell);
+    const query = Array.from({ length: 12 }, (_, i) => `Research croissant source ${i}`).join("\n");
+    const text = [
+      "**Croissant research**",
+      ...Array.from({ length: 11 }, (_, i) => `[Source ${i}]`),
+    ].join("\n");
+    const result = { content: [{ type: "text" as const, text }], isError: false };
+    const nativeRow = app.row("websearch", { query }, native);
+    const row = app.row("websearch", { query }, definition);
+    nativeRow.updateResult(result);
+    row.updateResult(result);
+    assert.equal(screen(row), screen(nativeRow), "collapsed mode delegates its ten-line preview");
+    assert.match(screen(row), /2 more lines/);
+
+    for (let i = 0; i < 2; i++) {
+      app.editor.handleInput("\x1bo");
+      await finishWrites();
+    }
+    row.setExpanded(app.expanded());
+    const minimal = screen(row);
+    assert.match(minimal, /↳ 12 lines/);
+    assert.doesNotMatch(minimal, /Croissant research|\[Source/);
+    for (const line of query.split("\n")) assert.ok(minimal.includes(line), minimal);
+
+    nativeRow.setExpanded(true);
+    row.setExpanded(true);
+    assert.equal(screen(row), screen(nativeRow), "expansion restores the original Markdown view");
+    assert.match(screen(row), /Source 10/);
+    assert.doesNotMatch(screen(row), /\*\*Croissant research\*\*|↳/);
+    row.setExpanded(false);
+    assert.match(screen(row), /↳ 12 lines/);
+
+    for (const [output, details, summary] of [
+      ["", undefined, "no output"],
+      ["sources\n\n[1,\n2]", undefined, "4 lines"],
+      [
+        "first source\nlast source\n\n[Full output saved to /tmp/croissants.txt]",
+        { truncation: { outputLines: 2 } },
+        "2 lines",
+      ],
+    ] as const) {
+      row.updateResult({ content: [{ type: "text", text: output }], details, isError: false });
+      assert.ok(screen(row).includes(`↳ ${summary}`), screen(row));
+    }
+  });
+
   test("preserves a read override's access boundary and expanded renderer", async () => {
     await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
     await fs.writeFile(path.join(cwd, "manifest.txt"), ledger);

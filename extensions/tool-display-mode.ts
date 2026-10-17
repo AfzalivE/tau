@@ -6,7 +6,6 @@ import {
   type AppKeybinding,
   CustomEditor,
   type AgentToolResult,
-  type BashToolDetails,
   type EditToolDetails,
   type ExtensionAPI,
   type ExtensionContext,
@@ -44,7 +43,7 @@ const FIND_NO_MATCHES_OUTPUT = "No files found matching pattern"; // core/tools/
 const LS_EMPTY_DIRECTORY_OUTPUT = "(empty directory)"; // core/tools/ls.ts
 
 // PowerShell is intentionally omitted because Tau does not officially support Windows.
-const TOOL_NAMES = ["read", "bash", "write", "edit", "grep", "find", "ls"] as const;
+const TOOL_NAMES = ["read", "bash", "write", "edit", "grep", "find", "ls", "websearch"] as const;
 
 // --- Types ---
 
@@ -280,7 +279,8 @@ function formatMinimalResult(
   let summary: string;
   switch (name) {
     case "bash":
-      summary = bashSummary(result);
+    case "websearch":
+      summary = textSummary(result);
       break;
     case "read":
       summary = readSummary(result);
@@ -305,11 +305,11 @@ function formatMinimalResult(
   return theme.fg("muted", `↳ ${summary}`);
 }
 
-function bashSummary(result: AgentToolResult<any>): string {
+function textSummary(result: AgentToolResult<any>): string {
   const text = textOutput(result).trim();
   if (!text || text === "(no output)") return "no output";
 
-  const details = result.details as BashToolDetails | undefined;
+  const details = result.details as { truncation?: { outputLines?: number } } | undefined;
   const lines = details?.truncation?.outputLines ?? countLines(text);
   return `${lines} ${plural(lines, "line")}`;
 }
