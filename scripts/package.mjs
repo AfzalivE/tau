@@ -8,7 +8,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const packagesDir = path.join(rootDir, "packages");
 const distDir = path.join(rootDir, "dist");
 
-const packageNames = ["tau-coding-agent", "tau-all-agent", "double-tau"];
+const packageNames = ["tau-coding-agent", "tau-all-agent", "double-tau", "pi-code-links"];
 const resourceTypes = ["extensions", "skills", "prompts", "themes"];
 
 await rm(distDir, { recursive: true, force: true });
@@ -27,7 +27,7 @@ async function buildPackage(packageName) {
 
   await mkdir(outputDir, { recursive: true });
   await cp(path.join(sourceDir, "README.md"), path.join(outputDir, "README.md"));
-  await cp(path.join(rootDir, "LICENSE"), path.join(outputDir, "LICENSE"));
+  await cp(await getLicensePath(sourceDir), path.join(outputDir, "LICENSE"));
 
   for (const resourceType of resourceTypes) {
     await copyResources(pi[resourceType] ?? [], outputDir);
@@ -112,6 +112,19 @@ function isDirectoryEntryPoint(entry) {
     basename === "index.mjs" ||
     basename === "index.mts" ||
     basename === "index.ts"
+  );
+}
+
+// A package by a different copyright holder keeps its own LICENSE next to its manifest.
+async function getLicensePath(sourceDir) {
+  const packageLicense = path.join(sourceDir, "LICENSE");
+  return (await exists(packageLicense)) ? packageLicense : path.join(rootDir, "LICENSE");
+}
+
+async function exists(filePath) {
+  return stat(filePath).then(
+    () => true,
+    () => false,
   );
 }
 

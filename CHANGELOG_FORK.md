@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Added
 
 - Added a `code-links` extension that links file paths and code symbols in the transcript to Zed, VS Code, VS Code Insiders, VSCodium, Cursor, JetBrains IDEs, TextMate, MacVim, or Nova, using a Universal Ctags index.
+- Added a standalone `pi-code-links` npm package for the `code-links` extension, with its own MIT license.
 - Added an optional `pi_model` setting to select Dream’s Pi model and thinking level without changing Pi defaults.
 - Added “Always allow and retry” for global sandbox permissions that persist across Pi sessions, while preserving project overrides.
 - Added per-session sandbox audit logs, an exclusion disable switch, and a strict standalone `sandbox-run` command.

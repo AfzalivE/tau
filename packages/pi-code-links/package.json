@@ -1,0 +1,43 @@
+{
+  "name": "pi-code-links",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi extension that links file paths and code symbols in the transcript to your editor, using Universal Ctags",
+  "keywords": [
+    "code-navigation",
+    "ctags",
+    "cursor",
+    "editor",
+    "hyperlinks",
+    "jetbrains",
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "vscode",
+    "zed"
+  ],
+  "homepage": "https://github.com/AfzalivE/tau/tree/main/packages/pi-code-links#readme",
+  "bugs": {
+    "url": "https://github.com/AfzalivE/tau/issues"
+  },
+  "license": "MIT",
+  "author": "Afzal Najam",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AfzalivE/tau.git",
+    "directory": "packages/pi-code-links"
+  },
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "../../extensions/code-links/index.ts"
+    ]
+  }
+}
