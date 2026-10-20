@@ -17,10 +17,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
-- Moved the fork's own extensions (`acp-client`, `code-links`, `converge`, `raw`, and `spotlight`) and skills (`address-pr-comments`, `cald`, `dream`, `fix-ci`, `gh`, `git-rebase-check`, `git-worktree`, `material-3`, `ms-openapi-explorer`, `pup/datadog/dashboards`, `qmd`, `review-breaker`, `td`, and `tdc`) into a new `double-tau` package. `double-tau` replaces `tau-acp-client`, and `afzal-tau-all-agent` and `afzal-tau-non-coding-agent` no longer bundle these resources. Install `double-tau` next to them to keep these resources.
+- Moved the fork's own extensions (`acp-client`, `code-links`, `converge`, `raw`, and `spotlight`) and skills (`address-pr-comments`, `cald`, `dream`, `fix-ci`, `gh`, `git-rebase-check`, `git-worktree`, `material-3`, `ms-openapi-explorer`, `pup/datadog/dashboards`, `qmd`, `review-breaker`, `td`, and `tdc`) into a new `double-tau` package. `double-tau` replaces `tau-acp-client`. Install it next to `tau-all-agent` to keep these resources.
 - Documented `gh --attach` uploads for issues and PR/issue comments in the `gh` skill, in addition to PR create and edit.
 - Use native dialogs for sandbox filesystem, network, and macOS service approvals instead of the fork's compact permission panels.
 - Accepted case-insensitive sandbox debug aliases and included capture timestamps in `/sandbox doctor` diagnostics.
+
+### Removed
+
+- Removed the `afzal-tau-all-agent` and `afzal-tau-non-coding-agent` packages. Load `tau-all-agent` from this checkout instead, and filter out `memory` or skills in `settings.json`. The fork no longer publishes packages to npm.
 
 ### Security
 

@@ -4,13 +4,11 @@ Tau is a batteries-included distribution for [Pi](https://pi.dev), a brilliant c
 
 It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding `websearch` and `subagent` tools to complement the default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
 
-| Package                      | Purpose                                                                |
-| ---------------------------- | ---------------------------------------------------------------------- |
-| `tau-coding-agent`           | Coding package.                                                        |
-| `tau-all-agent`              | Full package.                                                          |
-| `afzal-tau-all-agent`        | Full fork-specific package except the `memory` extension.              |
-| `afzal-tau-non-coding-agent` | Local-model knowledge-work package for insights from non-code sources. |
-| `double-tau`                 | Afzal's own extensions and skills, including the ACP client.           |
+| Package            | Purpose                                                      |
+| ------------------ | ------------------------------------------------------------ |
+| `tau-coding-agent` | Coding package.                                              |
+| `tau-all-agent`    | Full package.                                                |
+| `double-tau`       | Afzal's own extensions and skills, including the ACP client. |
 
 Fork-specific package/configuration details are grouped under [Fork-specific additions](#fork-specific-additions) below.
 
@@ -22,15 +20,7 @@ Fork-specific package/configuration details are grouped under [Fork-specific add
 pi install npm:tau-coding-agent
 # or
 pi install npm:tau-all-agent
-# or
-pi install npm:afzal-tau-all-agent
-# or
-pi install npm:afzal-tau-non-coding-agent
-# or
-pi install npm:double-tau
 ```
-
-Need the full fork-specific package? `afzal-tau-all-agent` bundles the base Tau package contents with the fork's sandbox changes, but intentionally excludes the `memory` extension. Install `double-tau` next to it for the extensions and skills in this fork.
 
 Project-local install allows you to pin Tau for everyone working on the project:
 
@@ -157,8 +147,6 @@ npm run check
 
 pi -e ./packages/tau-coding-agent
 pi -e ./packages/tau-all-agent
-pi -e ./packages/afzal-tau-all-agent
-pi -e ./packages/afzal-tau-non-coding-agent
 pi -e ./packages/double-tau
 ```
 
@@ -176,9 +164,6 @@ The GitHub Actions publish workflow stages packages under `dist/` and publishes 
 
 1. `tau-coding-agent`
 2. `tau-all-agent`
-3. `afzal-tau-all-agent`
-4. `afzal-tau-non-coding-agent`
-5. `double-tau`
 
 Published packages contain their selected Tau resources and the patched sandbox runtime. Consumers do not need to run patch scripts.
 
@@ -190,39 +175,23 @@ Fork-specific changes are recorded in [CHANGELOG_FORK.md](CHANGELOG_FORK.md). [C
 
 ### Package
 
-`afzal-tau-all-agent` bundles the base Tau package contents with the fork's sandbox changes, but intentionally excludes the `memory` extension. The extensions and skills listed below ship in `double-tau`.
+`double-tau` bundles the extensions and skills listed below. It is not published to npm. This fork's `tau-coding-agent` and `tau-all-agent` packages include its sandbox changes, but only when you load them from this checkout; `npm:tau-*` installs upstream Tau.
 
-Install it with:
-
-```bash
-pi install npm:afzal-tau-all-agent
-```
-
-For local development/testing:
+Install the local packages next to each other:
 
 ```bash
-pi -e ./packages/afzal-tau-all-agent
+pi install ./packages/tau-all-agent
+pi install ./packages/double-tau
 ```
 
-When publishing this fork, `afzal-tau-all-agent` is published after `tau-coding-agent` and `tau-all-agent`.
+To leave out an extension, such as `memory`, filter it in the package entry in `settings.json`:
 
-### Non-coding agent package
-
-`afzal-tau-non-coding-agent` is a knowledge-work profile for using Pi with non-code sources, such as a personal Obsidian vault, and then running `/insights` over those sessions. It is intended for locally hosted models and bundles the same extensions as `afzal-tau-all-agent`, with only the focused `browser-tools` skill.
-
-Install it with:
-
-```bash
-pi install npm:afzal-tau-non-coding-agent
+```json
+{
+  "source": "./packages/tau-all-agent",
+  "extensions": ["-../../extensions/memory.ts"]
+}
 ```
-
-For local development/testing:
-
-```bash
-pi -e ./packages/afzal-tau-non-coding-agent
-```
-
-Configure a local provider such as Ollama, LM Studio, or vLLM in `~/.pi/agent/models.json`, select it with `/model`, and run `/insights scope=project` from the source root. The package does not bundle model configuration.
 
 ### Agent configuration
 
@@ -257,11 +226,7 @@ The value is passed directly to Pi’s `--model` option. It supports `provider/m
 
 ### Extensions in this fork
 
-Bundled in `double-tau`:
-
-```bash
-pi install npm:double-tau
-```
+Bundled in `double-tau`.
 
 | Extension    | Command         | Description                                                                |
 | ------------ | --------------- | -------------------------------------------------------------------------- |

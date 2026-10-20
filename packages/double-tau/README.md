@@ -4,17 +4,13 @@ Afzal's own extensions and skills for [Pi](https://pi.dev), separate from the [T
 
 ## Install
 
-```bash
-pi install npm:double-tau
-```
-
-Project-local install lets a repository pin these extensions and skills for everyone working on it:
+This package is not published to npm. Install it from a checkout of [AfzalivE/tau](https://github.com/AfzalivE/tau):
 
 ```bash
-pi install -l npm:double-tau
+pi install ./packages/double-tau
 ```
 
-Install it alone or next to a Tau package such as `afzal-tau-all-agent`.
+Install it alone or next to a Tau package such as `tau-all-agent`.
 
 ## Extensions
 
