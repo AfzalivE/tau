@@ -14,7 +14,7 @@ Fork-specific package/configuration details are grouped under [Fork-specific add
 
 ## Install
 
-[Install Pi](https://pi.dev/docs/latest#quick-start), and then:
+[Install Pi](https://pi.dev/docs/latest#quick-start) 1.3.0 or newer, and then:
 
 ```bash
 pi install npm:tau-coding-agent

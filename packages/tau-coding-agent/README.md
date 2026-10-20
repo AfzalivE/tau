@@ -6,6 +6,8 @@ Tau turns Pi's minimal core into an opinionated, polished coding-agent setup wit
 
 ## Install
 
+Requires Pi 1.3.0 or newer.
+
 ```bash
 pi install npm:tau-coding-agent
 ```

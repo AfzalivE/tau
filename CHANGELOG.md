@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-17
+
+### Changed
+
+- Minimal tool display limits Bash commands to one terminal row and replaces Write, Edit, and Websearch previews with line-count summaries. Expanding reveals the full content.
+
+## [0.4.0] - 2026-10-16
+
 ### Added
 
 - Configurable Review models, thinking levels, and focuses via `review.json`.

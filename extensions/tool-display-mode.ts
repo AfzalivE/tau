@@ -6,7 +6,7 @@ import {
   type AppKeybinding,
   CustomEditor,
   type AgentToolResult,
-  type BashToolDetails,
+  type EditToolDetails,
   type ExtensionAPI,
   type ExtensionContext,
   type KeybindingsManager,
@@ -19,6 +19,7 @@ import {
   Loader,
   Text,
   truncateToWidth,
+  visibleWidth,
   type AutocompleteProvider,
   type Component,
   type EditorComponent,
@@ -42,7 +43,7 @@ const FIND_NO_MATCHES_OUTPUT = "No files found matching pattern"; // core/tools/
 const LS_EMPTY_DIRECTORY_OUTPUT = "(empty directory)"; // core/tools/ls.ts
 
 // PowerShell is intentionally omitted because Tau does not officially support Windows.
-const TOOL_NAMES = ["read", "bash", "grep", "find", "ls"] as const;
+const TOOL_NAMES = ["read", "bash", "write", "edit", "grep", "find", "ls", "websearch"] as const;
 
 // --- Types ---
 
@@ -131,8 +132,27 @@ function createToolDisplayRenderers(
   base: ToolRenderers,
   getMode: () => Mode | undefined,
 ): ToolRenderers {
+  const renderCall = base.renderCall;
   return {
     ...base,
+
+    renderCall:
+      (name === "bash" || name === "write" || name === "edit") && renderCall
+        ? (args, theme, context) => {
+            const previous = context.lastComponent;
+            const component =
+              previous instanceof MinimalCallComponent
+                ? previous
+                : new MinimalCallComponent(previous, getMode, theme, name);
+            component.nativeComponent = renderCall(args, theme, {
+              ...context,
+              lastComponent: component.nativeComponent,
+            });
+            component.expanded = context.expanded;
+            component.theme = theme;
+            return component;
+          }
+        : renderCall,
 
     renderResult(result, options, theme, context) {
       const mode = getMode();
@@ -149,6 +169,7 @@ function createToolDisplayRenderers(
           ...context,
           lastComponent: component.nativeComponent,
         });
+        component.setPaddingX(base.renderShell === "self" ? context.outputPad : 0);
         component.setText(formatMinimalResult(name, result, options, theme, context));
         return component;
       }
@@ -197,6 +218,43 @@ function reportSaveError(ctx: ExtensionContext, error: unknown): void {
 
 // --- Minimal rendering ---
 
+class MinimalCallComponent implements Component {
+  expanded = false;
+
+  constructor(
+    public nativeComponent: Component | undefined,
+    private readonly getMode: () => Mode | undefined,
+    public theme: Theme,
+    private readonly name: ToolName,
+  ) {}
+
+  render(width: number): string[] {
+    if (width <= 0) return [];
+    const lines = this.nativeComponent?.render(width) ?? [];
+    // Read the mode here: switching between collapsed modes need not rerun renderCall.
+    if (this.getMode() !== "minimal" || this.expanded || lines.length <= 1) return lines;
+
+    // Edit's native box has padding before its file header.
+    const first = lines.findIndex((line) => stripVTControlCharacters(line).trim());
+    if (first < 0) return [];
+    const header = lines[first]!;
+    if (!lines.slice(first + 1).some((line) => stripVTControlCharacters(line).trim()))
+      return [header];
+
+    const hidden = lines.length - first - 1;
+    let hint = this.theme.fg(
+      "muted",
+      this.name === "bash" ? ` … (+${hidden} ${plural(hidden, "line")})` : " …",
+    );
+    if (visibleWidth(hint) >= width) hint = this.theme.fg("muted", "…");
+    return [truncateToWidth(header, width - visibleWidth(hint), "") + hint];
+  }
+
+  invalidate(): void {
+    this.nativeComponent?.invalidate();
+  }
+}
+
 class MinimalResultComponent extends Text {
   constructor(public nativeComponent: Component | undefined) {
     super("", 0, 0);
@@ -221,10 +279,17 @@ function formatMinimalResult(
   let summary: string;
   switch (name) {
     case "bash":
-      summary = bashSummary(result);
+    case "websearch":
+      summary = textSummary(result);
       break;
     case "read":
       summary = readSummary(result);
+      break;
+    case "write":
+      summary = writeSummary(context.args);
+      break;
+    case "edit":
+      summary = editSummary(result);
       break;
     case "grep":
       summary = grepSummary(result);
@@ -240,11 +305,11 @@ function formatMinimalResult(
   return theme.fg("muted", `↳ ${summary}`);
 }
 
-function bashSummary(result: AgentToolResult<any>): string {
+function textSummary(result: AgentToolResult<any>): string {
   const text = textOutput(result).trim();
   if (!text || text === "(no output)") return "no output";
 
-  const details = result.details as BashToolDetails | undefined;
+  const details = result.details as { truncation?: { outputLines?: number } } | undefined;
   const lines = details?.truncation?.outputLines ?? countLines(text);
   return `${lines} ${plural(lines, "line")}`;
 }
@@ -259,6 +324,22 @@ function readSummary(result: AgentToolResult<any>): string {
     details?.truncation?.outputLines ?? countLines(stripTrailingNotice(textOutput(result)));
 
   return `${lines} ${plural(lines, "line")}`;
+}
+
+function writeSummary(args: unknown): string {
+  if (!isObject(args) || typeof args.content !== "string") return "done";
+  const lines = countLines(args.content);
+  return `${lines} ${plural(lines, "line")}`;
+}
+
+function editSummary(result: AgentToolResult<any>): string {
+  const diff = (result.details as EditToolDetails | undefined)?.diff;
+  if (typeof diff !== "string") return "done";
+
+  // Pi's structured diff prefixes changed lines with a sign and line number.
+  const added = diff.match(/^\+ *\d+ /gm)?.length ?? 0;
+  const removed = diff.match(/^- *\d+ /gm)?.length ?? 0;
+  return added || removed ? `+${added} -${removed} ${plural(added + removed, "line")}` : "done";
 }
 
 function grepSummary(result: AgentToolResult<any>): string {

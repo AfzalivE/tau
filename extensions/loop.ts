@@ -205,6 +205,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
   let loopGeneration = 0;
   let lastAssistantStopReason: string | undefined;
   let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
+  let pendingLoopDispatch: Promise<void> | undefined;
   let pendingSummary: { controller: AbortController; done: Promise<void> } | undefined;
 
   function persistState(state: LoopStateData): void {
@@ -272,9 +273,13 @@ export default function loopExtension(pi: ExtensionAPI): void {
     });
   }
 
-  function triggerLoopPrompt(ctx: ExtensionContext): void {
+  async function triggerLoopPrompt(ctx: ExtensionContext): Promise<void> {
     const prompt = loopState.prompt;
     if (!loopState.active || !loopState.mode || !prompt) return;
+    if (!pi.getActiveTools().includes("signal_loop_success")) {
+      if (await setLoopState({ active: false }, ctx)) notifyMissingSuccessTool(ctx);
+      return;
+    }
     if (ctx.hasPendingMessages()) return;
 
     const loopCount = (loopState.loopCount ?? 0) + 1;
@@ -295,13 +300,28 @@ export default function loopExtension(pi: ExtensionAPI): void {
     );
   }
 
+  function notifyMissingSuccessTool(ctx: ExtensionContext): void {
+    const message =
+      "Loop requires the active signal_loop_success tool. Enable it before starting /loop.";
+    if (ctx.hasUI) ctx.ui.notify(message, "warning");
+    else console.error(message);
+  }
+
   function scheduleLoopPrompt(ctx: ExtensionContext): void {
-    if (pendingLoopPrompt) return;
+    if (pendingLoopPrompt || pendingLoopDispatch) return;
 
     pendingLoopPrompt = setImmediate(() => {
       pendingLoopPrompt = undefined;
       if (!loopState.active || !ctx.isIdle()) return;
-      triggerLoopPrompt(ctx);
+      const done = triggerLoopPrompt(ctx)
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`Loop dispatch failed: ${message}`);
+        })
+        .finally(() => {
+          if (pendingLoopDispatch === done) pendingLoopDispatch = undefined;
+        });
+      pendingLoopDispatch = done;
     });
     pendingLoopPrompt.unref?.();
   }
@@ -439,12 +459,18 @@ export default function loopExtension(pi: ExtensionAPI): void {
         }
       }
 
+      if (!pi.getActiveTools().includes("signal_loop_success")) {
+        notifyMissingSuccessTool(ctx);
+        return;
+      }
+
       const summarizedState: LoopStateData = { ...nextState, summary: undefined, loopCount: 0 };
       if (!(await setLoopState(summarizedState, ctx))) return;
+      const generation = loopGeneration;
       ctx.ui.notify("Loop active", "info");
-      triggerLoopPrompt(ctx);
+      await triggerLoopPrompt(ctx);
 
-      startSummary(ctx);
+      if (generation === loopGeneration) startSummary(ctx);
     },
   });
 
@@ -512,7 +538,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
     cancelScheduledLoopPrompt();
     const generation = ++loopGeneration;
     lastAssistantStopReason = undefined;
-    const cancelled = cancelSummary();
+    const cancelled = Promise.all([cancelSummary(), pendingLoopDispatch]);
     try {
       loopState = loadState(ctx);
       updateStatus(ctx, loopState);
@@ -529,6 +555,6 @@ export default function loopExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     loopGeneration += 1;
     cancelScheduledLoopPrompt();
-    await cancelSummary();
+    await Promise.all([cancelSummary(), pendingLoopDispatch]);
   });
 }

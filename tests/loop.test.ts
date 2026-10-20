@@ -102,6 +102,126 @@ describe("loop", { concurrency: false }, () => {
     }
   });
 
+  for (const headless of [false, true]) {
+    test(`refuses a restored loadout without the success tool in ${headless ? "JSON" : "TUI"} mode`, async () => {
+      history = await saveReadOnlyLoadout(directory!, history, failures);
+      app = await openLoop(directory!, history, failures, [], {}, [], undefined, {
+        extensions: [],
+        tools: [],
+        defaultTools: true,
+        headless,
+      });
+      const bytes = await readFile(history.getSessionFile()!);
+      const stderr = mock.method(console, "error", () => {});
+      const stdout = mock.method(process.stdout, "write");
+      assert.deepEqual(app.session.getActiveToolNames(), ["read"]);
+
+      await app.session.prompt("/loop tests");
+
+      assert.deepEqual(app.session.getActiveToolNames(), ["read"]);
+      assert.deepEqual(await readFile(history.getSessionFile()!), bytes);
+      assert.equal(app.requests.length, 0);
+      assert.equal(app.summaryRequests.length, 0);
+      assert.equal(app.widget(), "");
+      if (headless) {
+        assert.equal(app.notifications.length, 0);
+        assert.match(String(stderr.mock.calls[0]?.arguments[0]), /signal_loop_success/);
+        assert.equal(stderr.mock.callCount(), 1);
+      } else {
+        assert.equal(stderr.mock.callCount(), 0);
+        assert.equal(app.notifications.length, 1);
+        assert.equal(app.notifications[0].type, "warning");
+        assert.match(app.notifications[0].message, /signal_loop_success/);
+      }
+      assert.equal(
+        stdout.mock.calls.some(({ arguments: [chunk] }) => typeof chunk === "string"),
+        false,
+        "missing-tool feedback cannot contaminate JSON stdout",
+      );
+    });
+  }
+
+  test("stops a restored active loop whose completion tool is unavailable", async () => {
+    history = await saveReadOnlyLoadout(directory!, history, failures);
+    history.appendCustomEntry("loop-state", {
+      active: true,
+      mode: "tests",
+      prompt: testsPrompt,
+      summary: "tests pass",
+      loopCount: 3,
+    });
+    app = await openLoop(
+      directory!,
+      history,
+      failures,
+      [assistantMessage("The user work is done.")],
+      {},
+      [],
+      undefined,
+      { extensions: [], tools: [], defaultTools: true },
+    );
+
+    await settlesWith(app.session, "The user work is done.", () =>
+      app!.session.prompt("Resume the ordinary user work."),
+    );
+
+    assert.deepEqual(app.session.getActiveToolNames(), ["read"]);
+    assert.equal(app.requests.length, 1);
+    assert.equal(app.summaryRequests.length, 0);
+    assert.equal(loopMessages(history).length, 0);
+    assert.equal(Math.max(...loopStates(history).map((entry) => entry.data.loopCount ?? 0)), 3);
+    assert.deepEqual(lastState(SessionManager.open(history.getSessionFile()!)), { active: false });
+    assert.equal(app.widget(), "");
+    assert.equal(app.notifications.at(-1)?.type, "warning");
+    assert.match(app.notifications.at(-1)?.message ?? "", /signal_loop_success/);
+  });
+
+  test("reload joins a mid-loop unavailable-tool stop without publishing abandoned work", async () => {
+    const first = heldReply();
+    const summary = heldReply({ holdAbort: true });
+    app = await openLoop(directory!, history, failures, [first], {}, [summary]);
+    const errors = mock.method(console, "error", () => {});
+    let reload: Promise<void> | undefined;
+    try {
+      await app.session.prompt("/loop tests");
+      await Promise.all([ready(first.started), ready(summary.started)]);
+      app.session.setActiveToolsByName(["read"]);
+      await settlesWith(app.session, "The user work is done.", () =>
+        first.finish(assistantMessage("The user work is done.")),
+      );
+      await ready(summary.cancelled);
+      assert.deepEqual(lastState(history), { active: false });
+      assert.deepEqual(app.session.getActiveToolNames(), ["read"]);
+      assert.equal(Math.max(...loopStates(history).map((entry) => entry.data.loopCount ?? 0)), 1);
+
+      let completed = false;
+      reload = app.session.reload().then(() => {
+        completed = true;
+      });
+      await nextCheckPhase();
+      assert.equal(completed, false, "reload must join the running dispatch cleanup");
+      summary.finish(assistantMessage("An abandoned summary must not publish."));
+      await reload;
+
+      assert.equal(app.requests.length, 1, "no unavailable-tool iteration reaches the model");
+      assert.equal(loopMessages(history).length, 1);
+      assert.equal(app.summaryRequests.length, 1, "no abandoned summary is restarted");
+      assert.deepEqual(lastState(SessionManager.open(history.getSessionFile()!)), {
+        active: false,
+      });
+      assert.equal(app.widget(), "");
+      assert.equal(
+        app.notifications.some(({ type }) => type === "warning"),
+        false,
+      );
+      assert.equal(errors.mock.callCount(), 0);
+    } finally {
+      first.finish({ ...assistantMessage(""), stopReason: "aborted" });
+      summary.finish({ ...assistantMessage(""), stopReason: "aborted" });
+      await reload;
+    }
+  });
+
   test("lets native tools and queued user work finish before repeating, then stops durably on success", async () => {
     const report = "Café checks: 7 passed, 1 squid-shaped failure.\n";
     const reportPath = path.join(history.getCwd(), "checks.txt");
@@ -781,6 +901,24 @@ describe("loop", { concurrency: false }, () => {
   });
 });
 
+/** Persist a real SDK tool checkpoint, then reopen it through the default-startup restoration path. */
+async function saveReadOnlyLoadout(
+  directory: string,
+  history: SessionManager,
+  failures: unknown[],
+) {
+  const seed = await openLoop(directory, history, failures, [
+    assistantMessage("Read-only selection saved."),
+  ]);
+  try {
+    seed.session.setActiveToolsByName(["read"]);
+    await seed.session.prompt("Remember the read-only tool selection.");
+  } finally {
+    await seed.dispose();
+  }
+  return SessionManager.open(history.getSessionFile()!);
+}
+
 /** Restore an idle active loop with enough old history to compact and one verbatim retained input. */
 function saveLoopForCompaction(history: SessionManager) {
   const retainedText = "Keep the café's eight umbrellas. 🐙";
@@ -813,7 +951,12 @@ async function openLoop(
     assistantMessage("loops until checks pass"),
   ],
   resolveAuth: ApiKeyAuth["resolve"] = async () => ({ auth: { apiKey: "fixture-only" } }),
-  fixture: { extensions: ExtensionFactory[]; tools: string[] } = { extensions: [], tools: [] },
+  fixture: {
+    extensions: ExtensionFactory[];
+    tools: string[];
+    defaultTools?: boolean;
+    headless?: boolean;
+  } = { extensions: [], tools: [] },
 ) {
   const requests: ModelRequest[] = [];
   const summaryRequests: ModelRequest[] = [];
@@ -867,7 +1010,9 @@ async function openLoop(
           sessionManager,
           sessionStartEvent,
           model: mainModel,
-          tools: ["read", "signal_loop_success", ...fixture.tools],
+          ...(fixture.defaultTools
+            ? {}
+            : { tools: ["read", "signal_loop_success", ...fixture.tools] }),
         })),
         services: { ...resources, diagnostics: [] },
         diagnostics: [],
@@ -902,19 +1047,23 @@ async function openLoop(
     let widget = "";
     const notifications: { message: string; type: string | undefined }[] = [];
     await session.bindExtensions({
-      mode: "tui",
-      uiContext: uiBoundary(
-        {
-          theme: session.extensionRunner.getUIContext().theme,
-          setWidget: (_key, content) => {
-            assert.ok(content === undefined || Array.isArray(content));
-            widget = (content ?? []).map(stripVTControlCharacters).join("\n");
-          },
-          notify: (message, type) => notifications.push({ message, type }),
-          ...dialogs,
-        },
-        failures,
-      ),
+      mode: fixture.headless ? "json" : "tui",
+      ...(fixture.headless
+        ? {}
+        : {
+            uiContext: uiBoundary(
+              {
+                theme: session.extensionRunner.getUIContext().theme,
+                setWidget: (_key, content) => {
+                  assert.ok(content === undefined || Array.isArray(content));
+                  widget = (content ?? []).map(stripVTControlCharacters).join("\n");
+                },
+                notify: (message, type) => notifications.push({ message, type }),
+                ...dialogs,
+              },
+              failures,
+            ),
+          }),
       onError: (error) => failures.push(error),
     });
     return {

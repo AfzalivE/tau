@@ -218,6 +218,8 @@ describe("Telegram prompt preflight", () => {
     await daemon.control("tick", { ms: 30_000 });
     await daemon.control("release-model");
     await daemon.waitRequest((request) => request.body.text === "Reply: queued owl");
+    // Model telemetry arrives over a separate channel from the reply.
+    await daemon.waitFixture((event) => event.type === "model" && event.text === "queued owl");
     assert.equal(daemon.requests.filter(isSendFailure).length, 0);
     assert.equal(daemon.fixtureEvents.filter((event) => event.type === "closed").length, 0);
     assert.equal(daemon.rpcCommands.filter((record) => record.type === "prompt").length, 2);

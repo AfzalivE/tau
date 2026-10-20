@@ -104,7 +104,11 @@ function extractSubmitToolPayloadFromEvent(event: unknown, submitTool: string): 
   if (!record || record.type !== "message_end") return null;
 
   const message = asRecord(record.message);
-  return message?.role === "toolResult" && message.toolName === submitTool ? message.details : null;
+  return message?.role === "toolResult" &&
+    message.toolName === submitTool &&
+    message.isError === false
+    ? message.details
+    : null;
 }
 
 export function parseJsonFromText(raw: string): unknown {
