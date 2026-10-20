@@ -31,11 +31,11 @@ jobs:
           const tag = process.env.GITHUB_REF_NAME;
           const packages = [
             'package.json',
-            'packages/tau-acp-client/package.json',
             'packages/tau-coding-agent/package.json',
             'packages/tau-all-agent/package.json',
             'packages/afzal-tau-all-agent/package.json',
             'packages/afzal-tau-non-coding-agent/package.json',
+            'packages/double-tau/package.json',
           ];
           for (const file of packages) {
             const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -62,7 +62,7 @@ jobs:
       - name: Publish packages
         run: |
           set -euo pipefail
-          for dir in dist/tau-acp-client dist/tau-coding-agent dist/tau-all-agent dist/afzal-tau-all-agent dist/afzal-tau-non-coding-agent; do
+          for dir in dist/tau-coding-agent dist/tau-all-agent dist/afzal-tau-all-agent dist/afzal-tau-non-coding-agent dist/double-tau; do
             echo "==> Publishing ${dir}"
             (cd "${dir}" && npm publish --provenance --access public)
           done

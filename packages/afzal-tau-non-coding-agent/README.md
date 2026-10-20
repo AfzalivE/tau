@@ -49,10 +49,7 @@ This package intentionally matches the `afzal-tau-all-agent` extension manifest.
 | `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
 | `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
-| `code-links`        | `/code-links`        | Make file paths and code symbols in the transcript open in your editor. Requires Universal Ctags.                         |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
-| `raw`               | `/raw`, `alt+r`      | Open the full active-branch transcript in terminal scrollback for copying.                                                |
-| `converge`          | `/converge`          | Run multiple planner personas and synthesize one recommended plan.                                                        |
 | `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`    | —                    | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    | Status bar PR number and link for the current branch.                                                                     |
@@ -64,7 +61,6 @@ This package intentionally matches the `afzal-tau-all-agent` extension manifest.
 | `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level bash sandboxing plus filesystem guardrails for native Pi file tools.                                             |
-| `spotlight`         | `/spotlight`         | Mirror a linked worktree into the main worktree while you work elsewhere.                                                 |
 | `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
 | `subagent`          | —                    | Delegate work to background Pi agents and follow up with them.                                                            |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |

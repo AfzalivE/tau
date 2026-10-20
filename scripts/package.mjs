@@ -9,11 +9,11 @@ const packagesDir = path.join(rootDir, "packages");
 const distDir = path.join(rootDir, "dist");
 
 const packageNames = [
-  "tau-acp-client",
   "tau-coding-agent",
   "tau-all-agent",
   "afzal-tau-all-agent",
   "afzal-tau-non-coding-agent",
+  "double-tau",
 ];
 const resourceTypes = ["extensions", "skills", "prompts", "themes"];
 

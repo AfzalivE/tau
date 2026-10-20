@@ -1,0 +1,70 @@
+{
+  "name": "double-tau",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Afzal's own Pi extensions and skills: ACP client, code links, plan convergence, raw transcript view, worktree spotlight, and workflow skills",
+  "keywords": [
+    "acp-client",
+    "agent-client-protocol",
+    "agent-tools",
+    "claude",
+    "codex",
+    "ctags",
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "pi-skill",
+    "planning",
+    "todoist",
+    "worktree"
+  ],
+  "homepage": "https://github.com/AfzalivE/tau#readme",
+  "bugs": {
+    "url": "https://github.com/AfzalivE/tau/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AfzalivE/tau.git",
+    "directory": "packages/double-tau"
+  },
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.60.0",
+    "@agentclientprotocol/codex-acp": "^1.1.5",
+    "@agentclientprotocol/sdk": "^1.2.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "../../extensions/acp-client/index.ts",
+      "../../extensions/code-links/index.ts",
+      "../../extensions/converge.ts",
+      "../../extensions/raw/index.ts",
+      "../../extensions/spotlight/index.ts"
+    ],
+    "skills": [
+      "../../skills/address-pr-comments",
+      "../../skills/cald",
+      "../../skills/dream",
+      "../../skills/fix-ci",
+      "../../skills/gh",
+      "../../skills/git-rebase-check",
+      "../../skills/git-worktree",
+      "../../skills/material-3",
+      "../../skills/ms-openapi-explorer",
+      "../../skills/pup/datadog/dashboards",
+      "../../skills/qmd",
+      "../../skills/review-breaker",
+      "../../skills/td",
+      "../../skills/tdc"
+    ]
+  }
+}

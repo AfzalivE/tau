@@ -6,11 +6,11 @@ It takes Pi's minimal core and turns it into an opinionated, complete, polished 
 
 | Package                      | Purpose                                                                |
 | ---------------------------- | ---------------------------------------------------------------------- |
-| `tau-acp-client`             | Standalone ACP client package for Claude and Codex agents.             |
 | `tau-coding-agent`           | Coding package.                                                        |
 | `tau-all-agent`              | Full package.                                                          |
 | `afzal-tau-all-agent`        | Full fork-specific package except the `memory` extension.              |
 | `afzal-tau-non-coding-agent` | Local-model knowledge-work package for insights from non-code sources. |
+| `double-tau`                 | Afzal's own extensions and skills, including the ACP client.           |
 
 Fork-specific package/configuration details are grouped under [Fork-specific additions](#fork-specific-additions) below.
 
@@ -19,8 +19,6 @@ Fork-specific package/configuration details are grouped under [Fork-specific add
 [Install Pi](https://pi.dev/docs/latest#quick-start), and then:
 
 ```bash
-pi install npm:tau-acp-client
-# or
 pi install npm:tau-coding-agent
 # or
 pi install npm:tau-all-agent
@@ -28,9 +26,11 @@ pi install npm:tau-all-agent
 pi install npm:afzal-tau-all-agent
 # or
 pi install npm:afzal-tau-non-coding-agent
+# or
+pi install npm:double-tau
 ```
 
-Need the full fork-specific package? `afzal-tau-all-agent` bundles the base Tau package contents plus the fork-specific extensions and skills listed below, but intentionally excludes the `memory` extension.
+Need the full fork-specific package? `afzal-tau-all-agent` bundles the base Tau package contents with the fork's sandbox changes, but intentionally excludes the `memory` extension. Install `double-tau` next to it for the extensions and skills in this fork.
 
 Project-local install allows you to pin Tau for everyone working on the project:
 
@@ -39,8 +39,6 @@ pi install -l npm:tau-coding-agent
 ```
 
 ## Extensions
-
-The standalone `tau-acp-client` package provides the `acp-client` extension; the Tau bundle packages below do not include it.
 
 | Extension                                     | Command              | Coding | All | Description                                                                                                               |
 | --------------------------------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
@@ -157,11 +155,11 @@ Runtime debug logging is off by default. Use `/sandbox debug on` or `/sandbox de
 npm install
 npm run check
 
-pi -e ./packages/tau-acp-client
 pi -e ./packages/tau-coding-agent
 pi -e ./packages/tau-all-agent
 pi -e ./packages/afzal-tau-all-agent
 pi -e ./packages/afzal-tau-non-coding-agent
+pi -e ./packages/double-tau
 ```
 
 The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. Installation applies [version-pinned sandbox runtime patches](patches/README.md), using Git. `npm run package` stages self-contained publishable packages under `dist/`, including private copies of the patched runtime.
@@ -176,11 +174,11 @@ All publishable packages share the same version. Release tags use the plain vers
 
 The GitHub Actions publish workflow stages packages under `dist/` and publishes in this order:
 
-1. `tau-acp-client`
-2. `tau-coding-agent`
-3. `tau-all-agent`
-4. `afzal-tau-all-agent`
-5. `afzal-tau-non-coding-agent`
+1. `tau-coding-agent`
+2. `tau-all-agent`
+3. `afzal-tau-all-agent`
+4. `afzal-tau-non-coding-agent`
+5. `double-tau`
 
 Published packages contain their selected Tau resources and the patched sandbox runtime. Consumers do not need to run patch scripts.
 
@@ -192,7 +190,7 @@ Fork-specific changes are recorded in [CHANGELOG_FORK.md](CHANGELOG_FORK.md). [C
 
 ### Package
 
-`afzal-tau-all-agent` bundles the base Tau package contents plus the fork-specific extensions and skills listed below, but intentionally excludes the `memory` extension.
+`afzal-tau-all-agent` bundles the base Tau package contents with the fork's sandbox changes, but intentionally excludes the `memory` extension. The extensions and skills listed below ship in `double-tau`.
 
 Install it with:
 
@@ -259,10 +257,15 @@ The value is passed directly to Pi’s `--model` option. It supports `provider/m
 
 ### Extensions in this fork
 
-Bundled in `afzal-tau-all-agent`.
+Bundled in `double-tau`:
+
+```bash
+pi install npm:double-tau
+```
 
 | Extension    | Command         | Description                                                                |
 | ------------ | --------------- | -------------------------------------------------------------------------- |
+| `acp-client` | `/acp`          | Use Claude and Codex agents over the Agent Client Protocol.                |
 | `code-links` | `/code-links`   | Open file paths and code symbols from the transcript in your editor.       |
 | `converge`   | `/converge`     | Run multiple planner personas and synthesize one recommended plan.         |
 | `raw`        | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
@@ -272,7 +275,7 @@ Code Links turns `src/Foo.kt:42`, `Foo.kt`, `Foo.bar()`, and `` `Foo` `` in fini
 
 ### Skills in this fork
 
-Bundled in `afzal-tau-all-agent`.
+Bundled in `double-tau`.
 
 | Skill                    | Description                                                                                |
 | ------------------------ | ------------------------------------------------------------------------------------------ |

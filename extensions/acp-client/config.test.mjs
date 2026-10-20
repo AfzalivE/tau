@@ -14,7 +14,7 @@ const EXPECTED_ENTRY_POINTS = {
 };
 
 test("default agents launch their installed adapters directly", () => {
-  const home = mkdtempSync(path.join(tmpdir(), "tau-acp-client-"));
+  const home = mkdtempSync(path.join(tmpdir(), "acp-client-"));
 
   try {
     const script = `
