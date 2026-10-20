@@ -13,6 +13,8 @@ type Tag = {
   line: number;
   kind: string;
   scope?: string;
+  /** The receiver type of a Kotlin extension, which ctags scopes to the package instead. */
+  receiver?: string;
   indent: number;
   owner?: Tag;
 };
@@ -84,7 +86,7 @@ export class CodeIndex {
 
   /** Bare names resolve only when allowed, because prose words often match short symbols. */
   resolve(reference: string, { allowBareName }: { allowBareName: boolean }): Location | undefined {
-    const text = reference.replace(/\(\)$/, "");
+    const text = reference.replace(/\([^()]*\)$/, "");
     const file = /^(.+?)(?::(\d+)(?::(\d+))?)?$/.exec(text);
     const filePath = file && this.findFile(file[1]);
     if (filePath) return { path: filePath, line: toNumber(file[2]), column: toNumber(file[3]) };
@@ -161,6 +163,7 @@ export class CodeIndex {
           line: entry.line,
           kind: entry.kind,
           scope: entry.scope,
+          receiver: receiverOf(entry.name, entry.pattern ?? ""),
           indent: /^\/\^([ \t]*)/.exec(entry.pattern ?? "")?.[1].length ?? 0,
         },
       ];
@@ -237,7 +240,17 @@ function isMemberOf(tag: Tag, container: string) {
   const owner = tag.owner?.name === "Companion" ? tag.owner.owner : tag.owner;
   const scope = tag.scope?.split(/::|\./) ?? [];
   const scopeOwner = scope.at(-1) === "Companion" ? scope.at(-2) : scope.at(-1);
-  return owner?.name === container || scopeOwner === container;
+  return owner?.name === container || scopeOwner === container || tag.receiver === container;
+}
+
+// Kotlin declares an extension as `fun <T> a.b.Type<T>?.name`. The receiver's simple name is
+// what a reference such as `Type.name()` uses.
+function receiverOf(name: string, pattern: string) {
+  if (!/^\w+$/.test(name)) return undefined;
+  const declaration = new RegExp(
+    `\\b(?:fun|val|var)\\s+(?:<[^=(]*?>\\s+)?([\\w.]+)(?:<[^=(]*>)?\\??\\.${name}\\b`,
+  );
+  return declaration.exec(pattern)?.[1].split(".").at(-1);
 }
 
 // Overloads share a file, so the first definition in that file is a correct target.

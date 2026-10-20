@@ -42,6 +42,17 @@ const sources = {
     "}",
   ],
   "app/src/Buoy.kt": ["class Buoy {", "    fun shine() {}", "}"],
+  "app/src/Beacon.kt": [
+    "package harbor",
+    "",
+    "fun Lighthouse.dim(level: Int) {}",
+    "",
+    "internal fun <T : Any> Lighthouse?.signal(message: T): T = message",
+    "",
+    "val Lighthouse.range: Int",
+    "    get() = 12",
+  ],
+  "app/src/Fog.kt": ["class Fog {", "    fun dim() {}", "}"],
 };
 
 // Universal Ctags 6.2.1 output for the sources. Interface delegation drops the class scope of
@@ -80,6 +91,37 @@ const buoyShine: RecordedTag = {
   kind: "method",
   scope: "Buoy",
 };
+
+// Universal Ctags 6.2.1 scopes Kotlin extensions to their package, so the receiver comes from
+// the declaration.
+const beaconTags: RecordedTag[] = [
+  { name: "harbor", pattern: "/^package harbor$/", line: 1, kind: "package" },
+  {
+    name: "dim",
+    pattern: "/^fun Lighthouse.dim(level: Int) {}$/",
+    line: 3,
+    kind: "method",
+    scope: "harbor",
+  },
+  {
+    name: "signal",
+    pattern: "/^internal fun <T : Any> Lighthouse?.signal(message: T): T = message$/",
+    line: 5,
+    kind: "method",
+    scope: "harbor",
+  },
+  {
+    name: "range",
+    pattern: "/^val Lighthouse.range: Int$/",
+    line: 7,
+    kind: "constant",
+    scope: "harbor",
+  },
+];
+const fogTags: RecordedTag[] = [
+  { name: "Fog", pattern: "/^class Fog {$/", line: 1, kind: "class" },
+  { name: "dim", pattern: "/^    fun dim() {}$/", line: 2, kind: "method", scope: "Fog" },
+];
 
 const finished: MarkdownTransformContext = {
   messageType: "assistant",
@@ -121,6 +163,8 @@ describe("code-links", { concurrency: false }, () => {
     await bins.record({
       "app/src/Lighthouse.kt": lighthouseTags,
       "app/src/Buoy.kt": [buoyClass, buoyShine],
+      "app/src/Beacon.kt": beaconTags,
+      "app/src/Fog.kt": fogTags,
     });
     // BSD ctags comes first, as with Xcode's /usr/bin/ctags before Homebrew on macOS.
     process.env.PATH = [bins.bsd, bins.universal, bins.git].join(path.delimiter);
@@ -212,6 +256,24 @@ describe("code-links", { concurrency: false }, () => {
     assert.match(next.render("Lighthouse.build()"), /\(idea:\/\/open\?file=/);
   });
 
+  test("links Kotlin extensions through their receiver type", async () => {
+    const pi = await start(repo);
+    const beacon = path.join(repo, "app/src/Beacon.kt");
+
+    assert.equal(
+      pi.render(
+        "Lighthouse.dim(level) dims it, `Lighthouse.signal(message)` and `Lighthouse.range` " +
+          "too, and Fog.dim() thins out.",
+      ),
+      `[Lighthouse.dim](zed://file${beacon}:3)(level) dims it, ` +
+        `[\`Lighthouse.signal(message)\`](zed://file${beacon}:5) and ` +
+        `[\`Lighthouse.range\`](zed://file${beacon}:7) too, and ` +
+        `[Fog.dim()](zed://file${path.join(repo, "app/src/Fog.kt")}:2) thins out.`,
+    );
+    // Both files define dim, so the bare name stays plain.
+    assert.equal(pi.render("`dim`"), "`dim`");
+  });
+
   // Each editor documents its own URL format; these are the exact links for a line and column.
   for (const [editor, url] of [
     ["zed", (file: string) => `zed://file${file}:2:5`],
@@ -251,7 +313,12 @@ describe("code-links", { concurrency: false }, () => {
       edits: [{ oldText: "    fun shine() {}\n", newText: "" }],
     };
     const result = await createEditTool(repo).execute("calm-seas", input);
-    await bins.record({ "app/src/Lighthouse.kt": lighthouseTags, "app/src/Buoy.kt": [buoyClass] });
+    await bins.record({
+      "app/src/Lighthouse.kt": lighthouseTags,
+      "app/src/Buoy.kt": [buoyClass],
+      "app/src/Beacon.kt": beaconTags,
+      "app/src/Fog.kt": fogTags,
+    });
     await pi.observe("redraw", () =>
       pi.runner.emitToolResult({
         type: "tool_result",
@@ -301,7 +368,7 @@ describe("code-links", { concurrency: false }, () => {
     assert.deepEqual(quiet.notices, []);
   });
 
-  test("resolves delegated Kotlin members with an installed Universal Ctags", async (t) => {
+  test("resolves delegated Kotlin members and extensions with an installed Universal Ctags", async (t) => {
     const installed = await findUniversalCtags(originalPath);
     if (!installed) {
       t.skip("Universal Ctags is not installed");
@@ -310,9 +377,10 @@ describe("code-links", { concurrency: false }, () => {
     process.env.PATH = [path.dirname(installed), bins.git].join(path.delimiter);
     const pi = await start(repo);
     assert.equal(
-      pi.render("Lighthouse.shine() and `Lighthouse.build()`"),
-      `[Lighthouse.shine()](zed://file${path.join(repo, "app/src/Lighthouse.kt")}:4) and ` +
-        `[\`Lighthouse.build()\`](zed://file${path.join(repo, "app/src/Lighthouse.kt")}:15)`,
+      pi.render("Lighthouse.shine(), `Lighthouse.build()`, and `Lighthouse.signal(message)`"),
+      `[Lighthouse.shine()](zed://file${path.join(repo, "app/src/Lighthouse.kt")}:4), ` +
+        `[\`Lighthouse.build()\`](zed://file${path.join(repo, "app/src/Lighthouse.kt")}:15), and ` +
+        `[\`Lighthouse.signal(message)\`](zed://file${path.join(repo, "app/src/Beacon.kt")}:5)`,
     );
   });
 

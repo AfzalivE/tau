@@ -24,14 +24,14 @@ pi install -l npm:pi-code-links
 
 In finished user and assistant messages, these references become links:
 
-| Reference       | Opens                                                    |
-| --------------- | -------------------------------------------------------- |
-| `src/Foo.kt:42` | The file at line 42                                      |
-| `Foo.kt`        | The file, when only one file has that name               |
-| `Foo.bar()`     | The definition of `bar` in `Foo`; `::` and `#` also work |
-| `` `Foo` ``     | The definition of `Foo`, inside a code span              |
+| Reference       | Opens                                                                                                    |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| `src/Foo.kt:42` | The file at line 42                                                                                      |
+| `Foo.kt`        | The file, when only one file has that name                                                               |
+| `Foo.bar()`     | The definition of `bar` in `Foo`, including a Kotlin extension function on `Foo`; `::` and `#` also work |
+| `` `Foo` ``     | The definition of `Foo`, inside a code span                                                              |
 
-File references need an extension. Bare names in prose, names defined in more than one file, fenced code blocks, and existing links stay as they are. Only the rendered text changes; the session keeps the original messages.
+Inside a code span, a call such as `` `Foo.bar(baz)` `` also links. File references need an extension. Bare names in prose, names defined in more than one file, fenced code blocks, and existing links stay as they are. Only the rendered text changes; the session keeps the original messages.
 
 When a session starts, the extension indexes the files that Git tracks, plus untracked files that Git does not ignore. It updates a file's entries after the `edit` or `write` tool changes it.
 

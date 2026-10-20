@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Linked `code-links` references to Kotlin extension functions and properties through their receiver type, and linked code-span calls that include arguments.
 - Avoided false macOS shell-not-found errors with a version-pinned sandbox-runtime patch. ([issue #548](https://github.com/anthropics/sandbox-runtime/issues/548), [PR #567](https://github.com/anthropics/sandbox-runtime/pull/567))
 - Allowed native file tools to create permitted files through macOS temporary-directory aliases.
 
