@@ -28,6 +28,11 @@ async function buildPackage(packageName) {
   await mkdir(outputDir, { recursive: true });
   await cp(path.join(sourceDir, "README.md"), path.join(outputDir, "README.md"));
   await cp(await getLicensePath(sourceDir), path.join(outputDir, "LICENSE"));
+  // A separately versioned package ships its own release notes.
+  const hasChangelog = await exists(path.join(sourceDir, "CHANGELOG.md"));
+  if (hasChangelog) {
+    await cp(path.join(sourceDir, "CHANGELOG.md"), path.join(outputDir, "CHANGELOG.md"));
+  }
 
   for (const resourceType of resourceTypes) {
     await copyResources(pi[resourceType] ?? [], outputDir);
@@ -44,6 +49,7 @@ async function buildPackage(packageName) {
     files: [
       ...resourceTypes.filter((resourceType) => pi[resourceType]?.length),
       "README.md",
+      ...(hasChangelog ? ["CHANGELOG.md"] : []),
       "LICENSE",
     ],
     pi,
