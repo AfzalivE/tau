@@ -204,13 +204,43 @@ describe("code-links", { concurrency: false }, () => {
     await pi.command("vim");
     assert.deepEqual(pi.notices.at(-1), [
       "error",
-      'Unknown editor "vim". Use one of: zed, vscode, cursor, studio, file',
+      'Unknown editor "vim". Use one of: zed, vscode, vscode-insiders, vscodium, cursor, idea, studio, textmate, macvim, nova, file',
     ]);
 
     const next = await start(repo);
     await settled(children);
     assert.match(next.render("Lighthouse.build()"), /\(idea:\/\/open\?file=/);
   });
+
+  // Each editor documents its own URL format; these are the exact links for a line and column.
+  for (const [editor, url] of [
+    ["zed", (file: string) => `zed://file${file}:2:5`],
+    ["vscode", (file: string) => `vscode://file${file}:2:5`],
+    ["vscode-insiders", (file: string) => `vscode-insiders://file${file}:2:5`],
+    ["vscodium", (file: string) => `vscodium://file${file}:2:5`],
+    ["cursor", (file: string) => `cursor://file${file}:2:5`],
+    ["idea", (file: string) => `idea://open?file=${encodeURIComponent(file)}&line=2&column=5`],
+    ["studio", (file: string) => `idea://open?file=${encodeURIComponent(file)}&line=2&column=5`],
+    [
+      "textmate",
+      (file: string) => `txmt://open/?url=${encodeURIComponent(`file://${file}`)}&line=2&column=5`,
+    ],
+    [
+      "macvim",
+      (file: string) => `mvim://open?url=${encodeURIComponent(`file://${file}`)}&line=2&column=5`,
+    ],
+    ["nova", (file: string) => `nova://open?path=${encodeURIComponent(file)}&line=2:5`],
+    ["file", (file: string) => `file://${file}`],
+  ] as const) {
+    test(`links a file position for ${editor}`, async () => {
+      const pi = await start(repo);
+      await pi.command(editor);
+      assert.equal(
+        pi.render("app/src/Buoy.kt:2:5"),
+        `[app/src/Buoy.kt:2:5](${url(path.join(repo, "app/src/Buoy.kt"))})`,
+      );
+    });
+  }
 
   test("refreshes an edited file and redraws the transcript", async () => {
     const pi = await start(repo);

@@ -13,12 +13,24 @@ const editors = {
     `zed://file${encodeURI(file)}${position(line, column)}`,
   vscode: ({ path: file, line, column }: Location) =>
     `vscode://file${encodeURI(file)}${position(line, column)}`,
+  "vscode-insiders": ({ path: file, line, column }: Location) =>
+    `vscode-insiders://file${encodeURI(file)}${position(line, column)}`,
+  vscodium: ({ path: file, line, column }: Location) =>
+    `vscodium://file${encodeURI(file)}${position(line, column)}`,
   cursor: ({ path: file, line, column }: Location) =>
     `cursor://file${encodeURI(file)}${position(line, column)}`,
-  // JetBrains IDEs, including Android Studio, register the idea scheme.
-  studio: ({ path: file, line, column }: Location) =>
-    `idea://open?file=${encodeURIComponent(file)}${query("line", line)}${query("column", column)}`,
-  file: ({ path: file }: Location) => `file://${encodeURI(file)}`,
+  // JetBrains IDEs, including Android Studio, all register the idea scheme. macOS sends it to
+  // one default handler, so idea and studio name the IDE in use but open the same link.
+  idea: jetbrains,
+  studio: jetbrains,
+  textmate: ({ path: file, line, column }: Location) =>
+    `txmt://open/?url=${encodeURIComponent(fileUrl(file))}${query("line", line)}${query("column", column)}`,
+  macvim: ({ path: file, line, column }: Location) =>
+    `mvim://open?url=${encodeURIComponent(fileUrl(file))}${query("line", line)}${query("column", column)}`,
+  // Nova takes the column after the line, as line=4:2.
+  nova: ({ path: file, line, column }: Location) =>
+    `nova://open?path=${encodeURIComponent(file)}${line ? `&line=${line}${column ? `:${column}` : ""}` : ""}`,
+  file: ({ path: file }: Location) => fileUrl(file),
 };
 
 type Editor = keyof typeof editors;
@@ -143,6 +155,14 @@ function configPath() {
 
 function isEditor(value: unknown): value is Editor {
   return typeof value === "string" && (EDITORS as string[]).includes(value);
+}
+
+function jetbrains({ path: file, line, column }: Location) {
+  return `idea://open?file=${encodeURIComponent(file)}${query("line", line)}${query("column", column)}`;
+}
+
+function fileUrl(file: string) {
+  return `file://${encodeURI(file)}`;
 }
 
 function position(line: number | undefined, column: number | undefined) {

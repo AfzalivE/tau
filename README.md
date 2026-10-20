@@ -236,7 +236,7 @@ Bundled in `double-tau`.
 | `raw`        | `/raw`, `alt+r` | Open the full active-branch transcript in terminal scrollback for copying. |
 | `spotlight`  | `/spotlight`    | Mirror a linked worktree into the main worktree while you work elsewhere.  |
 
-Code Links turns `src/Foo.kt:42`, `Foo.kt`, `Foo.bar()`, and `` `Foo` `` in finished user and assistant messages into terminal hyperlinks. It indexes the Git working tree with [Universal Ctags](https://ctags.io) at session start and updates a file's entries after `edit` or `write`. Bare names in prose and names defined in more than one file stay plain text. Links need a terminal with OSC 8 hyperlink support. `/code-links` chooses `zed` (default), `vscode`, `cursor`, `studio` (Android Studio and other JetBrains IDEs, through `idea://`), or `file`, saved in `code-links.json` in the Pi agent directory.
+Code Links turns `src/Foo.kt:42`, `Foo.kt`, `Foo.bar()`, and `` `Foo` `` in finished user and assistant messages into terminal hyperlinks. It indexes the Git working tree with [Universal Ctags](https://ctags.io) at session start and updates a file's entries after `edit` or `write`. Bare names in prose and names defined in more than one file stay plain text. Links need a terminal with OSC 8 hyperlink support. `/code-links` chooses `zed` (default), `vscode`, `vscode-insiders`, `vscodium`, `cursor`, `idea` or `studio` (IntelliJ IDEA, Android Studio, and other JetBrains IDEs, through `idea://`), `textmate`, `macvim`, `nova`, or `file`, saved in `code-links.json` in the Pi agent directory.
 
 ### Skills in this fork
 
